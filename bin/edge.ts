@@ -15,7 +15,13 @@ const blob = new S3Blob({
 });
 const meta = new MetaStore(blob);
 
-const app = createEdge({ meta, blob, baseDomain: cfg.baseDomain });
+const app = createEdge({
+  meta,
+  blob,
+  baseDomain: cfg.baseDomain,
+  diskCacheDir: cfg.edgeDiskCacheDir,
+  diskCacheBytes: cfg.edgeDiskCacheBytes,
+});
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-edge listening on :${cfg.httpPort} for *.${cfg.baseDomain}`);
 });

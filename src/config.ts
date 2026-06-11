@@ -16,6 +16,8 @@ export interface Config {
   maxUploadBytes: number;
   maxFiles: number;
   keepVersions: number;
+  edgeDiskCacheDir?: string; // edge: where to cache asset bytes on disk (off if unset)
+  edgeDiskCacheBytes: number; // edge: disk cache budget
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -45,5 +47,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxUploadBytes: Number(env.DROP_MAX_UPLOAD_BYTES ?? String(100 * 1024 * 1024)),
     maxFiles: Number(env.DROP_MAX_FILES ?? "5000"),
     keepVersions: Number(env.DROP_KEEP_VERSIONS ?? "10"),
+    edgeDiskCacheDir: env.DROP_EDGE_DISK_CACHE || undefined,
+    edgeDiskCacheBytes: Number(env.DROP_EDGE_DISK_CACHE_BYTES ?? String(5 * 1024 * 1024 * 1024)),
   };
 }

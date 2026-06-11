@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { posix } from "node:path";
 import type { BlobStore } from "../blob/types.ts";
 import { MetaStore } from "../metastore/store.ts";
+import { DiskCache } from "./disk-cache.ts";
 
 export interface EdgeDeps {
   meta: MetaStore;
@@ -9,10 +10,12 @@ export interface EdgeDeps {
   baseDomain: string;
   now?: () => number;
   pointerTtlMs?: number;
-  /** Total in-memory byte-cache budget (default 256 MiB). */
-  cacheBytes?: number;
-  /** Don't cache objects larger than this (default 5 MiB); they stream. */
+  /** Don't disk-cache objects larger than this (default 25 MiB); they stream. */
   maxObjectBytes?: number;
+  /** Optional disk cache directory (node-local / per-pod). Off if unset → assets stream from S3. */
+  diskCacheDir?: string;
+  /** Disk cache budget in bytes (default 5 GiB). */
+  diskCacheBytes?: number;
 }
 
 interface CacheEntry {
@@ -26,44 +29,15 @@ interface Cached {
   contentEncoding?: string;
 }
 
-/** Size-bounded LRU of immutable file bytes (keyed by versioned S3 path). */
-class ByteLRU {
-  private map = new Map<string, Cached>();
-  private bytes = 0;
-  constructor(private maxBytes: number) {}
-  get(k: string): Cached | undefined {
-    const v = this.map.get(k);
-    if (v) {
-      this.map.delete(k);
-      this.map.set(k, v); // mark most-recently-used
-    }
-    return v;
-  }
-  set(k: string, v: Cached): void {
-    const size = v.body.byteLength;
-    if (size > this.maxBytes) return;
-    const prev = this.map.get(k);
-    if (prev) {
-      this.bytes -= prev.body.byteLength;
-      this.map.delete(k);
-    }
-    this.map.set(k, v);
-    this.bytes += size;
-    while (this.bytes > this.maxBytes) {
-      const oldest = this.map.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.bytes -= this.map.get(oldest)!.body.byteLength;
-      this.map.delete(oldest);
-    }
-  }
-}
-
 export function createEdge(d: EdgeDeps) {
   const now = d.now ?? (() => Date.now());
   const ttl = d.pointerTtlMs ?? 10_000;
-  const cache = new Map<string, CacheEntry>(); // name → currentVersion
-  const fileCache = new ByteLRU(d.cacheBytes ?? 256 * 1024 * 1024);
-  const maxObjectBytes = d.maxObjectBytes ?? 5 * 1024 * 1024;
+  // Memory holds ONLY small per-site pointers (name → currentVersion). Static
+  // asset BYTES never live in process memory — they go to the disk cache, where
+  // the OS page cache keeps hot files at RAM speed without risking heap OOM.
+  const cache = new Map<string, CacheEntry>();
+  const maxObjectBytes = d.maxObjectBytes ?? 25 * 1024 * 1024;
+  const disk = d.diskCacheDir ? new DiskCache(d.diskCacheDir, d.diskCacheBytes ?? 5 * 1024 * 1024 * 1024) : null;
 
   async function currentVersion(name: string): Promise<string | null> {
     const hit = cache.get(name);
@@ -103,18 +77,24 @@ export function createEdge(d: EdgeDeps) {
 
   async function serve(prefix: string, key: string): Promise<Response | null> {
     const full = prefix + key;
-    const hit = fileCache.get(full);
-    if (hit) return respond(hit); // served from edge memory — no S3 hit
 
+    // Disk cache (if enabled). Hot files are served from the OS page cache (RAM
+    // speed); the versioned path is immutable, so it never goes stale.
+    if (disk) {
+      const dh = await disk.get(full);
+      if (dh) return respond(dh);
+    }
+
+    // Origin: S3.
     const obj = await d.blob.get(full);
     if (!obj) return null;
 
-    // Cache small objects in memory; the versioned path is immutable so it never
-    // goes stale (a deploy mints a new path). Stream large objects uncached.
-    if (obj.size != null && obj.size <= maxObjectBytes) {
+    // Write small objects to the disk cache, then serve. Stream large objects
+    // (or, with no disk cache configured, everything) straight through.
+    if (disk && obj.size != null && obj.size <= maxObjectBytes) {
       const body = new Uint8Array(await new Response(obj.body).arrayBuffer());
       const entry: Cached = { body, contentType: obj.contentType, contentEncoding: obj.contentEncoding };
-      fileCache.set(full, entry);
+      void disk.set(full, entry);
       return respond(entry);
     }
     const headers: Record<string, string> = { "content-type": obj.contentType };

@@ -45,7 +45,12 @@ test("unknown site -> 404", async () => {
   expect(res.status).toBe(404);
 });
 
-test("caches file bytes in edge memory — second request skips S3", async () => {
+test("disk cache: second request (even a fresh instance) skips S3", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "drop-edge-cache-"));
+
   const blob = new FakeBlob();
   const meta = new MetaStore(blob);
   await meta.claimSite("myapp", "alice@paytm.com");
@@ -59,10 +64,15 @@ test("caches file bytes in edge memory — second request skips S3", async () =>
     if (k.includes("/files/")) fileGets++;
     return orig(k);
   };
-  const app = createEdge({ meta, blob, baseDomain: "drop.company.com" });
-  const hit = () => app.request("/app.js", { headers: { host: "myapp.drop.company.com" } });
 
-  expect((await hit()).status).toBe(200);
-  expect((await hit()).status).toBe(200);
-  expect(fileGets).toBe(1); // fetched from S3 once, served from edge cache after
+  const hit = (app: any) => app.request("/app.js", { headers: { host: "myapp.drop.company.com" } });
+  const a = createEdge({ meta, blob, baseDomain: "drop.company.com", diskCacheDir: dir });
+  expect((await hit(a)).status).toBe(200); // S3 → disk
+  await Bun.sleep(20); // let the async disk write settle
+  // a brand-new edge instance (simulates restart / another replica on same volume)
+  const b = createEdge({ meta, blob, baseDomain: "drop.company.com", diskCacheDir: dir });
+  const r = await hit(b);
+  expect(r.status).toBe(200);
+  expect(await r.text()).toBe("console.log(1)");
+  expect(fileGets).toBe(1); // served from disk the 2nd time — no extra S3 read
 });

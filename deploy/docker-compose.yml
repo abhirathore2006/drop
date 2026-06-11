@@ -46,8 +46,12 @@ services:
       DROP_S3_REGION: "us-east-1"
       DROP_S3_KEY_ID: "test"
       DROP_S3_SECRET: "test"
+      DROP_EDGE_DISK_CACHE: "/cache"
+    volumes:
+      - edge-cache:/cache
     ports:
       - "8474:8080"
 
 volumes:
   floci-data:
+  edge-cache:

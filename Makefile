@@ -77,7 +77,7 @@ start: floci
 	@mkdir -p $(RUN)
 	@$(NODE) build.mjs >/dev/null && echo "✓ built bundles"
 	@$(LOADENV) $(ENV) DROP_HTTP_PORT=$(API_PORT)  nohup $(NODE) dist/api.js  > $(RUN)/api.log  2>&1 & echo $$! > $(RUN)/api.pid
-	@$(LOADENV) $(ENV) DROP_HTTP_PORT=$(EDGE_PORT) nohup $(NODE) dist/edge.js > $(RUN)/edge.log 2>&1 & echo $$! > $(RUN)/edge.pid
+	@$(LOADENV) $(ENV) DROP_HTTP_PORT=$(EDGE_PORT) DROP_EDGE_DISK_CACHE=$(RUN)/edge-cache nohup $(NODE) dist/edge.js > $(RUN)/edge.log 2>&1 & echo $$! > $(RUN)/edge.pid
 	@for i in $$(seq 1 30); do curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && break; sleep 1; done
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && echo "✓ api    http://localhost:$(API_PORT)" || { echo "✗ api failed — see $(RUN)/api.log"; tail -5 $(RUN)/api.log; exit 1; }
 	@echo "✓ edge   http://localhost:$(EDGE_PORT)  (routes by  Host: <name>.$(BASE_DOMAIN))"

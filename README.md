@@ -162,6 +162,10 @@ Storage + edge:
   S3-compatible store with conditional-write support.
 - Point wildcard DNS `*.drop.company.com` + wildcard TLS at the edge; keep the edge
   reachable only on the internal network.
+- **Edge caching:** set `DROP_EDGE_DISK_CACHE=/var/cache/drop` (node-local / per-pod
+  dir) so the edge caches asset bytes on disk — process memory only holds the small
+  version pointer, never asset bytes, so it scales to many sites without OOM. The OS
+  page cache keeps hot files at RAM speed. (CloudFront optional in front.)
 
 **Clients (CLI + MCP) need only `DROP_API`** — `drop login` / the MCP `login` tool drive
 the server flow and store the returned session token.
