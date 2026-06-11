@@ -151,6 +151,9 @@ footer{padding:44px 0 70px;color:var(--dim);font-family:var(--mono);font-size:12
   shareable link <i>right now</i> — but emailing a file is clumsy, and a public host would leak
   confidential work. Drop is where these artifacts land: an agent (or a person) publishes the folder
   and instantly gets a confidential internal URL, with no deploy pipeline and nothing leaving the network.</p>
+  <p class="sub" style="margin-top:-18px">It's the one-command experience of <b>Surge.sh</b>, <b>Netlify</b>,
+  <b>Vercel</b>, <b>GitHub Pages</b>, or <b>Cloudflare Pages</b> — but <b>self-hosted</b>, so proprietary
+  and agent-generated work never touches an external vendor.</p>
   <div class="cards">
     <div class="card"><div class="n">PUBLISH</div><h3>Reports · decks · dashboards</h3><p>Any static bundle — an HTML report, a reveal.js deck, a Vite/React dashboard — becomes a live internal URL you can drop into Slack or a ticket.</p></div>
     <div class="card"><div class="n">AGENT-NATIVE</div><h3>The agent ships it itself</h3><p>Via the MCP server, Claude/Cursor calls <code class="inl">publish</code> directly — "host this report" → a shareable link, no human deploy step. Versioned, with instant rollback.</p></div>
