@@ -2,8 +2,8 @@
 # Runtime is Node (version pinned in .nvmrc). Bun is only used for `bun test`.
 # For the fully-containerized path, see deploy/ (`make -C deploy up`).
 
-API_PORT     ?= 8080
-EDGE_PORT    ?= 8090
+API_PORT     ?= 8473
+EDGE_PORT    ?= 8474
 FLOCI_PORT   ?= 4566
 BASE_DOMAIN  ?= drop.localhost
 BUCKET       ?= drop

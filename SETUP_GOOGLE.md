@@ -12,7 +12,7 @@ redirect URIs for **Web application** OAuth clients. ~10 minutes.
    - Scopes: add `openid` and `.../auth/userinfo.email` (both non-sensitive). Save.
 3. **APIs & Services → Credentials → Create credentials → OAuth client ID**
    - Application type: **Web application**. Name: `Drop local`.
-   - **Authorized redirect URIs → ADD:**  `http://localhost:8080/auth/callback`
+   - **Authorized redirect URIs → ADD:**  `http://localhost:8473/auth/callback`
      (exactly — scheme, host, port, path must match `DROP_PUBLIC_URL` + `/auth/callback`).
    - Create. Copy the **Client ID** and **Client secret**.
 
@@ -25,7 +25,7 @@ cp .env.example .env
 #   DROP_DEV_AUTH=0
 #   DROP_GOOGLE_CLIENT_ID=<client id>
 #   DROP_GOOGLE_CLIENT_SECRET=<client secret>
-#   DROP_PUBLIC_URL=http://localhost:8080
+#   DROP_PUBLIC_URL=http://localhost:8473
 #   DROP_ALLOWED_DOMAINS=paytm.com
 #   DROP_SESSION_SECRET=<paste: openssl rand -hex 32>
 #   NODE_EXTRA_CA_CERTS=~/certs/ca-bundle-with-zscaler.pem   # if behind Zscaler
@@ -41,7 +41,7 @@ make setup        # once (node + deps + podman VM + Floci image)
 make restart      # picks up .env → Google mode
 ```
 
-The api log should print `OAuth callback: http://localhost:8080/auth/callback`.
+The api log should print `OAuth callback: http://localhost:8473/auth/callback`.
 Then:
 
 ```bash
@@ -59,10 +59,10 @@ cat ~/.config/drop/session.json        # token starts with eyJ...
 # publish with the real session and serve it:
 mkdir -p /tmp/g && echo '<h1>real google auth</h1>' > /tmp/g/index.html
 make publish DIR=/tmp/g NAME=gtest
-curl -H 'Host: gtest.drop.localhost' http://localhost:8090/
+curl -H 'Host: gtest.drop.localhost' http://localhost:8474/
 
 # a forged/garbage token is rejected:
-curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer not-a-jwt' http://localhost:8080/v1/sites   # 401
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Authorization: Bearer not-a-jwt' http://localhost:8473/v1/sites   # 401
 ```
 
 To switch back to frictionless dev mode: delete (or rename) `.env`, `make restart`.
@@ -70,7 +70,7 @@ To switch back to frictionless dev mode: delete (or rename) `.env`, `make restar
 ## Troubleshooting
 
 - **`redirect_uri_mismatch`** — the URI in the Google client must be *exactly*
-  `http://localhost:8080/auth/callback` (matches `DROP_PUBLIC_URL`). If you change
+  `http://localhost:8473/auth/callback` (matches `DROP_PUBLIC_URL`). If you change
   the API port, update both.
 - **TLS / `unable to get local issuer certificate`** reaching `accounts.google.com`
   — set `NODE_EXTRA_CA_CERTS` to your corp CA bundle in `.env`.
@@ -79,4 +79,4 @@ To switch back to frictionless dev mode: delete (or rename) `.env`, `make restar
 - **Consent screen "App is blocked"** — make sure the consent screen is **Internal**
   and you're signing in with an org account.
 - **`make login` hangs** — the API didn't receive the callback; check the api log
-  (`make logs`) and that the browser reached `http://localhost:8080/auth/callback`.
+  (`make logs`) and that the browser reached `http://localhost:8473/auth/callback`.

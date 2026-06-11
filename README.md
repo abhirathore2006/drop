@@ -36,9 +36,9 @@ Uses Node (version in `.nvmrc`): `nvm use` (or `nvm install`) first.
 ```bash
 make setup        # one-time: node (via nvm) + deps + podman VM + Floci image
                   # behind Zscaler:  make setup CORP_CA=~/certs/Zscalerroot.cer
-make start        # Floci (S3) + api(:8080) + edge(:8090), dev-auth on
+make start        # Floci (S3) + api(:8473) + edge(:8474), dev-auth on
 make publish DIR=./your/dist NAME=myapp
-curl -H "Host: myapp.drop.localhost" http://localhost:8090/
+curl -H "Host: myapp.drop.localhost" http://localhost:8474/
 ```
 
 Other targets: `make status`, `make logs`, `make restart`, `make stop`
@@ -79,7 +79,7 @@ For local dev against `make start`, point it at the built server and dev-auth:
 ```json
 { "mcpServers": { "drop": {
   "command": "node", "args": ["/abs/path/to/drop/dist/mcp.js"],
-  "env": { "DROP_API": "http://localhost:8080", "DROP_DEV_AUTH": "1" } } } }
+  "env": { "DROP_API": "http://localhost:8473", "DROP_DEV_AUTH": "1" } } } }
 ```
 
 Tools exposed: `login`, `dev_login`, `publish`, `list_sites`, `site_info`,

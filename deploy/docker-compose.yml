@@ -27,7 +27,7 @@ services:
       DROP_S3_SECRET: "test"
       DROP_DEV_AUTH: "1"
     ports:
-      - "8080:8080"
+      - "8473:8080"
 
   edge:
     build:
@@ -45,4 +45,4 @@ services:
       DROP_S3_KEY_ID: "test"
       DROP_S3_SECRET: "test"
     ports:
-      - "8090:8080"
+      - "8474:8080"
