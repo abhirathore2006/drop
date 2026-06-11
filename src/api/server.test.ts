@@ -1,0 +1,106 @@
+import { test, expect } from "bun:test";
+import { pack } from "tar-stream";
+import { createGzip } from "node:zlib";
+import { buffer } from "node:stream/consumers";
+import { createApp } from "./server.ts";
+import { FakeBlob } from "../blob/fake.ts";
+import { MetaStore } from "../metastore/store.ts";
+import { FakeVerifier } from "../auth/oidc.ts";
+import { loadConfig } from "../config.ts";
+
+async function tgz(files: Record<string, string>): Promise<Buffer> {
+  const p = pack();
+  for (const [n, c] of Object.entries(files)) p.entry({ name: n }, c);
+  p.finalize();
+  return await buffer(p.pipe(createGzip()));
+}
+
+function build() {
+  const blob = new FakeBlob();
+  const meta = new MetaStore(blob);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com" });
+  const verifier = new FakeVerifier({
+    alice: { sub: "alice@paytm.com", email: "alice@paytm.com" },
+    bob: { sub: "bob@paytm.com", email: "bob@paytm.com" },
+  });
+  return { app: createApp({ cfg, meta, blob, verifier }), meta, blob };
+}
+
+const pub = (app: any, tok: string, name: string, body: Buffer) =>
+  app.request(`/v1/sites/${name}/versions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${tok}`, "content-type": "application/gzip" },
+    body,
+  });
+const call = (app: any, method: string, path: string, tok: string, body?: any) =>
+  app.request(path, {
+    method,
+    headers: { authorization: `Bearer ${tok}`, "content-type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+test("publish claims, sets pointer, returns url", async () => {
+  const { app, meta } = build();
+  const res = await pub(app, "alice", "myapp", await tgz({ "index.html": "<html>" }));
+  expect(res.status).toBe(200);
+  expect((await res.json()).url).toBe("https://myapp.drop.company.com");
+  const site = (await meta.getSitePlain("myapp"))!;
+  expect(site.owner).toBe("alice@paytm.com");
+  expect(site.currentVersion).not.toBeNull();
+});
+
+test("publish to a foreign site is 403", async () => {
+  const { app } = build();
+  expect((await pub(app, "alice", "shared", await tgz({ "index.html": "x" }))).status).toBe(200);
+  expect((await pub(app, "bob", "shared", await tgz({ "index.html": "y" }))).status).toBe(403);
+});
+
+test("bad name -> 400", async () => {
+  const { app } = build();
+  expect((await pub(app, "alice", "Bad_Name", await tgz({ "index.html": "x" }))).status).toBe(400);
+});
+
+test("traversal upload -> 400", async () => {
+  const { app } = build();
+  const res = await pub(app, "alice", "evil", await tgz({ "../escape.js": "x" }));
+  expect(res.status).toBe(400);
+});
+
+test("rollback to previous version", async () => {
+  const { app } = build();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "v1" }));
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "v2" }));
+  const res = await call(app, "POST", "/v1/sites/myapp/rollback", "alice", {});
+  expect(res.status).toBe(200);
+});
+
+test("collaborator lifecycle", async () => {
+  const { app } = build();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  // bob can't publish yet
+  expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(403);
+  // alice shares with bob
+  expect((await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@paytm.com" })).status).toBe(200);
+  // now bob can publish
+  expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(200);
+  // but bob (collaborator) can't share
+  expect((await call(app, "POST", "/v1/sites/myapp/collaborators", "bob", { email: "carol@paytm.com" })).status).toBe(403);
+});
+
+test("get site authz + owner-only delete", async () => {
+  const { app } = build();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  expect((await call(app, "GET", "/v1/sites/myapp", "alice")).status).toBe(200);
+  expect((await call(app, "GET", "/v1/sites/myapp", "bob")).status).toBe(403);
+  expect((await call(app, "DELETE", "/v1/sites/myapp", "bob")).status).toBe(403);
+  expect((await call(app, "DELETE", "/v1/sites/myapp", "alice")).status).toBe(200);
+});
+
+test("ls lists owned + collaborated sites", async () => {
+  const { app } = build();
+  await pub(app, "alice", "one", await tgz({ "index.html": "x" }));
+  await pub(app, "bob", "two", await tgz({ "index.html": "x" }));
+  const res = await call(app, "GET", "/v1/sites", "alice");
+  const { sites } = await res.json();
+  expect(sites.map((s: any) => s.name)).toEqual(["one"]);
+});
