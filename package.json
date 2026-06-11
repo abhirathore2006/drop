@@ -1,13 +1,17 @@
 {
-  "name": "drop",
-  "module": "bin/api.ts",
+  "name": "@paytm/drop",
+  "version": "0.1.0",
   "type": "module",
-  "private": true,
+  "bin": {
+    "drop": "dist/drop.js"
+  },
   "scripts": {
     "api": "bun run bin/api.ts",
     "edge": "bun run bin/edge.ts",
     "drop": "bun run bin/drop.ts",
+    "build": "esbuild bin/drop.ts --bundle --platform=node --format=esm --outfile=dist/drop.js --banner:js='import{createRequire as __cr}from\"node:module\";const require=__cr(import.meta.url);'",
     "build:cli": "bun build --compile ./bin/drop.ts --outfile dist/drop",
+    "prepare": "esbuild bin/drop.ts --bundle --platform=node --format=esm --outfile=dist/drop.js --banner:js='import{createRequire as __cr}from\"node:module\";const require=__cr(import.meta.url);'",
     "test": "bun test"
   },
   "dependencies": {
@@ -21,6 +25,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/tar-stream": "^3.1.3",
+    "esbuild": "^0.24.0",
     "typescript": "^5.5.0"
   }
 }

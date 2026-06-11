@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import { buildProgram } from "../src/cli/commands.ts";
 
 buildProgram()
