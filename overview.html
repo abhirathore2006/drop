@@ -107,6 +107,7 @@ footer{padding:44px 0 70px;color:var(--dim);font-family:var(--mono);font-size:12
     <a href="#idea">idea</a>
     <a href="#how">implementation</a>
     <a href="#model">data model</a>
+    <a href="#config">config</a>
     <a href="#surfaces">surfaces</a>
     <a href="#infra">infra</a>
   </div>
@@ -130,6 +131,7 @@ footer{padding:44px 0 70px;color:var(--dim);font-family:var(--mono);font-size:12
     <span class="pill"><b>Google</b> SSO</span>
     <span class="pill">CLI · <b>MCP</b> · dashboard</span>
     <span class="pill">atomic deploys + <b>rollback</b></span>
+    <span class="pill">per-site <b>_drop.json</b></span>
   </div>
 </div></header>
 
@@ -208,8 +210,33 @@ sites/<span class="k">&lt;name&gt;</span>/files/<span class="s">&lt;id&gt;</span
   existing version — it writes a new one and flips the pointer.</p>
 </div></section>
 
+<section id="config"><div class="wrap reveal">
+  <div class="kicker">04 — Per-site config</div>
+  <h2>A <span class="g">_drop.json</span> per site</h2>
+  <p class="sub">Drop a <code class="inl">_drop.json</code> at the build root and it becomes a real
+  static-host config — in the spirit of <code class="inl">vercel.json</code> / Netlify. Parsed at publish
+  (captured, never served — it can hold credentials), stored per version, and applied by the edge per
+  request. Rollback restores the matching config.</p>
+  <pre>{
+  <span class="k">"spaFallback"</span>: <span class="s">"index.html"</span>,        <span class="c">// nav misses → this doc (false disables)</span>
+  <span class="k">"cleanUrls"</span>: true,                  <span class="c">// /about → /about.html</span>
+  <span class="k">"notFound"</span>: <span class="s">"404.html"</span>,
+  <span class="k">"redirects"</span>: [{ <span class="k">"from"</span>:<span class="s">"/docs/*"</span>, <span class="k">"to"</span>:<span class="s">"/help/:splat"</span>, <span class="k">"status"</span>:301 }],
+  <span class="k">"headers"</span>:   [{ <span class="k">"source"</span>:<span class="s">"/assets/*"</span>, <span class="k">"headers"</span>:{ <span class="k">"cache-control"</span>:<span class="s">"public, max-age=31536000, immutable"</span> }}],
+  <span class="k">"cors"</span>: { <span class="k">"allowOrigins"</span>: [<span class="s">"https://app.paytm.com"</span>] },
+  <span class="k">"basicAuth"</span>: { <span class="k">"users"</span>: { <span class="s">"team"</span>: <span class="s">"sha256:&lt;hex&gt;"</span> } }
+}</pre>
+  <div class="cards" style="margin-top:22px">
+    <div class="card"><div class="n">ROUTING</div><h3>SPA · clean URLs · 404 · redirects</h3><p>Configurable navigation fallback, <code class="inl">/about</code>→<code class="inl">.html</code>, custom 404, and glob redirects with <code class="inl">:splat</code>.</p></div>
+    <div class="card"><div class="n">HEADERS</div><h3>Cache-Control &amp; CORS</h3><p>Arbitrary response headers by path glob (that's how cache-control is set); full CORS incl. preflight.</p></div>
+    <div class="card"><div class="n">ACCESS</div><h3>HTTP password</h3><p>Basic-auth the whole site; passwords plaintext or <code class="inl">sha256:</code> hashed, checked constant-time.</p></div>
+  </div>
+  <div class="note" style="margin-top:24px"><b>Edge order.</b> basic-auth → CORS preflight → redirects →
+  exact file → cleanUrls → SPA fallback → custom 404; config headers + CORS merge onto every response.</div>
+</div></section>
+
 <section id="surfaces"><div class="wrap reveal">
-  <div class="kicker">04 — Access surfaces</div>
+  <div class="kicker">05 — Access surfaces</div>
   <h2>Same engine, <span class="g">three front doors</span></h2>
   <p class="sub">All share one codebase, one identity, and the same API.</p>
   <div class="cards">
@@ -220,7 +247,7 @@ sites/<span class="k">&lt;name&gt;</span>/files/<span class="s">&lt;id&gt;</span
 </div></section>
 
 <section id="infra"><div class="wrap reveal">
-  <div class="kicker">05 — Infra requirements</div>
+  <div class="kicker">06 — Infra requirements</div>
   <h2>Small footprint, <span class="g">no stateful tier</span></h2>
   <p class="sub">Two tiny stateless Node services + S3. No database, no static credentials.
   Runs on EC2, ECS, or Kubernetes (a Helm chart ships in the repo).</p>
