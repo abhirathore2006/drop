@@ -1,9 +1,10 @@
 import type { Hono } from "hono";
+import { setCookie, deleteCookie } from "hono/cookie";
 import * as oidc from "openid-client";
 import type { Config } from "../config.ts";
 import type { BlobStore } from "../blob/types.ts";
 import { readText } from "../blob/types.ts";
-import type { AuthEnv } from "../auth/middleware.ts";
+import { type AuthEnv, SESSION_COOKIE } from "../auth/middleware.ts";
 import { checkDomain } from "../auth/oidc.ts";
 import { signSession } from "../auth/session-token.ts";
 
@@ -11,6 +12,7 @@ interface Handle {
   pollToken: string;
   codeVerifier: string;
   status: "pending" | "done" | "denied";
+  mode?: "cli" | "browser";
   token?: string;
   error?: string;
 }
@@ -52,8 +54,31 @@ export function registerAuthRoutes(app: Hono<AuthEnv>, cfg: Config, blob: BlobSt
       code_challenge: codeChallenge,
       code_challenge_method: "S256",
     });
-    await save(handle, { pollToken, codeVerifier, status: "pending" });
+    await save(handle, { pollToken, codeVerifier, status: "pending", mode: "cli" });
     return c.json({ authUrl: url.href, handle, pollToken });
+  });
+
+  // Browser login for the dashboard: redirect to Google; the callback sets a cookie.
+  app.get("/login", async (c) => {
+    if (!configured()) return c.text("login is not configured (dev-auth mode or missing Google config)", 400);
+    const conf = await getOAuth();
+    const handle = oidc.randomState();
+    const codeVerifier = oidc.randomPKCECodeVerifier();
+    const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
+    const url = oidc.buildAuthorizationUrl(conf, {
+      redirect_uri: `${cfg.publicUrl}/auth/callback`,
+      scope: "openid email",
+      state: handle,
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
+    });
+    await save(handle, { pollToken: "", codeVerifier, status: "pending", mode: "browser" });
+    return c.redirect(url.href);
+  });
+
+  app.get("/logout", (c) => {
+    deleteCookie(c, SESSION_COOKIE, { path: "/" });
+    return c.redirect("/");
   });
 
   app.get("/auth/callback", async (c) => {
@@ -78,6 +103,16 @@ export function registerAuthRoutes(app: Hono<AuthEnv>, cfg: Config, blob: BlobSt
         return c.html(page("Your account isn't allowed to use Drop."), 403);
       }
       const token = await signSession(cfg.sessionSecret, { sub: email, email });
+      if (h.mode === "browser") {
+        await blob.deletePrefix(key(handle));
+        setCookie(c, SESSION_COOKIE, token, {
+          httpOnly: true,
+          path: "/",
+          sameSite: "Lax",
+          maxAge: 60 * 60 * 24 * 30,
+        });
+        return c.redirect("/");
+      }
       await save(handle, { ...h, status: "done", token });
       return c.html(page("✓ Logged in to Drop. You can close this tab."));
     } catch (e) {

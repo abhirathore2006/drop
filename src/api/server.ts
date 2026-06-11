@@ -10,6 +10,7 @@ import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
 import { canAdmin, canWrite } from "./authz.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
+import { dashboardHtml } from "./dashboard.ts";
 
 export interface Deps {
   cfg: Config;
@@ -29,7 +30,12 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // Public server-mediated login routes (/auth/*) — clients only need DROP_API.
   registerAuthRoutes(app, d.cfg, d.blob);
 
+  // Dashboard (public page; its JS calls /v1/* with the session cookie).
+  app.get("/", (c) => c.html(dashboardHtml(d.cfg.baseDomain)));
+
   app.use("/v1/*", authMiddleware(d.verifier));
+
+  app.get("/v1/me", (c) => c.json({ email: c.get("identity").email }));
 
   // ---- publish ----
   app.post("/v1/sites/:name/versions", async (c) => {
