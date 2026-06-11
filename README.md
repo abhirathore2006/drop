@@ -50,6 +50,14 @@ either curl with `-H "Host: <name>.drop.localhost"` or add
 > podman too (closer to prod, slower). The root `Makefile` runs the servers as Bun
 > processes for faster iteration.
 
+## Dashboard (web UI)
+
+The control-plane API serves a dashboard at its root — open the API URL in a browser
+(local: <http://localhost:8473/>). Click **Sign in with Google** (server-mediated,
+sets an HttpOnly cookie), then you get a list of your sites and a per-site drawer to
+roll back versions, add/remove collaborators, transfer ownership, and delete. It uses
+the same `/v1/*` endpoints and identity as the CLI/MCP. Publishing stays in the CLI/MCP.
+
 ## Use it from an AI client (MCP — no CLI needed)
 
 Drop ships an **MCP server**, so any MCP client (Claude Code/Desktop, Cursor, …) can
