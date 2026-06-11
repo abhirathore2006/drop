@@ -14,10 +14,13 @@ NODE_BIN     := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin
 NODE         := $(NODE_BIN)/node
 NPM          := $(NODE_BIN)/npm
 
-ENV := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_PORT) DROP_S3_KEY_ID=test DROP_S3_SECRET=test DROP_BASE_DOMAIN=$(BASE_DOMAIN) DROP_DEV_AUTH=1
+# Local S3 (Floci) defaults. Auth config (dev vs Google) comes from .env — see
+# .env.example. With no .env, DROP_DEV_AUTH defaults to 1 (dev-auth).
+ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_PORT) DROP_S3_KEY_ID=test DROP_S3_SECRET=test DROP_BASE_DOMAIN=$(BASE_DOMAIN)
+LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci publish stop-all build
+.PHONY: help setup start stop restart status logs floci publish login stop-all build
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -28,6 +31,7 @@ help:
 	@echo "  make status                     show what's running"
 	@echo "  make logs                       tail api + edge logs"
 	@echo "  make publish DIR=./dist NAME=x  publish a folder and print its URL"
+	@echo "  make login                      sign in with Google (server-mediated, real auth)"
 	@echo "  make stop-all                   also stop the podman machine"
 	@echo ""
 	@echo "  corp/Zscaler CA for podman pulls:  make setup CORP_CA=~/certs/Zscalerroot.cer"
@@ -65,8 +69,8 @@ floci:
 start: floci
 	@mkdir -p $(RUN)
 	@$(NODE) build.mjs >/dev/null && echo "✓ built bundles"
-	@$(ENV) DROP_HTTP_PORT=$(API_PORT)  nohup $(NODE) dist/api.js  > $(RUN)/api.log  2>&1 & echo $$! > $(RUN)/api.pid
-	@$(ENV) DROP_HTTP_PORT=$(EDGE_PORT) nohup $(NODE) dist/edge.js > $(RUN)/edge.log 2>&1 & echo $$! > $(RUN)/edge.pid
+	@$(LOADENV) $(ENV) DROP_HTTP_PORT=$(API_PORT)  nohup $(NODE) dist/api.js  > $(RUN)/api.log  2>&1 & echo $$! > $(RUN)/api.pid
+	@$(LOADENV) $(ENV) DROP_HTTP_PORT=$(EDGE_PORT) nohup $(NODE) dist/edge.js > $(RUN)/edge.log 2>&1 & echo $$! > $(RUN)/edge.pid
 	@for i in $$(seq 1 30); do curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && break; sleep 1; done
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && echo "✓ api    http://localhost:$(API_PORT)" || { echo "✗ api failed — see $(RUN)/api.log"; tail -5 $(RUN)/api.log; exit 1; }
 	@echo "✓ edge   http://localhost:$(EDGE_PORT)  (routes by  Host: <name>.$(BASE_DOMAIN))"
@@ -94,10 +98,16 @@ status:
 logs:
 	@mkdir -p $(RUN); touch $(RUN)/api.log $(RUN)/edge.log; tail -f $(RUN)/api.log $(RUN)/edge.log
 
+# Real Google sign-in (server-mediated). Requires .env with the Google web-client
+# config (see .env.example) and DROP_DEV_AUTH=0.
+login:
+	@test -f dist/drop.js || $(NODE) build.mjs cli >/dev/null
+	@$(NODE) dist/drop.js login --api http://localhost:$(API_PORT)
+
 DIR  ?= ./dist
 NAME ?= myapp
 publish:
 	@test -f dist/drop.js || $(NODE) build.mjs cli >/dev/null
-	@$(NODE) dist/drop.js dev-login alice alice@paytm.com --api http://localhost:$(API_PORT) >/dev/null
+	@$(LOADENV) if [ "$$DROP_DEV_AUTH" = "1" ]; then $(NODE) dist/drop.js dev-login alice alice@paytm.com --api http://localhost:$(API_PORT) >/dev/null; fi
 	@$(NODE) dist/drop.js publish $(DIR) $(NAME) --api http://localhost:$(API_PORT)
 	@echo "view:  curl -H 'Host: $(NAME).$(BASE_DOMAIN)' http://localhost:$(EDGE_PORT)/"
