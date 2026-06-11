@@ -38,22 +38,35 @@ make up        # floci (S3 emulator) + api(:8080) + edge(:8090), dev-auth on
 Publish and view a site:
 
 ```bash
-bun install
-DROP="bun run bin/drop.ts"
-$DROP dev-login alice alice@paytm.com --api http://localhost:8080
+./install.sh --api http://localhost:8080   # installs the `drop` command for your user
+drop dev-login alice alice@paytm.com
 mkdir -p /tmp/site && echo '<html>hi</html>' > /tmp/site/index.html
-$DROP publish /tmp/site myapp --api http://localhost:8080
+drop publish /tmp/site myapp
 curl -H "Host: myapp.drop.localhost" http://localhost:8090/
 ```
 
 Tear down: `cd deploy && make down`.
 
-### CLI distribution
+## Installing the CLI (any user)
 
-`bun run build:cli` produces a single self-contained binary at `dist/drop`.
-On **managed/corp macOS, endpoint-security agents SIGKILL unsigned ad-hoc
-binaries**, so build + **code-sign (and notarize) the binary in CI** before
-distributing it. For local use, run via `bun run bin/drop.ts` as above.
+```bash
+git clone <repo> && cd drop
+./install.sh --api https://api.drop.company.com
+```
+
+`install.sh` ensures Bun is present, installs dependencies, and drops a `drop`
+command into a bin dir on your PATH (no sudo). It's idempotent and works on macOS
+and Linux. `--api <url>` bakes a default control-plane URL (override anytime with
+`DROP_API` or `--api`).
+
+### Why a wrapper, not a binary
+
+`bun run build:cli` *can* produce a single self-contained binary (`dist/drop`),
+but standalone binaries are unsigned and **managed/corporate macOS kills unsigned
+ad-hoc binaries** (kernel + endpoint security). The installer instead ships a tiny
+wrapper around the already-trusted `bun` runtime, which runs everywhere. To
+distribute an actual binary, build it in CI and **code-sign + notarize** it with
+your Apple Developer ID.
 
 ## Tests
 
