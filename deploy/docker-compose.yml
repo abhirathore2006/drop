@@ -1,0 +1,48 @@
+# Run with Podman: `podman compose -f deploy/docker-compose.yml up --build`
+# No database — Floci (S3-compatible AWS emulator) is the only backing store.
+# Images are fully-qualified for Podman's strict registry resolution.
+services:
+  floci:
+    # Floci — S3-compatible AWS emulator (https://floci.io). Holds files + metadata.
+    image: docker.io/floci/floci:latest
+    environment:
+      FLOCI_STORAGE_MODE: hybrid
+    ports:
+      - "4566:4566"
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    depends_on:
+      floci:
+        condition: service_started
+    environment:
+      DROP_HTTP_PORT: "8080"
+      DROP_BASE_DOMAIN: "drop.localhost"
+      DROP_S3_BUCKET: "drop-sites"
+      DROP_S3_ENDPOINT: "http://floci:4566"
+      DROP_S3_REGION: "us-east-1"
+      DROP_S3_KEY_ID: "test"
+      DROP_S3_SECRET: "test"
+      DROP_DEV_AUTH: "1"
+    ports:
+      - "8080:8080"
+
+  edge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.edge
+    depends_on:
+      floci:
+        condition: service_started
+    environment:
+      DROP_HTTP_PORT: "8080"
+      DROP_BASE_DOMAIN: "drop.localhost"
+      DROP_S3_BUCKET: "drop-sites"
+      DROP_S3_ENDPOINT: "http://floci:4566"
+      DROP_S3_REGION: "us-east-1"
+      DROP_S3_KEY_ID: "test"
+      DROP_S3_SECRET: "test"
+    ports:
+      - "8090:8080"
