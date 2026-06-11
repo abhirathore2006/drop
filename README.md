@@ -28,24 +28,24 @@ sites/<name>/versions/<id>.json   per-publish audit
 sites/<name>/files/<id>/...       the served files
 ```
 
-## Local development (Podman)
+## Local development
 
 ```bash
-cd deploy
-make up        # floci (S3 emulator) + api(:8080) + edge(:8090), dev-auth on
-```
-
-Publish and view a site:
-
-```bash
-./install.sh --api http://localhost:8080   # installs the `drop` command for your user
-drop dev-login alice alice@paytm.com
-mkdir -p /tmp/site && echo '<html>hi</html>' > /tmp/site/index.html
-drop publish /tmp/site myapp
+make setup        # one-time: Bun + deps + podman VM + Floci image
+                  # behind Zscaler:  make setup CORP_CA=~/certs/Zscalerroot.cer
+make start        # Floci (S3) + api(:8080) + edge(:8090), dev-auth on
+make publish DIR=./your/dist NAME=myapp
 curl -H "Host: myapp.drop.localhost" http://localhost:8090/
 ```
 
-Tear down: `cd deploy && make down`.
+Other targets: `make status`, `make logs`, `make restart`, `make stop`
+(`make stop-all` also stops the podman VM). The edge routes by `Host` header, so
+either curl with `-H "Host: <name>.drop.localhost"` or add
+`127.0.0.1 <name>.drop.localhost` to `/etc/hosts` to view in a browser.
+
+> Prefer everything in containers? `make -C deploy up` builds + runs api/edge in
+> podman too (closer to prod, slower). The root `Makefile` runs the servers as Bun
+> processes for faster iteration.
 
 ## Running the CLI (any user)
 
