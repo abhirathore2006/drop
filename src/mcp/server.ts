@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { defaultSessionPath, loadSession, saveSession, type Session } from "../cli/session.ts";
 import { Client } from "../cli/client.ts";
 import { packDir } from "../cli/pack.ts";
-import { devLoginToken, googleBrowserLogin } from "../cli/login.ts";
+import { devLoginToken, serverLogin } from "../cli/login.ts";
 
 function apiBase(s?: Session): string {
   return process.env.DROP_API ?? s?.apiBase ?? "https://api.drop.company.com";
@@ -39,14 +39,12 @@ export function buildMcp(): McpServer {
 
   server.registerTool(
     "login",
-    { description: "Sign in to Drop with Google (opens a browser).", inputSchema: {} },
+    { description: "Sign in to Drop with Google (opens a browser via the Drop server).", inputSchema: {} },
     async () => {
-      const clientId = process.env.DROP_GOOGLE_CLIENT_ID;
-      if (!clientId) return fail("set DROP_GOOGLE_CLIENT_ID in the MCP server env, or use dev_login");
       try {
-        const token = await googleBrowserLogin(clientId, process.env.DROP_GOOGLE_CLIENT_SECRET);
+        const token = await serverLogin(apiBase());
         await saveSession(defaultSessionPath(), { apiBase: apiBase(), token });
-        return ok("✓ logged in with Google");
+        return ok("✓ logged in");
       } catch (e) {
         return fail(`login failed: ${(e as Error).message}`);
       }

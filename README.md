@@ -64,15 +64,15 @@ Add to your MCP config (e.g. Claude Code `.mcp.json`):
     "drop": {
       "command": "npx",
       "args": ["-y", "--package", "git+https://bitbucket.paytm.com/scm/<team>/drop.git", "drop-mcp"],
-      "env": {
-        "DROP_API": "https://api.drop.company.com",
-        "DROP_GOOGLE_CLIENT_ID": "...apps.googleusercontent.com",
-        "DROP_GOOGLE_CLIENT_SECRET": "..."
-      }
+      "env": { "DROP_API": "https://api.drop.company.com" }
     }
   }
 }
 ```
+
+The client needs **only `DROP_API`** — login is server-mediated (the Drop API owns
+the Google credentials and hands back a session token), so no Google client id/secret
+lives on anyone's machine.
 
 For local dev against `make start`, point it at the built server and dev-auth:
 
@@ -133,14 +133,26 @@ Floci, including that `If-None-Match` is honored.
 
 ## Production
 
-- Set `DROP_DEV_AUTH=0`; configure `DROP_GOOGLE_CLIENT_ID` /
-  `DROP_GOOGLE_CLIENT_SECRET` and `DROP_ALLOWED_DOMAINS=paytm.com`.
-- Create a Google OAuth **Desktop app** client; add `http://localhost:8976/callback`
-  to its redirect URIs (used by `drop login`).
+Login is **server-mediated**: the API is the Google OAuth client and issues its own
+session tokens, so credentials live only on the server. Set on the **API**:
+
+- `DROP_DEV_AUTH=0`
+- `DROP_GOOGLE_CLIENT_ID` / `DROP_GOOGLE_CLIENT_SECRET` — a Google **"Web application"**
+  client whose authorized redirect URI is `${DROP_PUBLIC_URL}/auth/callback`.
+- `DROP_PUBLIC_URL` — the API's externally-reachable base (e.g. `https://api.drop.company.com`).
+- `DROP_SESSION_SECRET` — HS256 key signing Drop session tokens (rotate to revoke all sessions).
+- `DROP_ALLOWED_DOMAINS=paytm.com` — restrict to your Workspace domain.
+- If the API egresses via a TLS-inspecting proxy (Zscaler), set `NODE_EXTRA_CA_CERTS`
+  to the corp CA so it can reach `accounts.google.com`.
+
+Storage + edge:
 - Point `DROP_S3_*` at real AWS S3 (leave `DROP_S3_ENDPOINT` empty) or any
   S3-compatible store with conditional-write support.
 - Point wildcard DNS `*.drop.company.com` + wildcard TLS at the edge; keep the edge
   reachable only on the internal network.
+
+**Clients (CLI + MCP) need only `DROP_API`** — `drop login` / the MCP `login` tool drive
+the server flow and store the returned session token.
 
 See `../docs/superpowers/specs/2026-06-09-drop-static-publishing-design.md` for the
 full design.

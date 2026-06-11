@@ -9,6 +9,7 @@ import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
 import { canAdmin, canWrite } from "./authz.ts";
+import { registerAuthRoutes } from "./auth-routes.ts";
 
 export interface Deps {
   cfg: Config;
@@ -24,6 +25,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const app = new Hono<AuthEnv>();
 
   app.get("/healthz", (c) => c.text("ok"));
+
+  // Public server-mediated login routes (/auth/*) — clients only need DROP_API.
+  registerAuthRoutes(app, d.cfg, d.blob);
+
   app.use("/v1/*", authMiddleware(d.verifier));
 
   // ---- publish ----

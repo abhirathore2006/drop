@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import { defaultSessionPath, loadSession, saveSession } from "./session.ts";
 import { Client } from "./client.ts";
 import { packDir } from "./pack.ts";
-import { devLoginToken, googleBrowserLogin } from "./login.ts";
+import { devLoginToken, serverLogin } from "./login.ts";
 
 function apiBase(opts: { api?: string }): string {
   return opts.api ?? process.env.DROP_API ?? "https://api.drop.company.com";
@@ -27,17 +27,12 @@ export function buildProgram(): Command {
 
   program
     .command("login")
-    .description("Sign in with Google (browser)")
+    .description("Sign in with Google (via the Drop server)")
     .action(async () => {
-      const clientId = process.env.DROP_GOOGLE_CLIENT_ID;
-      const clientSecret = process.env.DROP_GOOGLE_CLIENT_SECRET;
-      if (!clientId) {
-        console.error("set DROP_GOOGLE_CLIENT_ID (and DROP_GOOGLE_CLIENT_SECRET) — or use `drop dev-login` locally");
-        process.exit(1);
-      }
-      const token = await googleBrowserLogin(clientId, clientSecret);
-      await saveSession(defaultSessionPath(), { apiBase: apiBase(program.opts()), token });
-      console.log("✓ logged in with Google");
+      const base = apiBase(program.opts());
+      const token = await serverLogin(base);
+      await saveSession(defaultSessionPath(), { apiBase: base, token });
+      console.log("✓ logged in");
     });
 
   program

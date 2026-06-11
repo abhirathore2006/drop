@@ -9,6 +9,8 @@ export interface Config {
   googleClientId?: string;
   googleClientSecret?: string;
   allowedDomains: string[]; // empty = any Google account
+  publicUrl: string; // externally-reachable API base, for the OAuth callback
+  sessionSecret: string; // HS256 key for Drop session tokens (required unless devAuth)
   devAuth: boolean;
   maxUploadBytes: number;
   maxFiles: number;
@@ -32,6 +34,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+    publicUrl: (env.DROP_PUBLIC_URL ?? `http://localhost:${env.DROP_HTTP_PORT ?? "8080"}`).replace(/\/$/, ""),
+    sessionSecret: env.DROP_SESSION_SECRET ?? "",
     devAuth: env.DROP_DEV_AUTH === "1",
     maxUploadBytes: Number(env.DROP_MAX_UPLOAD_BYTES ?? String(100 * 1024 * 1024)),
     maxFiles: Number(env.DROP_MAX_FILES ?? "5000"),
