@@ -1,3 +1,4 @@
+import { serve } from "@hono/node-server";
 import { loadConfig } from "../src/config.ts";
 import { S3Blob } from "../src/blob/s3.ts";
 import { MetaStore } from "../src/metastore/store.ts";
@@ -15,6 +16,6 @@ const blob = new S3Blob({
 const meta = new MetaStore(blob);
 
 const app = createEdge({ meta, blob, baseDomain: cfg.baseDomain });
-console.log(`drop-edge listening on :${cfg.httpPort} for *.${cfg.baseDomain}`);
-
-export default { port: cfg.httpPort, fetch: app.fetch };
+serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
+  console.log(`drop-edge listening on :${cfg.httpPort} for *.${cfg.baseDomain}`);
+});

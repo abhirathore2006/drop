@@ -1,8 +1,9 @@
 # Drop
 
 Self-hosted, Surge.sh-style static-site publishing for `*.drop.company.com`.
-Push a built folder, get a URL. **TypeScript on Bun; S3-compatible storage only —
-no database**; gated by Google login.
+Push a built folder, get a URL. **TypeScript on Node (v24, see `.nvmrc`);
+S3-compatible storage only — no database**; gated by Google login.
+(Bun is used only to run the test suite.)
 
 ```
 $ drop publish ./dist myapp
@@ -30,8 +31,10 @@ sites/<name>/files/<id>/...       the served files
 
 ## Local development
 
+Uses Node (version in `.nvmrc`): `nvm use` (or `nvm install`) first.
+
 ```bash
-make setup        # one-time: Bun + deps + podman VM + Floci image
+make setup        # one-time: node (via nvm) + deps + podman VM + Floci image
                   # behind Zscaler:  make setup CORP_CA=~/certs/Zscalerroot.cer
 make start        # Floci (S3) + api(:8080) + edge(:8090), dev-auth on
 make publish DIR=./your/dist NAME=myapp

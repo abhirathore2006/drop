@@ -2,24 +2,28 @@
   "name": "@paytm/drop",
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "bin": {
     "drop": "dist/drop.js"
   },
   "scripts": {
-    "api": "bun run bin/api.ts",
-    "edge": "bun run bin/edge.ts",
-    "drop": "bun run bin/drop.ts",
-    "build": "esbuild bin/drop.ts --bundle --platform=node --format=esm --outfile=dist/drop.js --banner:js='import{createRequire as __cr}from\"node:module\";const require=__cr(import.meta.url);'",
-    "build:cli": "bun build --compile ./bin/drop.ts --outfile dist/drop",
-    "prepare": "esbuild bin/drop.ts --bundle --platform=node --format=esm --outfile=dist/drop.js --banner:js='import{createRequire as __cr}from\"node:module\";const require=__cr(import.meta.url);'",
+    "build": "node build.mjs",
+    "prepare": "node build.mjs cli",
+    "start:api": "node dist/api.js",
+    "start:edge": "node dist/edge.js",
+    "drop": "node dist/drop.js",
+    "build:binary": "bun build --compile ./bin/drop.ts --outfile dist/drop",
     "test": "bun test"
   },
   "dependencies": {
-    "hono": "^4.6.0",
     "@aws-sdk/client-s3": "^3.600.0",
+    "@hono/node-server": "^2.0.4",
+    "commander": "^12.1.0",
+    "hono": "^4.6.0",
     "jose": "^5.9.0",
     "openid-client": "^6.1.0",
-    "commander": "^12.1.0",
     "tar-stream": "^3.1.7"
   },
   "devDependencies": {

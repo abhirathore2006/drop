@@ -1,9 +1,9 @@
 # Build from drop/: podman build -f deploy/Dockerfile.edge -t drop-edge .
-FROM docker.io/oven/bun:1
+FROM docker.io/library/node:24-slim
 WORKDIR /app
-COPY package.json bun.lock* ./
-# --production: runtime deps only, and skips the CLI's prepare/build step
-RUN bun install --production --frozen-lockfile || bun install --production
+COPY package.json package-lock.json* ./
+RUN npm install --ignore-scripts
 COPY . .
+RUN node build.mjs edge
 EXPOSE 8080
-CMD ["bun", "run", "bin/edge.ts"]
+CMD ["node", "dist/edge.js"]

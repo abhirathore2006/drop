@@ -1,3 +1,4 @@
+import { serve } from "@hono/node-server";
 import { loadConfig } from "../src/config.ts";
 import { S3Blob } from "../src/blob/s3.ts";
 import { MetaStore } from "../src/metastore/store.ts";
@@ -30,6 +31,6 @@ if (cfg.devAuth) {
 }
 
 const app = createApp({ cfg, meta, blob, verifier });
-console.log(`drop-api listening on :${cfg.httpPort}`);
-
-export default { port: cfg.httpPort, fetch: app.fetch };
+serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
+  console.log(`drop-api listening on :${cfg.httpPort}`);
+});
