@@ -47,26 +47,37 @@ curl -H "Host: myapp.drop.localhost" http://localhost:8090/
 
 Tear down: `cd deploy && make down`.
 
-## Installing the CLI (any user)
+## Running the CLI (any user)
+
+### Option 1 — `npx` straight from git (no install, recommended)
+
+```bash
+npx git+https://bitbucket.paytm.com/scm/<team>/drop.git publish ./dist myapp
+# pin a tag/branch:  npx git+https://…/drop.git#v0.1.0 ls
+# set the API once:  export DROP_API=https://api.drop.company.com
+```
+
+`npx` clones the repo, runs the `prepare` step (esbuild bundles the CLI into a
+node-runnable `dist/drop.js` — no Bun needed), and runs it. Works on any machine
+with Node 18+. (`bunx` works too once it gains git-URL support; for now use `npx`.)
+
+### Option 2 — `install.sh` (persistent `drop` command)
 
 ```bash
 git clone <repo> && cd drop
-./install.sh --api https://api.drop.company.com
+./install.sh --api https://api.drop.company.com    # idempotent, no sudo
+drop publish ./dist myapp
 ```
 
-`install.sh` ensures Bun is present, installs dependencies, and drops a `drop`
-command into a bin dir on your PATH (no sudo). It's idempotent and works on macOS
-and Linux. `--api <url>` bakes a default control-plane URL (override anytime with
-`DROP_API` or `--api`).
+Installs Bun if missing, installs deps, and puts a `drop` command on your PATH.
 
-### Why a wrapper, not a binary
+### Why not a single compiled binary?
 
-`bun run build:cli` *can* produce a single self-contained binary (`dist/drop`),
-but standalone binaries are unsigned and **managed/corporate macOS kills unsigned
-ad-hoc binaries** (kernel + endpoint security). The installer instead ships a tiny
-wrapper around the already-trusted `bun` runtime, which runs everywhere. To
-distribute an actual binary, build it in CI and **code-sign + notarize** it with
-your Apple Developer ID.
+`bun run build:cli` *can* produce one (`dist/drop`), but standalone binaries are
+unsigned and **managed/corporate macOS kills unsigned ad-hoc binaries** (kernel +
+endpoint security). Both options above run via the trusted node/bun runtime
+instead, so they work everywhere. To ship an actual binary, build it in CI and
+**code-sign + notarize** it with your Apple Developer ID.
 
 ## Tests
 
