@@ -44,7 +44,7 @@ test("publish over HTTP then serve through the edge", async () => {
     body: tarball,
   });
   expect(pub.status).toBe(200);
-  expect((await pub.json()).url).toBe("https://myapp.drop.localhost");
+  expect(((await pub.json()) as any).url).toBe("https://myapp.drop.localhost");
 
   // index over the edge
   const root = await fetch(`http://localhost:${edge.port}/`, {

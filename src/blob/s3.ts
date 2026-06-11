@@ -26,6 +26,13 @@ function errName(e: unknown): string {
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+async function collect(body: Readable | Buffer | Uint8Array): Promise<Uint8Array> {
+  if (body instanceof Uint8Array) return body; // Buffer is a Uint8Array
+  const chunks: Buffer[] = [];
+  for await (const c of body as Readable) chunks.push(Buffer.from(c));
+  return new Uint8Array(Buffer.concat(chunks));
+}
+
 export class S3Blob implements BlobStore {
   private client: S3Client;
   private bucket: string;
@@ -57,10 +64,13 @@ export class S3Blob implements BlobStore {
   async put(
     key: string,
     body: Readable | Buffer | Uint8Array,
-    size: number,
+    _size: number,
     contentType: string,
     opts: PutOptions = {},
   ): Promise<{ etag?: string }> {
+    // Materialize the body: the S3 SDK can't checksum a flowing Node stream, and
+    // static-site files are small enough to buffer one at a time.
+    const bytes = await collect(body);
     // AWS guidance: retry the upload on 409 ConditionalRequestConflict.
     for (let attempt = 0; ; attempt++) {
       try {
@@ -68,8 +78,8 @@ export class S3Blob implements BlobStore {
           new PutObjectCommand({
             Bucket: this.bucket,
             Key: key,
-            Body: body as any,
-            ContentLength: size,
+            Body: bytes,
+            ContentLength: bytes.byteLength,
             ContentType: contentType,
             ...(opts.ifNoneMatch ? { IfNoneMatch: "*" } : {}),
             ...(opts.ifMatch ? { IfMatch: opts.ifMatch } : {}),
