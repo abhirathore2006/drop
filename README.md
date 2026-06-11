@@ -39,14 +39,21 @@ Publish and view a site:
 
 ```bash
 bun install
-bun run build:cli                       # → dist/drop
-./dist/drop dev-login alice alice@paytm.com --api http://localhost:8080
+DROP="bun run bin/drop.ts"
+$DROP dev-login alice alice@paytm.com --api http://localhost:8080
 mkdir -p /tmp/site && echo '<html>hi</html>' > /tmp/site/index.html
-./dist/drop publish /tmp/site myapp --api http://localhost:8080
+$DROP publish /tmp/site myapp --api http://localhost:8080
 curl -H "Host: myapp.drop.localhost" http://localhost:8090/
 ```
 
 Tear down: `cd deploy && make down`.
+
+### CLI distribution
+
+`bun run build:cli` produces a single self-contained binary at `dist/drop`.
+On **managed/corp macOS, endpoint-security agents SIGKILL unsigned ad-hoc
+binaries**, so build + **code-sign (and notarize) the binary in CI** before
+distributing it. For local use, run via `bun run bin/drop.ts` as above.
 
 ## Tests
 
