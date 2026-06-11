@@ -9,6 +9,10 @@ export interface EdgeDeps {
   baseDomain: string;
   now?: () => number;
   pointerTtlMs?: number;
+  /** Total in-memory byte-cache budget (default 256 MiB). */
+  cacheBytes?: number;
+  /** Don't cache objects larger than this (default 5 MiB); they stream. */
+  maxObjectBytes?: number;
 }
 
 interface CacheEntry {
@@ -16,10 +20,50 @@ interface CacheEntry {
   exp: number;
 }
 
+interface Cached {
+  body: Uint8Array;
+  contentType: string;
+  contentEncoding?: string;
+}
+
+/** Size-bounded LRU of immutable file bytes (keyed by versioned S3 path). */
+class ByteLRU {
+  private map = new Map<string, Cached>();
+  private bytes = 0;
+  constructor(private maxBytes: number) {}
+  get(k: string): Cached | undefined {
+    const v = this.map.get(k);
+    if (v) {
+      this.map.delete(k);
+      this.map.set(k, v); // mark most-recently-used
+    }
+    return v;
+  }
+  set(k: string, v: Cached): void {
+    const size = v.body.byteLength;
+    if (size > this.maxBytes) return;
+    const prev = this.map.get(k);
+    if (prev) {
+      this.bytes -= prev.body.byteLength;
+      this.map.delete(k);
+    }
+    this.map.set(k, v);
+    this.bytes += size;
+    while (this.bytes > this.maxBytes) {
+      const oldest = this.map.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.bytes -= this.map.get(oldest)!.body.byteLength;
+      this.map.delete(oldest);
+    }
+  }
+}
+
 export function createEdge(d: EdgeDeps) {
   const now = d.now ?? (() => Date.now());
   const ttl = d.pointerTtlMs ?? 10_000;
   const cache = new Map<string, CacheEntry>(); // name → currentVersion
+  const fileCache = new ByteLRU(d.cacheBytes ?? 256 * 1024 * 1024);
+  const maxObjectBytes = d.maxObjectBytes ?? 5 * 1024 * 1024;
 
   async function currentVersion(name: string): Promise<string | null> {
     const hit = cache.get(name);
@@ -46,9 +90,33 @@ export function createEdge(d: EdgeDeps) {
     });
   }
 
+  function respond(c: Cached): Response {
+    const headers: Record<string, string> = {
+      "content-type": c.contentType,
+      // HTML is the entry point (re-resolved per deploy) → always revalidate.
+      // Other assets are safe to cache for a while.
+      "cache-control": c.contentType.includes("text/html") ? "no-cache" : "public, max-age=300",
+    };
+    if (c.contentEncoding) headers["content-encoding"] = c.contentEncoding;
+    return new Response(c.body, { status: 200, headers });
+  }
+
   async function serve(prefix: string, key: string): Promise<Response | null> {
-    const obj = await d.blob.get(prefix + key);
+    const full = prefix + key;
+    const hit = fileCache.get(full);
+    if (hit) return respond(hit); // served from edge memory — no S3 hit
+
+    const obj = await d.blob.get(full);
     if (!obj) return null;
+
+    // Cache small objects in memory; the versioned path is immutable so it never
+    // goes stale (a deploy mints a new path). Stream large objects uncached.
+    if (obj.size != null && obj.size <= maxObjectBytes) {
+      const body = new Uint8Array(await new Response(obj.body).arrayBuffer());
+      const entry: Cached = { body, contentType: obj.contentType, contentEncoding: obj.contentEncoding };
+      fileCache.set(full, entry);
+      return respond(entry);
+    }
     const headers: Record<string, string> = { "content-type": obj.contentType };
     if (obj.contentEncoding) headers["content-encoding"] = obj.contentEncoding;
     return new Response(obj.body, { status: 200, headers });

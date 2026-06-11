@@ -44,3 +44,25 @@ test("unknown site -> 404", async () => {
   const res = await get(await setup(), "nope.drop.company.com", "/", "text/html");
   expect(res.status).toBe(404);
 });
+
+test("caches file bytes in edge memory — second request skips S3", async () => {
+  const blob = new FakeBlob();
+  const meta = new MetaStore(blob);
+  await meta.claimSite("myapp", "alice@paytm.com");
+  const prefix = meta.filesPrefix("myapp", "v1");
+  await blob.put(prefix + "app.js", Buffer.from("console.log(1)"), 14, "application/javascript");
+  await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
+
+  let fileGets = 0;
+  const orig = blob.get.bind(blob);
+  blob.get = (k: string) => {
+    if (k.includes("/files/")) fileGets++;
+    return orig(k);
+  };
+  const app = createEdge({ meta, blob, baseDomain: "drop.company.com" });
+  const hit = () => app.request("/app.js", { headers: { host: "myapp.drop.company.com" } });
+
+  expect((await hit()).status).toBe(200);
+  expect((await hit()).status).toBe(200);
+  expect(fileGets).toBe(1); // fetched from S3 once, served from edge cache after
+});
