@@ -56,18 +56,15 @@ edge:
     minReplicas: 2
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
-  # On-disk asset cache (memory holds only the version pointer). Node-local / per-pod.
+  # Asset cache on ephemeral node-local disk (emptyDir). It's just a cache — S3 is
+  # the source of truth — so it needs no persistence and no sharing: per-pod +
+  # ephemeral is exactly right, and it scales to any replica count. A new/restarted
+  # pod re-warms from S3. Memory holds only the version pointer.
   diskCache:
     enabled: true
     mountPath: /cache
-    sizeBytes: 5368709120 # 5Gi → DROP_EDGE_DISK_CACHE_BYTES
-    # storage backing: emptyDir (per-pod, ephemeral, fast) or pvc (survives restarts).
-    type: emptyDir
-    emptyDirSizeLimit: 6Gi
-    pvc:
-      storageClass: ""
-      size: 6Gi
-      accessMode: ReadWriteOnce
+    sizeBytes: 5368709120 # app LRU cap → DROP_EDGE_DISK_CACHE_BYTES (5 GiB)
+    sizeLimit: 6Gi # emptyDir node-disk cap (a little above sizeBytes)
 
 ingress:
   enabled: true

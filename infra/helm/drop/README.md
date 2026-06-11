@@ -30,8 +30,9 @@ helm upgrade --install drop infra/helm/drop \
 Then point DNS: `api.<baseDomain>` and `*.<baseDomain>` → the ingress/ALB.
 
 ## Notes
-- **Edge cache:** `edge.diskCache` is on by default as a per-pod `emptyDir` (asset bytes
-  on disk; memory holds only the version pointer). Use `type=pvc` only with
-  `edge.replicaCount=1` or a ReadWriteMany class — for multiple replicas keep `emptyDir`.
+- **Edge cache:** a per-pod **`emptyDir`** (ephemeral node-local disk) — asset bytes on
+  disk, memory holds only the version pointer. It's just a cache (S3 is source of truth),
+  so it needs no persistence or sharing and scales to any replica count; a restarted pod
+  re-warms from S3. Tune with `edge.diskCache.sizeBytes` (LRU cap) / `sizeLimit` (disk cap).
 - **Autoscaling:** set `api.autoscaling.enabled` / `edge.autoscaling.enabled` (HPA on CPU).
 - See `values.yaml` for all knobs; `helm lint` / `helm template` to preview.

@@ -67,11 +67,6 @@ spec:
       {{- if .Values.edge.diskCache.enabled }}
       volumes:
         - name: edge-cache
-          {{- if eq .Values.edge.diskCache.type "pvc" }}
-          persistentVolumeClaim:
-            claimName: {{ include "drop.fullname" . }}-edge-cache
-          {{- else }}
           emptyDir:
-            sizeLimit: {{ .Values.edge.diskCache.emptyDirSizeLimit }}
-          {{- end }}
+            sizeLimit: {{ .Values.edge.diskCache.sizeLimit }}
       {{- end }}
