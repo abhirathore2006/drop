@@ -3,6 +3,8 @@ import { posix } from "node:path";
 import type { BlobStore } from "../blob/types.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { DiskCache } from "./disk-cache.ts";
+import type { SiteConfig } from "../site-config.ts";
+import { basicAuthOk, corsHeaders, headersForPath, matchRedirect } from "../site-config.ts";
 
 export interface EdgeDeps {
   meta: MetaStore;
@@ -20,6 +22,7 @@ export interface EdgeDeps {
 
 interface CacheEntry {
   version: string | null;
+  config?: SiteConfig;
   exp: number;
 }
 
@@ -39,13 +42,13 @@ export function createEdge(d: EdgeDeps) {
   const maxObjectBytes = d.maxObjectBytes ?? 25 * 1024 * 1024;
   const disk = d.diskCacheDir ? new DiskCache(d.diskCacheDir, d.diskCacheBytes ?? 5 * 1024 * 1024 * 1024) : null;
 
-  async function currentVersion(name: string): Promise<string | null> {
+  async function current(name: string): Promise<{ version: string | null; config: SiteConfig }> {
     const hit = cache.get(name);
-    if (hit && now() < hit.exp) return hit.version;
+    if (hit && now() < hit.exp) return { version: hit.version, config: hit.config ?? {} };
     const site = await d.meta.getSitePlain(name);
-    const version = site?.currentVersion ?? null;
-    cache.set(name, { version, exp: now() + ttl });
-    return version;
+    const entry: CacheEntry = { version: site?.currentVersion ?? null, config: site?.config, exp: now() + ttl };
+    cache.set(name, entry);
+    return { version: entry.version, config: entry.config ?? {} };
   }
 
   function siteFromHost(host: string): string | null {
@@ -64,42 +67,37 @@ export function createEdge(d: EdgeDeps) {
     });
   }
 
-  function respond(c: Cached): Response {
+  // Final response headers: content-type, a default cache-control (overridable),
+  // then per-path config headers, then CORS.
+  function buildHeaders(reqUrlPath: string, c: Cached, cfg: SiteConfig, cors: Record<string, string>): Record<string, string> {
     const headers: Record<string, string> = {
       "content-type": c.contentType,
-      // HTML is the entry point (re-resolved per deploy) → always revalidate.
-      // Other assets are safe to cache for a while.
       "cache-control": c.contentType.includes("text/html") ? "no-cache" : "public, max-age=300",
     };
     if (c.contentEncoding) headers["content-encoding"] = c.contentEncoding;
-    return new Response(c.body, { status: 200, headers });
+    Object.assign(headers, headersForPath(reqUrlPath, cfg.headers));
+    Object.assign(headers, cors);
+    return headers;
   }
 
-  async function serve(prefix: string, key: string): Promise<Response | null> {
+  // Fetch object bytes: disk cache (if enabled) → S3. Null if missing.
+  async function fetchBytes(prefix: string, key: string): Promise<Cached | null> {
     const full = prefix + key;
-
-    // Disk cache (if enabled). Hot files are served from the OS page cache (RAM
-    // speed); the versioned path is immutable, so it never goes stale.
     if (disk) {
       const dh = await disk.get(full);
-      if (dh) return respond(dh);
+      if (dh) return dh;
     }
-
-    // Origin: S3.
     const obj = await d.blob.get(full);
     if (!obj) return null;
-
-    // Write small objects to the disk cache, then serve. Stream large objects
-    // (or, with no disk cache configured, everything) straight through.
     if (disk && obj.size != null && obj.size <= maxObjectBytes) {
       const body = new Uint8Array(await new Response(obj.body).arrayBuffer());
       const entry: Cached = { body, contentType: obj.contentType, contentEncoding: obj.contentEncoding };
       void disk.set(full, entry);
-      return respond(entry);
+      return entry;
     }
-    const headers: Record<string, string> = { "content-type": obj.contentType };
-    if (obj.contentEncoding) headers["content-encoding"] = obj.contentEncoding;
-    return new Response(obj.body, { status: 200, headers });
+    // Stream large / uncached objects.
+    const body = new Uint8Array(await new Response(obj.body).arrayBuffer());
+    return { body, contentType: obj.contentType, contentEncoding: obj.contentEncoding };
   }
 
   const app = new Hono();
@@ -109,24 +107,58 @@ export function createEdge(d: EdgeDeps) {
     const name = siteFromHost(c.req.header("host") ?? "");
     if (!name) return notFound("site not found");
 
-    const version = await currentVersion(name);
+    const { version, config } = await current(name);
     if (!version) return notFound("site not found or nothing published");
     const prefix = d.meta.filesPrefix(name, version);
 
-    let reqPath = posix.normalize("/" + c.req.path).replace(/^\/+/, "");
-    if (reqPath === "" || reqPath === ".") reqPath = "index.html";
+    const urlPath = "/" + posix.normalize("/" + c.req.path).replace(/^\/+/, "");
+    const cors = corsHeaders(c.req.header("origin"), config.cors);
 
-    // 1. exact object
-    const exact = await serve(prefix, reqPath);
-    if (exact) return exact;
+    // 1. Basic-auth gate (whole site)
+    if (config.basicAuth && !basicAuthOk(c.req.header("authorization"), config.basicAuth.users)) {
+      return new Response("Authentication required", {
+        status: 401,
+        headers: { "www-authenticate": `Basic realm="${config.basicAuth.realm ?? "Drop"}"` },
+      });
+    }
+    // 2. CORS preflight
+    if (c.req.method === "OPTIONS" && config.cors) {
+      return new Response(null, { status: 204, headers: cors });
+    }
+    // 3. Redirects
+    const rd = matchRedirect(urlPath, config.redirects);
+    if (rd) return new Response(null, { status: rd.status, headers: { location: rd.to, ...cors } });
 
-    // 2. route-aware SPA fallback
-    if (isNavigationRoute(c.req.header("accept") ?? "", reqPath)) {
-      const index = await serve(prefix, "index.html");
-      if (index) return index;
+    const respondWith = async (key: string, status = 200): Promise<Response | null> => {
+      const obj = await fetchBytes(prefix, key);
+      if (!obj) return null;
+      return new Response(obj.body, { status, headers: buildHeaders(urlPath, obj, config, cors) });
+    };
+
+    // 4. exact object
+    let reqKey = urlPath.replace(/^\/+/, "");
+    if (reqKey === "" || reqKey === ".") reqKey = "index.html";
+    let res = await respondWith(reqKey);
+    if (res) return res;
+
+    // 5. cleanUrls: try "<path>.html"
+    if (config.cleanUrls && !posix.extname(reqKey)) {
+      res = await respondWith(reqKey + ".html");
+      if (res) return res;
     }
 
-    // 3. missing asset (or missing index) → real 404, never HTML for an asset miss
+    // 6. SPA fallback (configurable doc; default index.html; false disables)
+    const fallback = config.spaFallback === undefined ? "index.html" : config.spaFallback;
+    if (fallback && isNavigationRoute(c.req.header("accept") ?? "", reqKey)) {
+      res = await respondWith(String(fallback).replace(/^\/+/, ""));
+      if (res) return res;
+    }
+
+    // 7. custom 404 document
+    if (config.notFound) {
+      res = await respondWith(config.notFound.replace(/^\/+/, ""), 404);
+      if (res) return res;
+    }
     return notFound("not found");
   });
 

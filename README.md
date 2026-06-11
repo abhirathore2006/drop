@@ -59,6 +59,35 @@ sets an HttpOnly cookie), then you get a list of your sites and a per-site drawe
 roll back versions, add/remove collaborators, transfer ownership, and delete. It uses
 the same `/v1/*` endpoints and identity as the CLI/MCP. Publishing stays in the CLI/MCP.
 
+## Per-site config — `_drop.json`
+
+Put a `_drop.json` at the root of your build folder. The API parses it at publish
+time (it is **not** served as a file); the edge applies it per request. It's
+versioned with the deploy — each publish can change it, and rollback restores the
+matching config.
+
+```jsonc
+{
+  "spaFallback": "index.html",          // doc for navigation misses; false to disable
+  "cleanUrls": true,                    // /about → /about.html
+  "notFound": "404.html",               // custom 404 document
+  "redirects": [
+    { "from": "/old", "to": "/new", "status": 301 },
+    { "from": "/docs/*", "to": "/help/:splat", "status": 302 }
+  ],
+  "headers": [
+    { "source": "/assets/*", "headers": { "cache-control": "public, max-age=31536000, immutable" } },
+    { "source": "/*",        "headers": { "x-frame-options": "DENY" } }
+  ],
+  "cors": { "allowOrigins": ["https://app.paytm.com"], "allowMethods": ["GET", "HEAD"] },
+  "basicAuth": { "realm": "Staging", "users": { "team": "sha256:<hex-of-password>" } }
+}
+```
+
+- **cache-control** is just a `headers` rule. **HTTP password** is `basicAuth` (passwords
+  plain or `sha256:<hex>`). **redirects** support a trailing `*` glob with `:splat`.
+- It's a static-site config in the spirit of `vercel.json` / Netlify `_redirects`+`_headers`.
+
 ## Use it from an AI client (MCP — no CLI needed)
 
 Drop ships an **MCP server**, so any MCP client (Claude Code/Desktop, Cursor, …) can

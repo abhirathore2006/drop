@@ -45,6 +45,61 @@ test("unknown site -> 404", async () => {
   expect(res.status).toBe(404);
 });
 
+async function setupCfg(config: any) {
+  const blob = new FakeBlob();
+  const meta = new MetaStore(blob);
+  await meta.claimSite("myapp", "alice@paytm.com");
+  const p = meta.filesPrefix("myapp", "v1");
+  await blob.put(p + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
+  await blob.put(p + "app.html", Buffer.from("<html>spa</html>"), 16, "text/html");
+  await blob.put(p + "404.html", Buffer.from("<html>nope</html>"), 17, "text/html");
+  await blob.put(p + "assets/app.js", Buffer.from("x"), 1, "application/javascript");
+  await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1", config }));
+  return createEdge({ meta, blob, baseDomain: "drop.company.com" });
+}
+const creq = (app: any, path: string, headers: Record<string, string> = {}) =>
+  app.request(path, { headers: { host: "myapp.drop.company.com", ...headers } });
+
+test("config: basic auth gates the site", async () => {
+  const app = await setupCfg({ basicAuth: { users: { u: "p" } } });
+  const no = await creq(app, "/");
+  expect(no.status).toBe(401);
+  expect(no.headers.get("www-authenticate")).toContain("Basic");
+  const tok = "Basic " + Buffer.from("u:p").toString("base64");
+  expect((await creq(app, "/", { authorization: tok })).status).toBe(200);
+});
+
+test("config: redirect", async () => {
+  const app = await setupCfg({ redirects: [{ from: "/old", to: "/new", status: 301 }] });
+  const r = await creq(app, "/old");
+  expect(r.status).toBe(301);
+  expect(r.headers.get("location")).toBe("/new");
+});
+
+test("config: custom spaFallback + disable", async () => {
+  const a = await setupCfg({ spaFallback: "app.html" });
+  expect(await (await creq(a, "/deep", { accept: "text/html" })).text()).toBe("<html>spa</html>");
+  const b = await setupCfg({ spaFallback: false });
+  expect((await creq(b, "/deep", { accept: "text/html" })).status).toBe(404);
+});
+
+test("config: header override (cache-control) + CORS", async () => {
+  const app = await setupCfg({
+    headers: [{ source: "/assets/*", headers: { "cache-control": "public, max-age=31536000, immutable" } }],
+    cors: true,
+  });
+  const r = await creq(app, "/assets/app.js", { origin: "https://x.com" });
+  expect(r.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+  expect(r.headers.get("access-control-allow-origin")).toBe("*");
+});
+
+test("config: custom 404 document", async () => {
+  const app = await setupCfg({ notFound: "404.html" });
+  const r = await creq(app, "/assets/missing.js");
+  expect(r.status).toBe(404);
+  expect(await r.text()).toBe("<html>nope</html>");
+});
+
 test("disk cache: second request (even a fresh instance) skips S3", async () => {
   const { mkdtempSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -68,7 +123,7 @@ test("disk cache: second request (even a fresh instance) skips S3", async () => 
   const hit = (app: any) => app.request("/app.js", { headers: { host: "myapp.drop.company.com" } });
   const a = createEdge({ meta, blob, baseDomain: "drop.company.com", diskCacheDir: dir });
   expect((await hit(a)).status).toBe(200); // S3 → disk
-  await Bun.sleep(20); // let the async disk write settle
+  await Bun.sleep(150); // let the async disk write settle
   // a brand-new edge instance (simulates restart / another replica on same volume)
   const b = createEdge({ meta, blob, baseDomain: "drop.company.com", diskCacheDir: dir });
   const r = await hit(b);

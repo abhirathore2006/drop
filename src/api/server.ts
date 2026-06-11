@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import { Readable } from "node:stream";
+import * as streamConsumers from "node:stream/consumers";
+import { parseSiteConfig, type SiteConfig } from "../site-config.ts";
 import type { Config } from "../config.ts";
 import type { BlobStore } from "../blob/types.ts";
 import type { Verifier } from "../auth/types.ts";
@@ -58,10 +60,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const nodeStream = Readable.fromWeb(c.req.raw.body as any);
 
     let result: { files: number; bytes: number };
+    const captured: { raw?: Buffer } = {}; // object wrapper so the closure write survives CFA
     try {
       result = await extractTarGz(
         nodeStream,
         async (rel, body, size, ct) => {
+          // _drop.json is config, not a served asset — capture it, don't store it
+          // (it may contain basic-auth credentials).
+          if (rel === "_drop.json") {
+            captured.raw = await streamConsumers.buffer(body);
+            return;
+          }
           await d.blob.put(prefix + rel, body, size, ct);
         },
         { maxFiles: d.cfg.maxFiles, maxBytes: d.cfg.maxUploadBytes },
@@ -71,15 +80,26 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       return c.json({ error: `bad upload: ${(e as Error).message}` }, 400);
     }
 
+    let config: SiteConfig | undefined;
+    if (captured.raw) {
+      try {
+        config = parseSiteConfig(captured.raw.toString("utf8"));
+      } catch (e) {
+        await d.blob.deletePrefix(prefix).catch(() => {});
+        return c.json({ error: `invalid _drop.json: ${(e as Error).message}` }, 400);
+      }
+    }
+
     await d.meta.putVersion(name, {
       id: verId,
       publishedBy: email,
       createdAt: now().toISOString(),
       fileCount: result.files,
       bytes: result.bytes,
+      config,
     });
-    // commit point: CAS-flip the live pointer
-    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
+    // commit point: CAS-flip the live pointer (+ denormalize config for the edge)
+    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId, config }));
 
     void pruneVersions(d, name);
     return c.json({ url: siteUrl(name), version: verId, files: result.files, bytes: result.bytes });
@@ -102,7 +122,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     } else if (!versions.some((v) => v.id === target)) {
       return c.json({ error: "unknown version" }, 400);
     }
-    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: target }));
+    const targetConfig = versions.find((v) => v.id === target)?.config;
+    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: target, config: targetConfig }));
     return c.json({ url: siteUrl(name), version: target });
   });
 

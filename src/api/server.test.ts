@@ -96,6 +96,28 @@ test("get site authz + owner-only delete", async () => {
   expect((await call(app, "DELETE", "/v1/sites/myapp", "alice")).status).toBe(200);
 });
 
+test("publish parses _drop.json into config and does not serve it", async () => {
+  const blob = new FakeBlob();
+  const meta = new MetaStore(blob);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com" });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@paytm.com", email: "alice@paytm.com" } });
+  const app = createApp({ cfg, meta, blob, verifier });
+
+  const tar = await tgz({
+    "index.html": "<html>",
+    "_drop.json": JSON.stringify({ spaFallback: "app.html", redirects: [{ from: "/old", to: "/new" }] }),
+  });
+  expect((await pub(app, "alice", "cfgsite", tar)).status).toBe(200);
+
+  const site = (await meta.getSitePlain("cfgsite"))!;
+  expect(site.config?.spaFallback).toBe("app.html");
+  expect(site.config?.redirects?.[0]!.to).toBe("/new");
+
+  const files = await blob.list(meta.filesPrefix("cfgsite", site.currentVersion!));
+  expect(files.keys.some((k) => k.endsWith("/_drop.json"))).toBe(false); // not a served file
+  expect(files.keys.some((k) => k.endsWith("/index.html"))).toBe(true);
+});
+
 test("ls lists owned + collaborated sites", async () => {
   const { app } = build();
   await pub(app, "alice", "one", await tgz({ "index.html": "x" }));
