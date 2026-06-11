@@ -6,13 +6,15 @@
     "node": ">=24"
   },
   "bin": {
-    "drop": "dist/drop.js"
+    "drop": "dist/drop.js",
+    "drop-mcp": "dist/mcp.js"
   },
   "scripts": {
     "build": "node build.mjs",
-    "prepare": "node build.mjs cli",
+    "prepare": "node build.mjs cli mcp",
     "start:api": "node dist/api.js",
     "start:edge": "node dist/edge.js",
+    "mcp": "node dist/mcp.js",
     "drop": "node dist/drop.js",
     "build:binary": "bun build --compile ./bin/drop.ts --outfile dist/drop",
     "test": "bun test"
@@ -20,11 +22,13 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.600.0",
     "@hono/node-server": "^2.0.4",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^12.1.0",
     "hono": "^4.6.0",
     "jose": "^5.9.0",
     "openid-client": "^6.1.0",
-    "tar-stream": "^3.1.7"
+    "tar-stream": "^3.1.7",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/bun": "latest",

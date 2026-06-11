@@ -50,6 +50,43 @@ either curl with `-H "Host: <name>.drop.localhost"` or add
 > podman too (closer to prod, slower). The root `Makefile` runs the servers as Bun
 > processes for faster iteration.
 
+## Use it from an AI client (MCP — no CLI needed)
+
+Drop ships an **MCP server**, so any MCP client (Claude Code/Desktop, Cursor, …) can
+publish and manage sites in natural language — *"publish ./dist as myapp"*. The
+client launches the server on demand via `npx` (nothing to install).
+
+Add to your MCP config (e.g. Claude Code `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "drop": {
+      "command": "npx",
+      "args": ["-y", "--package", "git+https://bitbucket.paytm.com/scm/<team>/drop.git", "drop-mcp"],
+      "env": {
+        "DROP_API": "https://api.drop.company.com",
+        "DROP_GOOGLE_CLIENT_ID": "...apps.googleusercontent.com",
+        "DROP_GOOGLE_CLIENT_SECRET": "..."
+      }
+    }
+  }
+}
+```
+
+For local dev against `make start`, point it at the built server and dev-auth:
+
+```json
+{ "mcpServers": { "drop": {
+  "command": "node", "args": ["/abs/path/to/drop/dist/mcp.js"],
+  "env": { "DROP_API": "http://localhost:8080", "DROP_DEV_AUTH": "1" } } } }
+```
+
+Tools exposed: `login`, `dev_login`, `publish`, `list_sites`, `site_info`,
+`rollback`, `delete_site`, `add_collaborator`, `remove_collaborator`,
+`transfer_site`. (The server reads/writes the same `~/.config/drop/session.json`
+as the CLI, so `login` once and both work.)
+
 ## Running the CLI (any user)
 
 ### Option 1 — `npx` straight from git (no install, recommended)
