@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drop — idea, implementation & infra</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0b0d; --surface:#121417; --surface2:#171a1e; --line:rgba(255,255,255,.08);
+  --line2:rgba(255,255,255,.14); --txt:#e9ecef; --mut:#8b929b; --dim:#5b626b;
+  --acc:#caff4d; --acc-dim:rgba(202,255,77,.13); --cyan:#5ad1ff; --amber:#ffc14d; --pink:#ff7a9c;
+  --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --sans:"Hanken Grotesk",-apple-system,system-ui,"Segoe UI",sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);color:var(--txt);font-family:var(--sans);line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+  background-image:
+    radial-gradient(1100px 600px at 82% -8%, rgba(202,255,77,.07), transparent 60%),
+    radial-gradient(900px 500px at 5% 20%, rgba(90,209,255,.05), transparent 55%),
+    linear-gradient(var(--line) 1px,transparent 1px),
+    linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:auto,auto,52px 52px,52px 52px;
+  background-position:0 0,0 0,-1px -1px,-1px -1px;
+}
+a{color:var(--acc);text-decoration:none}
+.wrap{max-width:980px;margin:0 auto;padding:0 28px}
+
+/* nav */
+nav{position:sticky;top:0;z-index:20;backdrop-filter:blur(10px);background:rgba(10,11,13,.72);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;justify-content:space-between;height:60px}
+.brand{font-family:var(--mono);font-weight:700;font-size:18px;letter-spacing:-.5px;color:var(--txt)}
+.brand .t{color:var(--acc)}
+nav .links{display:flex;gap:24px;font-family:var(--mono);font-size:12.5px;color:var(--mut)}
+nav .links a{color:var(--mut)}
+nav .links a:hover{color:var(--acc)}
+@media(max-width:720px){nav .links{display:none}}
+
+/* hero */
+.hero{padding:88px 0 60px;border-bottom:1px solid var(--line)}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:3px;text-transform:uppercase;color:var(--acc);margin-bottom:22px}
+h1{font-size:clamp(40px,7vw,76px);line-height:1.02;letter-spacing:-2px;font-weight:800;margin-bottom:22px}
+h1 .g{color:var(--acc)}
+.lede{font-size:clamp(18px,2.4vw,22px);color:var(--mut);max-width:680px;margin-bottom:34px}
+.lede b{color:var(--txt);font-weight:600}
+.term{background:#0e0f12;border:1px solid var(--line2);border-radius:14px;padding:20px 22px;font-family:var(--mono);font-size:14px;max-width:560px;box-shadow:0 30px 60px -30px rgba(0,0,0,.7)}
+.term .c{color:var(--dim)}.term .p{color:var(--mut)}.term .ok{color:var(--acc)}
+.pills{display:flex;flex-wrap:wrap;gap:9px;margin-top:30px}
+.pill{font-family:var(--mono);font-size:11.5px;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:6px 13px}
+.pill b{color:var(--acc);font-weight:500}
+
+/* sections */
+section{padding:66px 0;border-bottom:1px solid var(--line)}
+.kicker{font-family:var(--mono);font-size:12px;letter-spacing:2.5px;text-transform:uppercase;color:var(--dim);margin-bottom:14px}
+h2{font-size:clamp(28px,4vw,40px);letter-spacing:-1px;font-weight:800;margin-bottom:18px}
+h2 .g{color:var(--acc)}
+.sub{color:var(--mut);max-width:720px;margin-bottom:34px;font-size:17px}
+p{color:var(--mut)}p b{color:var(--txt);font-weight:600}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px;transition:.2s}
+.card:hover{border-color:var(--line2);background:var(--surface2);transform:translateY(-2px)}
+.card .n{font-family:var(--mono);font-size:12px;color:var(--acc);margin-bottom:11px;letter-spacing:.5px}
+.card h3{font-size:18px;margin-bottom:8px;letter-spacing:-.3px}
+.card p{font-size:14.5px}
+
+.flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;font-family:var(--mono);font-size:13px;margin:8px 0 6px}
+.flow .step{flex:1;min-width:150px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;position:relative}
+.flow .arr{display:flex;align-items:center;color:var(--dim);padding:0 10px;font-size:18px}
+.flow .step .lbl{color:var(--acc);font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-bottom:7px}
+.flow .step .d{color:var(--mut);font-size:12.5px;line-height:1.45}
+@media(max-width:720px){.flow{flex-direction:column}.flow .arr{transform:rotate(90deg);padding:6px 0}}
+
+pre{background:#0e0f12;border:1px solid var(--line);border-radius:12px;padding:18px 20px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.7;color:#cdd3da;margin:6px 0}
+pre .c{color:var(--dim)}pre .k{color:var(--acc)}pre .s{color:var(--cyan)}
+code.inl{font-family:var(--mono);font-size:.88em;background:var(--surface2);border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--acc)}
+
+table{width:100%;border-collapse:collapse;font-size:14px;margin:6px 0}
+th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:var(--mono);font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);font-weight:500}
+td b{color:var(--txt)}td .m{font-family:var(--mono);color:var(--acc);font-size:12.5px}
+tr:hover td{background:rgba(255,255,255,.015)}
+
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media(max-width:720px){.two{grid-template-columns:1fr}}
+.note{border-left:2px solid var(--acc);padding:4px 0 4px 16px;color:var(--mut);font-size:14.5px;margin:18px 0}
+.note b{color:var(--acc);font-weight:600}
+
+.diagram{background:#0e0f12;border:1px solid var(--line);border-radius:14px;padding:24px;overflow-x:auto}
+.diagram pre{background:none;border:none;padding:0;color:#aeb4bd;font-size:12px}
+
+footer{padding:44px 0 70px;color:var(--dim);font-family:var(--mono);font-size:12.5px;text-align:center}
+.reveal{opacity:0;transform:translateY(14px);transition:opacity .6s,transform .6s}
+.reveal.in{opacity:1;transform:none}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <div class="brand"><span class="t">▸</span> drop</div>
+  <div class="links">
+    <a href="#idea">idea</a>
+    <a href="#how">implementation</a>
+    <a href="#model">data model</a>
+    <a href="#surfaces">surfaces</a>
+    <a href="#infra">infra</a>
+  </div>
+</div></nav>
+
+<header class="hero"><div class="wrap">
+  <div class="eyebrow">Static site publishing · on company infra</div>
+  <h1>Push a folder.<br>Get a <span class="g">URL.</span></h1>
+  <p class="lede"><b>Drop</b> is a self-hosted, Surge.sh-style platform for publishing pre-built
+  static sites (and React SPAs) to <code class="inl">*.drop.company.com</code> — gated by Google login,
+  backed by S3, with <b>no database</b>.</p>
+  <div class="term">
+    <div><span class="p">$</span> drop publish ./dist myapp</div>
+    <div class="c">&nbsp;&nbsp;▸ packing dist/ (42 files)</div>
+    <div class="c">&nbsp;&nbsp;▸ dropping…</div>
+    <div><span class="ok">&nbsp;&nbsp;✓ live at https://myapp.drop.company.com</span></div>
+  </div>
+  <div class="pills">
+    <span class="pill"><b>TypeScript</b> · Node 24</span>
+    <span class="pill"><b>S3</b> only — no DB</span>
+    <span class="pill"><b>Google</b> SSO</span>
+    <span class="pill">CLI · <b>MCP</b> · dashboard</span>
+    <span class="pill">atomic deploys + <b>rollback</b></span>
+  </div>
+</div></header>
+
+<section id="idea"><div class="wrap reveal">
+  <div class="kicker">01 — The idea</div>
+  <h2>Surge.sh, but it <span class="g">never leaves</span> your network</h2>
+  <p class="sub">Developers constantly need to share a built static site — a demo, a docs build, a
+  React app — at a real URL, without provisioning anything. Public tools (Surge, Netlify, Vercel)
+  are perfect UX but can't host internal builds. Drop brings that exact "push a folder, get a URL"
+  flow inside the company, on your own S3 and your own network.</p>
+  <div class="cards">
+    <div class="card"><div class="n">FOR</div><h3>Any developer</h3><p>Build locally, run one command (or ask an AI agent), and the site is live on an internal subdomain in seconds.</p></div>
+    <div class="card"><div class="n">NOT</div><h3>A build platform</h3><p>No server-side builds, no SSR. You ship the finished <code class="inl">dist/</code>; Drop just stores and serves it.</p></div>
+    <div class="card"><div class="n">SECURE</div><h3>Internal-only</h3><p>Publishing is gated by Google Workspace login; sites are reachable only on the corporate network/VPN.</p></div>
+  </div>
+</div></section>
+
+<section id="how"><div class="wrap reveal">
+  <div class="kicker">02 — Implementation</div>
+  <h2>Three small pieces over <span class="g">one S3 bucket</span></h2>
+  <p class="sub">A thin CLI uploads a tarball; a control-plane API unpacks it into a versioned S3
+  prefix and flips a pointer; a stateless edge streams it back. That's the whole system.</p>
+
+  <div class="flow">
+    <div class="step"><div class="lbl">CLI</div><div class="d">tars the built folder, POSTs it with a session token</div></div>
+    <div class="arr">→</div>
+    <div class="step"><div class="lbl">API</div><div class="d">auth, claim name, unpack to <code class="inl">files/&lt;ver&gt;/</code>, flip pointer</div></div>
+    <div class="arr">→</div>
+    <div class="step"><div class="lbl">S3</div><div class="d">the only state: site record + versions + files</div></div>
+    <div class="arr">→</div>
+    <div class="step"><div class="lbl">Edge</div><div class="d">resolve version, stream bytes, SPA fallback</div></div>
+  </div>
+
+  <div class="two" style="margin-top:30px">
+    <div>
+      <h3 style="font-size:18px;margin-bottom:10px">No database — by design</h3>
+      <p style="font-size:14.5px">All state lives as S3 objects. The one operation needing
+      atomicity — "first publisher owns the name" — uses S3 <b>conditional writes</b>
+      (<code class="inl">If-None-Match</code> to claim, <code class="inl">If-Match</code> compare-and-swap
+      to edit). That makes both services <b>stateless and horizontally scalable</b> with no RDS to run.</p>
+    </div>
+    <div>
+      <h3 style="font-size:18px;margin-bottom:10px">Atomic deploys + rollback</h3>
+      <p style="font-size:14.5px">Each publish writes a brand-new immutable <code class="inl">files/&lt;version&gt;/</code>
+      tree, then atomically flips <code class="inl">currentVersion</code>. Readers see all-old or
+      all-new, never a mix. Rollback is just flipping the pointer back; old versions stay in S3.</p>
+    </div>
+  </div>
+
+  <div class="note" style="margin-top:28px"><b>SPA-aware serving.</b> A missing path that looks like a
+  navigation route (<code class="inl">/dashboard</code>) falls back to <code class="inl">index.html</code> (200) so
+  React Router deep-links work; a missing <i>asset</i> (<code class="inl">.js/.css</code>) returns a real 404 —
+  never HTML where the browser expects JS.</div>
+
+  <h3 style="font-size:18px;margin:30px 0 10px">Auth — server-mediated Google login</h3>
+  <p style="font-size:14.5px">Clients hold no Google credentials. The API <i>is</i> the OAuth client:
+  it runs the Google flow, verifies the email + domain (and an optional per-person allowlist), and
+  mints its own signed session token. Clients (CLI, MCP, dashboard) only ever need the API URL.</p>
+
+  <h3 style="font-size:18px;margin:30px 0 10px">Caching — memory for pointers, disk for bytes</h3>
+  <p style="font-size:14.5px">Process memory holds only the tiny per-site version pointer, so it stays
+  flat across hundreds of sites. Asset <i>bytes</i> go to an ephemeral local-disk cache (keyed by the
+  immutable versioned path), where the OS page cache keeps hot files at RAM speed — no heap-OOM risk.</p>
+</div></section>
+
+<section id="model"><div class="wrap reveal">
+  <div class="kicker">03 — Data model</div>
+  <h2>Everything is an <span class="g">S3 object</span></h2>
+  <p class="sub">Three object types per site. No tables, no migrations.</p>
+  <pre><span class="c"># one private bucket</span>
+sites/<span class="k">&lt;name&gt;</span>/site.json              <span class="c">owner, collaborators, currentVersion   (claim + CAS)</span>
+sites/<span class="k">&lt;name&gt;</span>/versions/<span class="s">&lt;id&gt;</span>.json    <span class="c">per-publish audit (who, when, size)</span>
+sites/<span class="k">&lt;name&gt;</span>/files/<span class="s">&lt;id&gt;</span>/...        <span class="c">the served files (immutable per version)</span></pre>
+  <p style="font-size:14.5px;margin-top:14px">The edge reads <code class="inl">site.json</code> for the live version
+  (cached), then streams <code class="inl">files/&lt;currentVersion&gt;/&lt;path&gt;</code>. A publish never mutates an
+  existing version — it writes a new one and flips the pointer.</p>
+</div></section>
+
+<section id="surfaces"><div class="wrap reveal">
+  <div class="kicker">04 — Access surfaces</div>
+  <h2>Same engine, <span class="g">three front doors</span></h2>
+  <p class="sub">All share one codebase, one identity, and the same API.</p>
+  <div class="cards">
+    <div class="card"><div class="n">TERMINAL</div><h3>CLI</h3><p>Run from git with zero install — <code class="inl">npx git+…/drop.git publish ./dist app</code> — or a one-shot <code class="inl">install.sh</code>.</p></div>
+    <div class="card"><div class="n">AI CLIENT</div><h3>MCP server</h3><p>Add to Claude/Cursor and publish in natural language. Launched on demand via <code class="inl">npx</code> — nothing installed.</p></div>
+    <div class="card"><div class="n">BROWSER</div><h3>Dashboard</h3><p>Sign in with Google; list sites, roll back versions, manage collaborators, transfer, delete — served by the API.</p></div>
+  </div>
+</div></section>
+
+<section id="infra"><div class="wrap reveal">
+  <div class="kicker">05 — Infra requirements</div>
+  <h2>Small footprint, <span class="g">no stateful tier</span></h2>
+  <p class="sub">Two tiny stateless Node services + S3. No database, no static credentials.
+  Runs on EC2, ECS, or Kubernetes (a Helm chart ships in the repo).</p>
+
+  <table>
+    <tr><th>Need</th><th>AWS service</th><th>Notes</th></tr>
+    <tr><td><b>Object storage</b> (only state)</td><td class="m">S3</td><td>One private bucket. Supports the conditional writes Drop relies on. Block public access.</td></tr>
+    <tr><td><b>Run api + edge</b></td><td class="m">ECS Fargate / EKS / EC2</td><td>One image, command per role. Both stateless → scale by replicas.</td></tr>
+    <tr><td><b>Image registry</b></td><td class="m">ECR</td><td>CI builds + pushes the unified image.</td></tr>
+    <tr><td><b>LB + TLS</b></td><td class="m">ALB + ACM</td><td>One wildcard <code class="inl">*.drop.company.com</code> cert; TLS terminates at the ALB.</td></tr>
+    <tr><td><b>DNS</b></td><td class="m">Route 53</td><td><code class="inl">api.drop.company.com</code> → api, <code class="inl">*.drop.company.com</code> → edge.</td></tr>
+    <tr><td><b>Secrets</b></td><td class="m">Secrets Manager</td><td>Google client secret + session-signing secret.</td></tr>
+    <tr><td><b>S3 auth</b></td><td class="m">IAM roles (IRSA)</td><td>No access keys — pods/tasks assume a role.</td></tr>
+    <tr><td><b>Egress + S3</b></td><td class="m">NAT GW + S3 VPC endpoint</td><td>API reaches Google for OAuth; S3 traffic stays in-VPC.</td></tr>
+  </table>
+
+  <div class="diagram" style="margin-top:26px"><pre>            Route 53                         ACM  *.drop.company.com
+  *.drop.company.com ─┐      ┌── cert on :443 ──┘
+  api.drop.company.com┴────▶ ALB ──┬── host api.*  ─────▶  api   ─┐
+                                   └── host *      ─────▶  edge  ─┤  IAM role (IRSA)
+                                                                  ▼
+                                                       S3 bucket (drop-sites)
+   api ──(NAT)──▶ accounts.google.com (OAuth)          site.json · versions/ · files/</pre></div>
+
+  <div class="two" style="margin-top:28px">
+    <div><h3 style="font-size:18px;margin-bottom:10px">Kubernetes</h3>
+      <p style="font-size:14.5px">Helm chart deploys api + edge Deployments, Services, one Ingress
+      (api host + wildcard), ConfigMap/Secret, an IRSA ServiceAccount, optional HPA. The edge cache is a
+      per-pod ephemeral <code class="inl">emptyDir</code> — scales to any replica count.</p></div>
+    <div><h3 style="font-size:18px;margin-bottom:10px">Why it's cheap</h3>
+      <p style="font-size:14.5px">No RDS is the big saving. Fixed costs are basically the ALB + NAT;
+      Fargate baseline for two tiny services is small; S3/ACM/Route 53 are pennies. Low hundreds/month
+      at internal scale.</p></div>
+  </div>
+
+  <div class="note" style="margin-top:26px"><b>One config rule.</b> Clients (CLI/MCP/dashboard) need only
+  <code class="inl">DROP_API</code>. Everything sensitive — Google credentials, session secret, S3 role —
+  lives only on the API/edge.</div>
+</div></section>
+
+<footer><div class="wrap">
+  drop · self-hosted static publishing · TypeScript on Node · S3-only · Google SSO
+</div></footer>
+
+<script>
+const io=new IntersectionObserver((es)=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.12});
+document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+</script>
+</body>
+</html>
