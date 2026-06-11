@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "drop.fullname" . }}-edge
+  labels:
+    {{- include "drop.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge
+spec:
+  {{- if not .Values.edge.autoscaling.enabled }}
+  replicas: {{ .Values.edge.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "drop.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: edge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "drop.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: edge
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "drop.serviceAccountName" . }}
+      containers:
+        - name: edge
+          image: {{ include "drop.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/edge.js"]
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: {{ include "drop.fullname" . }}-config
+          {{- if .Values.edge.diskCache.enabled }}
+          env:
+            - name: DROP_EDGE_DISK_CACHE
+              value: {{ .Values.edge.diskCache.mountPath | quote }}
+            - name: DROP_EDGE_DISK_CACHE_BYTES
+              value: {{ .Values.edge.diskCache.sizeBytes | quote }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /_drop_health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /_drop_health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.edge.resources | nindent 12 }}
+          {{- if .Values.edge.diskCache.enabled }}
+          volumeMounts:
+            - name: edge-cache
+              mountPath: {{ .Values.edge.diskCache.mountPath }}
+          {{- end }}
+      {{- if .Values.edge.diskCache.enabled }}
+      volumes:
+        - name: edge-cache
+          {{- if eq .Values.edge.diskCache.type "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ include "drop.fullname" . }}-edge-cache
+          {{- else }}
+          emptyDir:
+            sizeLimit: {{ .Values.edge.diskCache.emptyDirSizeLimit }}
+          {{- end }}
+      {{- end }}

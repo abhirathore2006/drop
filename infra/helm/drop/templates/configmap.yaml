@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "drop.fullname" . }}-config
+  labels:
+    {{- include "drop.labels" . | nindent 4 }}
+data:
+  DROP_HTTP_PORT: "8080"
+  DROP_BASE_DOMAIN: {{ .Values.baseDomain | quote }}
+  DROP_S3_BUCKET: {{ .Values.config.s3Bucket | quote }}
+  DROP_S3_REGION: {{ .Values.config.s3Region | quote }}
+  DROP_ALLOWED_DOMAINS: {{ .Values.config.allowedDomains | quote }}

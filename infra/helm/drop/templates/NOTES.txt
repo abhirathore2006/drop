@@ -1,0 +1,22 @@
+Drop is deployed.
+
+  API / dashboard:  https://{{ .Values.apiHost }}
+  Sites served at:  https://<name>.{{ .Values.baseDomain }}
+
+Checklist:
+  1. DNS: point  {{ .Values.apiHost }}  and  *.{{ .Values.baseDomain }}  at your ingress/LB.
+  2. TLS: a wildcard cert covering both (ACM via ingress annotations, or a
+     Secret named "{{ .Values.ingress.tls.secretName | default "<set ingress.tls.secretName>" }}").
+  3. Google OAuth (Web application) redirect URI:
+        {{ include "drop.publicUrl" . }}/auth/callback
+  4. S3: the ServiceAccount "{{ include "drop.serviceAccountName" . }}" needs an IAM role
+     (IRSA) with read/write on bucket "{{ .Values.config.s3Bucket }}".
+{{- if and (not .Values.secret.existingSecret) (not .Values.secret.create) }}
+
+  ⚠  No secret configured. Set secret.existingSecret (recommended) or
+     secret.create=true with secret.googleClientSecret + secret.sessionSecret.
+{{- end }}
+
+Verify:
+  kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl logs deploy/{{ include "drop.fullname" . }}-api

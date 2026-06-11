@@ -1,0 +1,48 @@
+{{- if .Values.ingress.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "drop.fullname" . }}
+  labels:
+    {{- include "drop.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.apiHost | quote }}
+        - {{ printf "*.%s" .Values.baseDomain | quote }}
+      {{- with .Values.ingress.tls.secretName }}
+      secretName: {{ . }}
+      {{- end }}
+  {{- end }}
+  rules:
+    # Control plane + dashboard + OAuth callback.
+    - host: {{ .Values.apiHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "drop.fullname" . }}-api
+                port:
+                  number: 80
+    # All published sites (wildcard). The explicit api host above wins for api.*.
+    - host: {{ printf "*.%s" .Values.baseDomain | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "drop.fullname" . }}-edge
+                port:
+                  number: 80
+{{- end -}}

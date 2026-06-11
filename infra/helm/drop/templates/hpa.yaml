@@ -1,0 +1,27 @@
+{{- range $c := list "api" "edge" -}}
+{{- $cfg := index $.Values $c -}}
+{{- if $cfg.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "drop.fullname" $ }}-{{ $c }}
+  labels:
+    {{- include "drop.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $c }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "drop.fullname" $ }}-{{ $c }}
+  minReplicas: {{ $cfg.autoscaling.minReplicas }}
+  maxReplicas: {{ $cfg.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $cfg.autoscaling.targetCPUUtilizationPercentage }}
+---
+{{- end }}
+{{- end -}}

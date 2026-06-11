@@ -1,4 +1,4 @@
-# Run with Podman: `podman compose -f deploy/docker-compose.yml up --build`
+# Run with Podman: `podman compose -f infra/docker-compose.yml up --build`
 # No database — Floci (S3-compatible AWS emulator) is the only backing store.
 # Images are fully-qualified for Podman's strict registry resolution.
 services:
@@ -15,7 +15,7 @@ services:
   api:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.api
+      dockerfile: infra/Dockerfile.api
     depends_on:
       floci:
         condition: service_started
@@ -34,7 +34,7 @@ services:
   edge:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.edge
+      dockerfile: infra/Dockerfile.edge
     depends_on:
       floci:
         condition: service_started

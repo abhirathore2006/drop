@@ -1,0 +1,24 @@
+{{- if and .Values.edge.diskCache.enabled (eq .Values.edge.diskCache.type "pvc") -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "drop.fullname" . }}-edge-cache
+  labels:
+    {{- include "drop.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge
+spec:
+  accessModes:
+    - {{ .Values.edge.diskCache.pvc.accessMode }}
+  {{- with .Values.edge.diskCache.pvc.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.edge.diskCache.pvc.size }}
+{{- end -}}
+{{- /*
+NOTE: a single ReadWriteOnce PVC can't be shared across edge replicas. With
+diskCache.type=pvc, either keep edge.replicaCount=1, or use a ReadWriteMany
+storage class. For multiple replicas, prefer diskCache.type=emptyDir (per-pod,
+node-local) — it's just a cache, so per-pod is ideal.
+*/ -}}

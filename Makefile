@@ -1,6 +1,6 @@
 # Drop — local development (Floci in podman + api/edge as node processes).
 # Runtime is Node (version pinned in .nvmrc). Bun is only used for `bun test`.
-# For the fully-containerized path, see deploy/ (`make -C deploy up`).
+# For the fully-containerized path, see infra/ (`make -C infra up`).
 
 API_PORT     ?= 8473
 EDGE_PORT    ?= 8474

@@ -47,7 +47,7 @@ volume). Published sites persist across restarts in a named volume. The edge rou
 either curl with `-H "Host: <name>.drop.localhost"` or add
 `127.0.0.1 <name>.drop.localhost` to `/etc/hosts` to view in a browser.
 
-> Prefer everything in containers? `make -C deploy up` builds + runs api/edge in
+> Prefer everything in containers? `make -C infra up` builds + runs api/edge in
 > podman too (closer to prod, slower). The root `Makefile` runs the servers as Bun
 > processes for faster iteration.
 
@@ -132,7 +132,7 @@ instead, so they work everywhere. To ship an actual binary, build it in CI and
 
 ```bash
 bun test                              # unit + in-process e2e (no infra needed)
-cd deploy && make test-integration    # live S3 (Floci) — conditional writes, claim/CAS
+cd infra && make test-integration    # live S3 (Floci) — conditional writes, claim/CAS
 ```
 
 Unit tests use an in-memory blob fake that faithfully simulates ETags + conditional

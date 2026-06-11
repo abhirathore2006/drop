@@ -103,6 +103,8 @@ export function createEdge(d: EdgeDeps) {
   }
 
   const app = new Hono();
+  // Health endpoint for k8s probes (obscure path → won't shadow real site assets).
+  app.get("/_drop_health", (c) => c.text("ok"));
   app.all("*", async (c) => {
     const name = siteFromHost(c.req.header("host") ?? "");
     if (!name) return notFound("site not found");

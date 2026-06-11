@@ -1,0 +1,84 @@
+# Single image with both bundles; command is overridden per Deployment.
+image:
+  repository: REPLACE_ME.dkr.ecr.us-east-1.amazonaws.com/drop
+  tag: "" # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+# DNS
+baseDomain: drop.company.com # sites served at *.baseDomain
+apiHost: api.drop.company.com # control plane + dashboard + OAuth callback
+
+# Non-secret config (rendered into a ConfigMap / pod env).
+config:
+  s3Bucket: drop-sites
+  s3Region: us-east-1
+  allowedDomains: "paytm.com" # comma-separated; empty = any Google account
+  allowedEmails: "" # optional per-person allowlist, comma-separated
+  publicUrl: "" # default https://{apiHost}; its /auth/callback is the OAuth redirect
+
+googleClientId: "" # not secret → ConfigMap/env
+
+# Secrets: prefer referencing an existing Secret (e.g. synced from AWS Secrets
+# Manager via External Secrets). Otherwise set create=true (dev only).
+secret:
+  existingSecret: "" # name of a Secret holding the two keys below
+  googleClientSecretKey: DROP_GOOGLE_CLIENT_SECRET
+  sessionSecretKey: DROP_SESSION_SECRET
+  create: false
+  googleClientSecret: ""
+  sessionSecret: "" # generate: openssl rand -hex 32
+
+# S3 auth is via the pod's IAM role (IRSA) — no access keys. Put the role ARN here.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/drop-s3
+
+api:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+edge:
+  replicaCount: 2
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  # On-disk asset cache (memory holds only the version pointer). Node-local / per-pod.
+  diskCache:
+    enabled: true
+    mountPath: /cache
+    sizeBytes: 5368709120 # 5Gi → DROP_EDGE_DISK_CACHE_BYTES
+    # storage backing: emptyDir (per-pod, ephemeral, fast) or pvc (survives restarts).
+    type: emptyDir
+    emptyDirSizeLimit: 6Gi
+    pvc:
+      storageClass: ""
+      size: 6Gi
+      accessMode: ReadWriteOnce
+
+ingress:
+  enabled: true
+  className: "" # e.g. "nginx" or "alb"
+  annotations: {}
+  # nginx example: cert-manager.io/cluster-issuer, etc.
+  # ALB example: alb.ingress.kubernetes.io/certificate-arn, scheme: internal, ...
+  tls:
+    enabled: true
+    secretName: "" # wildcard cert Secret (nginx). For ALB, use ACM via annotations.
+
+nameOverride: ""
+fullnameOverride: ""
+podAnnotations: {}

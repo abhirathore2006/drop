@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "drop.fullname" . }}-api
+  labels:
+    {{- include "drop.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "drop.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "drop.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: api
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "drop.serviceAccountName" . }}
+      containers:
+        - name: api
+          image: {{ include "drop.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/api.js"]
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: {{ include "drop.fullname" . }}-config
+          env:
+            - name: DROP_DEV_AUTH
+              value: "0"
+            - name: DROP_GOOGLE_CLIENT_ID
+              value: {{ .Values.googleClientId | quote }}
+            - name: DROP_PUBLIC_URL
+              value: {{ include "drop.publicUrl" . | quote }}
+            - name: DROP_ALLOWED_EMAILS
+              value: {{ .Values.config.allowedEmails | quote }}
+            - name: DROP_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "drop.secretName" . }}
+                  key: {{ .Values.secret.googleClientSecretKey }}
+            - name: DROP_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "drop.secretName" . }}
+                  key: {{ .Values.secret.sessionSecretKey }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
