@@ -5,6 +5,7 @@
 API_PORT     ?= 8473
 EDGE_PORT    ?= 8474
 FLOCI_PORT   ?= 4566
+FLOCI_VOLUME ?= drop-floci-data
 BASE_DOMAIN  ?= drop.localhost
 BUCKET       ?= drop
 RUN          := .run
@@ -20,7 +21,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci publish login stop-all build
+.PHONY: help setup start stop restart status logs floci publish login stop-all build reset
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -33,6 +34,7 @@ help:
 	@echo "  make publish DIR=./dist NAME=x  publish a folder and print its URL"
 	@echo "  make login                      sign in with Google (server-mediated, real auth)"
 	@echo "  make stop-all                   also stop the podman machine"
+	@echo "  make reset                      wipe the persistent Floci volume (all sites)"
 	@echo ""
 	@echo "  corp/Zscaler CA for podman pulls:  make setup CORP_CA=~/certs/Zscalerroot.cer"
 
@@ -62,9 +64,14 @@ build:
 
 floci:
 	@podman machine start >/dev/null 2>&1 || true
-	@podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' || podman run -d --rm --name drop-floci -p $(FLOCI_PORT):4566 docker.io/floci/floci:latest >/dev/null
+	@podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' || podman run -d --rm --name drop-floci -p $(FLOCI_PORT):4566 -e FLOCI_STORAGE_MODE=hybrid -v $(FLOCI_VOLUME):/app/data docker.io/floci/floci:latest >/dev/null
 	@for i in $$(seq 1 40); do curl -s -o /dev/null http://localhost:$(FLOCI_PORT)/ 2>/dev/null && break; sleep 1; done
-	@echo "✓ floci  :$(FLOCI_PORT)"
+	@echo "✓ floci  :$(FLOCI_PORT)  (persistent volume: $(FLOCI_VOLUME))"
+
+# Wipe the persistent Floci volume (all published sites). Stops Floci first.
+reset:
+	@-podman stop drop-floci >/dev/null 2>&1 || true
+	@-podman volume rm $(FLOCI_VOLUME) >/dev/null 2>&1 && echo "✓ wiped $(FLOCI_VOLUME)" || echo "(no volume to wipe)"
 
 start: floci
 	@mkdir -p $(RUN)

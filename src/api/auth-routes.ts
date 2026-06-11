@@ -98,7 +98,8 @@ export function registerAuthRoutes(app: Hono<AuthEnv>, cfg: Config, blob: BlobSt
       const email = typeof claims.email === "string" ? claims.email : "";
       const verified = claims.email_verified === true;
       const hd = typeof claims.hd === "string" ? claims.hd : undefined;
-      if (!email || !verified || !checkDomain(email, hd, cfg.allowedDomains)) {
+      const emailAllowed = cfg.allowedEmails.length === 0 || cfg.allowedEmails.includes(email.toLowerCase());
+      if (!email || !verified || !checkDomain(email, hd, cfg.allowedDomains) || !emailAllowed) {
         await save(handle, { ...h, status: "denied", error: "account not allowed" });
         return c.html(page("Your account isn't allowed to use Drop."), 403);
       }

@@ -9,6 +9,7 @@ export interface Config {
   googleClientId?: string;
   googleClientSecret?: string;
   allowedDomains: string[]; // empty = any Google account
+  allowedEmails: string[]; // empty = no per-email restriction; else only these (lowercased)
   publicUrl: string; // externally-reachable API base, for the OAuth callback
   sessionSecret: string; // HS256 key for Drop session tokens (required unless devAuth)
   devAuth: boolean;
@@ -33,6 +34,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     allowedDomains: (env.DROP_ALLOWED_DOMAINS ?? "")
       .split(",")
       .map((s) => s.trim())
+      .filter(Boolean),
+    allowedEmails: (env.DROP_ALLOWED_EMAILS ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
     publicUrl: (env.DROP_PUBLIC_URL ?? `http://localhost:${env.DROP_HTTP_PORT ?? "8080"}`).replace(/\/$/, ""),
     sessionSecret: env.DROP_SESSION_SECRET ?? "",

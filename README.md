@@ -42,7 +42,8 @@ curl -H "Host: myapp.drop.localhost" http://localhost:8474/
 ```
 
 Other targets: `make status`, `make logs`, `make restart`, `make stop`
-(`make stop-all` also stops the podman VM). The edge routes by `Host` header, so
+(`make stop-all` also stops the podman VM), `make reset` (wipe the persistent Floci
+volume). Published sites persist across restarts in a named volume. The edge routes by `Host` header, so
 either curl with `-H "Host: <name>.drop.localhost"` or add
 `127.0.0.1 <name>.drop.localhost` to `/etc/hosts` to view in a browser.
 
@@ -150,6 +151,9 @@ session tokens, so credentials live only on the server. Set on the **API**:
 - `DROP_PUBLIC_URL` — the API's externally-reachable base (e.g. `https://api.drop.company.com`).
 - `DROP_SESSION_SECRET` — HS256 key signing Drop session tokens (rotate to revoke all sessions).
 - `DROP_ALLOWED_DOMAINS=paytm.com` — restrict to your Workspace domain.
+- `DROP_ALLOWED_EMAILS=` *(optional)* — comma-separated allowlist of specific people,
+  layered on top of the domain rule. Empty = no per-email limit. (Gates *login*; to
+  revoke existing sessions immediately, rotate `DROP_SESSION_SECRET`.)
 - If the API egresses via a TLS-inspecting proxy (Zscaler), set `NODE_EXTRA_CA_CERTS`
   to the corp CA so it can reach `accounts.google.com`.
 
