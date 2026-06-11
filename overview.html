@@ -116,8 +116,8 @@ footer{padding:44px 0 70px;color:var(--dim);font-family:var(--mono);font-size:12
 <header class="hero"><div class="wrap">
   <div class="eyebrow">Confidential static hosting · on your own infrastructure</div>
   <h1>Ship internal sites.<br>Nothing <span class="g">ever leaves.</span></h1>
-  <p class="lede"><b>Drop</b> gives developers the Surge.sh "push a folder, get a URL" experience for
-  internal sites and React SPAs — <b>without your code, builds, or URLs ever touching a third-party</b>.
+  <p class="lede"><b>Drop</b> publishes static output — <b>AI-agent reports, slide decks, dashboards</b>,
+  data viz, React SPAs — to an internal URL in seconds, <b>without it ever touching a third-party</b>.
   Everything lives in <b>your own S3</b>, on <b>your own network</b>, behind <b>your own Google Workspace</b>.</p>
   <div class="term">
     <div><span class="p">$</span> drop publish ./dist myapp</div>
@@ -144,16 +144,17 @@ footer{padding:44px 0 70px;color:var(--dim);font-family:var(--mono);font-size:12
 </div></header>
 
 <section id="idea"><div class="wrap reveal">
-  <div class="kicker">01 — The idea</div>
-  <h2>Surge.sh, but it <span class="g">never leaves</span> your network</h2>
-  <p class="sub">Developers constantly need to share a built static site — a demo, a docs build, a
-  React app — at a real URL, without provisioning anything. Public tools (Surge, Netlify, Vercel)
-  are perfect UX but can't host internal builds. Drop brings that exact "push a folder, get a URL"
-  flow inside the company, on your own S3 and your own network.</p>
+  <div class="kicker">01 — The use case</div>
+  <h2>Where <span class="g">agent-generated</span> reports &amp; decks go to live</h2>
+  <p class="sub">AI agents now produce a flood of static deliverables — analytics <b>reports</b>,
+  <b>slide decks</b>, dashboards, data visualizations, one-off HTML write-ups. Each one needs a real,
+  shareable link <i>right now</i> — but emailing a file is clumsy, and a public host would leak
+  confidential work. Drop is where these artifacts land: an agent (or a person) publishes the folder
+  and instantly gets a confidential internal URL, with no deploy pipeline and nothing leaving the network.</p>
   <div class="cards">
-    <div class="card"><div class="n">FOR</div><h3>Any developer</h3><p>Build locally, run one command (or ask an AI agent), and the site is live on an internal subdomain in seconds.</p></div>
-    <div class="card"><div class="n">NOT</div><h3>A build platform</h3><p>No server-side builds, no SSR. You ship the finished <code class="inl">dist/</code>; Drop just stores and serves it.</p></div>
-    <div class="card"><div class="n">SECURE</div><h3>Internal-only</h3><p>Publishing is gated by Google Workspace login; sites are reachable only on the corporate network/VPN.</p></div>
+    <div class="card"><div class="n">PUBLISH</div><h3>Reports · decks · dashboards</h3><p>Any static bundle — an HTML report, a reveal.js deck, a Vite/React dashboard — becomes a live internal URL you can drop into Slack or a ticket.</p></div>
+    <div class="card"><div class="n">AGENT-NATIVE</div><h3>The agent ships it itself</h3><p>Via the MCP server, Claude/Cursor calls <code class="inl">publish</code> directly — "host this report" → a shareable link, no human deploy step. Versioned, with instant rollback.</p></div>
+    <div class="card"><div class="n">CONFIDENTIAL</div><h3>Stays inside the company</h3><p>Sensitive, agent-generated analysis never touches a third-party SaaS — it sits in your S3, served internal-only, gated by Workspace login (and optional per-site password).</p></div>
   </div>
 </div></section>
 
