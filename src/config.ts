@@ -10,6 +10,7 @@ export interface Config {
   googleClientSecret?: string;
   allowedDomains: string[]; // empty = any Google account
   allowedEmails: string[]; // empty = no per-email restriction; else only these (lowercased)
+  admins: string[]; // emails that can see/manage all sites (lowercased)
   publicUrl: string; // externally-reachable API base, for the OAuth callback
   sessionSecret: string; // HS256 key for Drop session tokens (required unless devAuth)
   devAuth: boolean;
@@ -38,6 +39,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       .map((s) => s.trim())
       .filter(Boolean),
     allowedEmails: (env.DROP_ALLOWED_EMAILS ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    admins: (env.DROP_ADMINS ?? "")
       .split(",")
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),

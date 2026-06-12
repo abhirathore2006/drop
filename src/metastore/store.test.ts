@@ -40,6 +40,38 @@ test("versions are listed newest-first", async () => {
   expect(vs.map((v) => v.id)).toEqual(["v_002", "v_001"]);
 });
 
+test("per-user marker index: add / list / remove", async () => {
+  const m = store();
+  await m.addUserSite("alice@paytm.com", "a");
+  await m.addUserSite("alice@paytm.com", "b");
+  await m.addUserSite("bob@paytm.com", "c");
+  expect((await m.listUserSites("alice@paytm.com")).sort()).toEqual(["a", "b"]);
+  expect(await m.listUserSites("bob@paytm.com")).toEqual(["c"]);
+  await m.removeUserSite("alice@paytm.com", "a");
+  expect(await m.listUserSites("alice@paytm.com")).toEqual(["b"]);
+});
+
+test("removing one marker doesn't clobber a name-prefix sibling", async () => {
+  const m = store();
+  await m.addUserSite("a@x.com", "app");
+  await m.addUserSite("a@x.com", "app2");
+  await m.removeUserSite("a@x.com", "app");
+  expect(await m.listUserSites("a@x.com")).toEqual(["app2"]); // app2 survived
+});
+
+test("listSitesPage paginates with a cursor", async () => {
+  const m = store();
+  for (const n of ["s1", "s2", "s3", "s4", "s5"]) await m.claimSite(n, "o@x.com");
+  const p1 = await m.listSitesPage({ limit: 2 });
+  expect(p1.names.length).toBe(2);
+  expect(p1.nextCursor).toBeDefined();
+  const p2 = await m.listSitesPage({ limit: 2, cursor: p1.nextCursor });
+  const p3 = await m.listSitesPage({ limit: 2, cursor: p2.nextCursor });
+  expect(p3.names.length).toBe(1);
+  expect(p3.nextCursor).toBeUndefined();
+  expect([...p1.names, ...p2.names, ...p3.names].sort()).toEqual(["s1", "s2", "s3", "s4", "s5"]);
+});
+
 test("listSiteNames + deleteSite", async () => {
   const m = store();
   await m.claimSite("alpha", "a@paytm.com");

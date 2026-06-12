@@ -27,7 +27,30 @@ All state is S3 objects — there is **no database**:
 sites/<name>/site.json            owner, collaborators, currentVersion  (claim/CAS)
 sites/<name>/versions/<id>.json   per-publish audit
 sites/<name>/files/<id>/...       the served files
+users/<email>/<name>              per-user marker index (empty object)
+auth/<handle>.json                pending server-mediated login handles
 ```
+
+`users/<email>/<name>` is a zero-byte **marker** written whenever a user gains access
+to a site (claim, share, transfer) and deleted when they lose it (unshare, delete).
+It lets `GET /v1/sites` list a user's sites with a single `LIST users/<email>/` —
+O(your sites), not O(all sites) — so `ls` stays fast at 50k–1M sites. Removal deletes
+the exact key (never a prefix) so `app` and `app2` can't collide.
+
+Serving and lookup-by-name are O(1) on the key regardless of site count; only
+*enumeration* is affected by scale. The admin browse (below) therefore uses a
+cursor-paginated `LIST sites/` rather than loading everything. (A rich global search
+across all sites would need a separate read-model index — e.g. DynamoDB/OpenSearch —
+which is deliberately out of scope here.)
+
+### Admin
+
+Emails in `DROP_ADMINS` (comma-separated) are platform admins. `GET /v1/me` returns
+`{ admin: true }` for them, and `GET /v1/admin/sites?cursor=&limit=&prefix=` lets them
+page through **every** site (name-prefix filterable) regardless of ownership. The
+dashboard shows an **all sites** tab for admins backed by the same endpoint. Everything
+else (publish/rollback/share/transfer/delete) is still gated by per-site ownership on
+the verified Google email — admin status does not bypass `_drop.json` name-ownership.
 
 ## Local development
 
@@ -188,6 +211,8 @@ session tokens, so credentials live only on the server. Set on the **API**:
 - `DROP_ALLOWED_EMAILS=` *(optional)* — comma-separated allowlist of specific people,
   layered on top of the domain rule. Empty = no per-email limit. (Gates *login*; to
   revoke existing sessions immediately, rotate `DROP_SESSION_SECRET`.)
+- `DROP_ADMINS=` *(optional)* — comma-separated emails granted the admin **all sites**
+  view (`GET /v1/admin/sites`). Does not bypass per-site ownership.
 - If the API egresses via a TLS-inspecting proxy (Zscaler), set `NODE_EXTRA_CA_CERTS`
   to the corp CA so it can reach `accounts.google.com`.
 

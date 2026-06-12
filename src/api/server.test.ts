@@ -96,6 +96,51 @@ test("get site authz + owner-only delete", async () => {
   expect((await call(app, "DELETE", "/v1/sites/myapp", "alice")).status).toBe(200);
 });
 
+test("ls returns only the caller's own + shared sites", async () => {
+  const { app } = build();
+  await pub(app, "alice", "a-one", await tgz({ "index.html": "x" }));
+  await pub(app, "alice", "a-two", await tgz({ "index.html": "x" }));
+  await pub(app, "bob", "b-one", await tgz({ "index.html": "x" }));
+  await call(app, "POST", "/v1/sites/a-one/collaborators", "alice", { email: "bob@paytm.com" });
+
+  const alice = await (await call(app, "GET", "/v1/sites", "alice")).json();
+  expect(alice.sites.map((s: any) => s.name).sort()).toEqual(["a-one", "a-two"]);
+  const bob = await (await call(app, "GET", "/v1/sites", "bob")).json();
+  expect(bob.sites.map((s: any) => s.name).sort()).toEqual(["a-one", "b-one"]); // shared a-one shows up
+});
+
+test("admin endpoint: non-admin 403, admin sees ALL sites paginated", async () => {
+  const blob = new FakeBlob();
+  const meta = new MetaStore(blob);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com", DROP_ADMINS: "alice@paytm.com" });
+  const verifier = new FakeVerifier({
+    alice: { sub: "alice@paytm.com", email: "alice@paytm.com" },
+    bob: { sub: "bob@paytm.com", email: "bob@paytm.com" },
+  });
+  const app = createApp({ cfg, meta, blob, verifier });
+  await pub(app, "alice", "site-a", await tgz({ "index.html": "x" }));
+  await pub(app, "bob", "site-b", await tgz({ "index.html": "x" }));
+
+  expect((await call(app, "GET", "/v1/admin/sites", "bob")).status).toBe(403); // bob not an admin
+  const r = await call(app, "GET", "/v1/admin/sites", "alice");
+  expect(r.status).toBe(200);
+  const body = await r.json();
+  expect(body.sites.map((s: any) => s.name).sort()).toEqual(["site-a", "site-b"]); // admin sees bob's too
+});
+
+test("/v1/me reports admin flag", async () => {
+  const blob = new FakeBlob();
+  const meta = new MetaStore(blob);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com", DROP_ADMINS: "alice@paytm.com" });
+  const verifier = new FakeVerifier({
+    alice: { sub: "alice@paytm.com", email: "alice@paytm.com" },
+    bob: { sub: "bob@paytm.com", email: "bob@paytm.com" },
+  });
+  const app = createApp({ cfg, meta, blob, verifier });
+  expect((await (await call(app, "GET", "/v1/me", "alice")).json()).admin).toBe(true);
+  expect((await (await call(app, "GET", "/v1/me", "bob")).json()).admin).toBe(false);
+});
+
 test("publish parses _drop.json into config and does not serve it", async () => {
   const blob = new FakeBlob();
   const meta = new MetaStore(blob);

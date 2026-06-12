@@ -10,7 +10,7 @@ import { MetaStore } from "../metastore/store.ts";
 import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
-import { canAdmin, canWrite } from "./authz.ts";
+import { canAdmin, canWrite, isAdmin } from "./authz.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { dashboardHtml } from "./dashboard.ts";
 
@@ -37,7 +37,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
   app.use("/v1/*", authMiddleware(d.verifier));
 
-  app.get("/v1/me", (c) => c.json({ email: c.get("identity").email }));
+  app.get("/v1/me", (c) =>
+    c.json({ email: c.get("identity").email, admin: isAdmin(c.get("identity").email, d.cfg.admins) }),
+  );
 
   // ---- publish ----
   app.post("/v1/sites/:name/versions", async (c) => {
@@ -49,7 +51,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // resolve or claim
     let site = await d.meta.getSitePlain(name);
     if (!site) {
-      site = (await d.meta.claimSite(name, email)) ?? (await d.meta.getSitePlain(name));
+      const claimed = await d.meta.claimSite(name, email);
+      if (claimed) {
+        site = claimed;
+        await d.meta.addUserSite(email, name); // index the new owner
+      } else {
+        site = await d.meta.getSitePlain(name);
+      }
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
     if (!canWrite(site, email)) return c.json({ error: `site is owned by ${site.owner}` }, 403);
@@ -159,21 +167,38 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!canAdmin(site, email)) return c.json({ error: "owner only" }, 403);
     await d.meta.deleteSite(name);
+    for (const m of [site.owner, ...site.collaborators]) {
+      await d.meta.removeUserSite(m, name).catch(() => {});
+    }
     return c.json({ deleted: name });
   });
 
-  // ---- list my sites ----
+  // ---- list my sites (fast: per-user marker index) ----
   app.get("/v1/sites", async (c) => {
     const email = c.get("identity").email;
-    const names = await d.meta.listSiteNames();
+    const names = await d.meta.listUserSites(email);
     const out: any[] = [];
     for (const name of names) {
       const s = await d.meta.getSitePlain(name);
-      if (s && (s.owner === email || s.collaborators.includes(email))) {
-        out.push({ name: s.name, owner: s.owner, url: siteUrl(name), current: s.currentVersion });
-      }
+      if (s) out.push({ name: s.name, owner: s.owner, url: siteUrl(name), current: s.currentVersion });
     }
     return c.json({ sites: out });
+  });
+
+  // ---- admin: browse ALL sites (cursor-paginated; DROP_ADMINS only) ----
+  app.get("/v1/admin/sites", async (c) => {
+    const email = c.get("identity").email;
+    if (!isAdmin(email, d.cfg.admins)) return c.json({ error: "admin only" }, 403);
+    const cursor = c.req.query("cursor") || undefined;
+    const limit = Math.min(Number(c.req.query("limit") ?? "100") || 100, 1000);
+    const prefix = c.req.query("prefix") || undefined;
+    const { names, nextCursor } = await d.meta.listSitesPage({ cursor, limit, prefix });
+    const out: any[] = [];
+    for (const name of names) {
+      const s = await d.meta.getSitePlain(name);
+      if (s) out.push({ name: s.name, owner: s.owner, current: s.currentVersion, url: siteUrl(name), collaborators: s.collaborators.length });
+    }
+    return c.json({ sites: out, nextCursor });
   });
 
   // ---- collaborators ----
@@ -189,6 +214,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await d.meta.updateSite(name, (s) =>
       s.collaborators.includes(add) ? s : { ...s, collaborators: [...s.collaborators, add] },
     );
+    await d.meta.addUserSite(add, name); // index for the collaborator
     return c.json({ added: add });
   });
 
@@ -203,6 +229,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       ...s,
       collaborators: s.collaborators.filter((x) => x !== target),
     }));
+    await d.meta.removeUserSite(target, name).catch(() => {});
     return c.json({ removed: target });
   });
 
@@ -221,6 +248,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       owner: newOwner,
       collaborators: [...new Set([...s.collaborators.filter((x) => x !== newOwner), s.owner])],
     }));
+    await d.meta.addUserSite(newOwner, name); // new owner indexed; old owner kept as collaborator (marker stays)
     return c.json({ owner: newOwner });
   });
 

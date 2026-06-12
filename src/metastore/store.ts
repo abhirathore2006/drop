@@ -75,10 +75,37 @@ export class MetaStore {
     await this.blob.deletePrefix(this.sitePrefix(name));
   }
 
-  /** All site names (rare op; used by `drop ls`). */
+  /** All site names (admin/maintenance; prefer the paged variants below). */
   async listSiteNames(): Promise<string[]> {
     const { prefixes } = await this.blob.list("sites/", "/");
     return prefixes.map((p) => p.slice("sites/".length, -1)).filter(Boolean);
+  }
+
+  /** One page of site names (admin browse), optionally name-prefix filtered. */
+  async listSitesPage(opts: { cursor?: string; limit?: number; prefix?: string } = {}): Promise<{ names: string[]; nextCursor?: string }> {
+    const page = await this.blob.listPage("sites/" + (opts.prefix ?? ""), {
+      delimiter: "/",
+      cursor: opts.cursor,
+      limit: opts.limit ?? 100,
+    });
+    return { names: page.prefixes.map((p) => p.slice("sites/".length, -1)).filter(Boolean), nextCursor: page.nextCursor };
+  }
+
+  // --- per-user index (markers) so a user's `ls` is O(their sites), not O(all) ---
+  private userKey(email: string, name: string) { return `users/${email}/${name}`; }
+  private userPrefix(email: string) { return `users/${email}/`; }
+
+  async addUserSite(email: string, name: string): Promise<void> {
+    await this.blob.put(this.userKey(email, name), Buffer.from(""), 0, "application/octet-stream");
+  }
+  async removeUserSite(email: string, name: string): Promise<void> {
+    await this.blob.delete(this.userKey(email, name));
+  }
+  /** Names of sites this user owns or collaborates on (from the marker index). */
+  async listUserSites(email: string): Promise<string[]> {
+    const prefix = this.userPrefix(email);
+    const { keys } = await this.blob.list(prefix);
+    return keys.map((k) => k.slice(prefix.length)).filter(Boolean);
   }
 
   async putVersion(name: string, v: VersionMeta): Promise<void> {

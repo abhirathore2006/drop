@@ -161,16 +161,46 @@ function shortVer(v){return v?v.replace(/^v_\\d+_/,'#'):'—'}
 function fmtBytes(n){if(n==null)return'';if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(1)+' KB';return (n/1048576).toFixed(1)+' MB'}
 function fmtDate(s){try{return new Date(s).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}catch{return s||''}}
 
-let me_email='';
+let me_email='', me_admin=false;
 async function boot(){
   let me;
   try{ me=await api('GET','/v1/me') }catch{ return }     // gate() already shown on 401
-  me_email=me.email;
+  me_email=me.email; me_admin=!!me.admin;
   const who=$('#who');
   who.innerHTML='';
+  if(me_admin){ const mine=el('a',null,'my sites');mine.href='#';mine.onclick=(e)=>{e.preventDefault();render()}; who.appendChild(mine);
+    const all=el('a',null,'all sites');all.href='#';all.onclick=(e)=>{e.preventDefault();renderAdmin()}; who.appendChild(all); }
   who.appendChild(el('span',null,me.email));
   const lo=el('a',null,'logout');lo.href='/logout';who.appendChild(lo);
   await render();
+}
+
+// Admin: cursor-paginated browse of ALL sites, with name-prefix search.
+async function renderAdmin(){
+  const main=$('#main');main.innerHTML='';
+  const head=el('div','head');head.appendChild(el('h1',null,'all sites · admin'));
+  const search=el('input');search.placeholder='name prefix…';search.style.cssText='font-family:var(--mono);font-size:13px;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:8px 12px;color:var(--txt)';
+  head.appendChild(search);main.appendChild(head);
+  const grid=el('div','grid');main.appendChild(grid);
+  const more=el('button','btn','load more');more.style.margin='20px auto';more.style.display='none';main.appendChild(more);
+  let cursor=undefined, prefix='';
+  async function load(reset){
+    if(reset){grid.innerHTML='';cursor=undefined}
+    const q=new URLSearchParams();if(cursor)q.set('cursor',cursor);if(prefix)q.set('prefix',prefix);q.set('limit','60');
+    let r;try{r=await api('GET','/v1/admin/sites?'+q.toString())}catch(e){toast(e.message,true);return}
+    for(const s of r.sites){
+      const c=el('div','card');
+      const n=el('div','name');n.appendChild(el('span','dot '+(s.current?'live':'empty')));n.appendChild(el('span',null,s.name));c.appendChild(n);
+      c.appendChild(el('div','host',esc(s.owner)));
+      const row=el('div','row');row.appendChild(el('span','badge',s.collaborators+' collab'));row.appendChild(el('span','ver',shortVer(s.current)));c.appendChild(row);
+      c.onclick=()=>openSite(s.name);
+      grid.appendChild(c);
+    }
+    cursor=r.nextCursor; more.style.display=cursor?'block':'none';
+  }
+  more.onclick=()=>load(false);
+  let t;search.oninput=()=>{clearTimeout(t);t=setTimeout(()=>{prefix=search.value.trim();load(true)},250)};
+  await load(true);
 }
 async function render(){
   const {sites}=await api('GET','/v1/sites');
