@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multipage · Home</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <b>📄 Multipage</b>
+  <nav>
+    <a href="/" class="active">Home</a>
+    <a href="/about">About</a>
+    <a href="/contact">Contact</a>
+  </nav>
+</header>
+<main>
+  <h1>Home</h1>
+  <p>A plain multi-page static site — separate HTML documents, shared CSS, and real
+  links between pages. Good for testing classic static serving (no SPA).</p>
+  <div class="card">
+    <p>The nav links use <code>/about</code> and <code>/contact</code> (no <code>.html</code>) —
+    <code>cleanUrls</code> in <code>_drop.json</code> maps those to the real files.</p>
+  </div>
+</main>
+<footer>served by drop · multipage example</footer>
+</body>
+</html>

@@ -11,5 +11,7 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": false,
     "lib": ["ESNext"]
-  }
+  },
+  "include": ["src", "bin", "e2e", "build.mjs"],
+  "exclude": ["node_modules", "dist", "examples"]
 }

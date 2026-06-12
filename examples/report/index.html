@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Q2 Funnel Analysis — generated report</title>
+<style>
+:root{--bg:#0b0d10;--fg:#e9edf2;--mut:#9aa4b0;--acc:#5ad1a0;--acc2:#7c9cff;--line:#1d242c;--card:#11151a}
+*{box-sizing:border-box;margin:0}
+body{font:16px/1.65 "Hanken Grotesk",system-ui,sans-serif;background:var(--bg);color:var(--fg);
+ background-image:radial-gradient(800px 400px at 85% -10%,rgba(90,209,160,.08),transparent 60%)}
+.wrap{max-width:780px;margin:0 auto;padding:56px 28px 80px}
+.tag{font:600 11px/1 ui-monospace,monospace;letter-spacing:2px;text-transform:uppercase;color:var(--acc);margin-bottom:16px}
+h1{font-size:40px;letter-spacing:-1px;line-height:1.05;margin-bottom:10px}
+.meta{color:var(--mut);font-size:13px;font-family:ui-monospace,monospace;margin-bottom:34px}
+h2{font-size:22px;margin:42px 0 14px;letter-spacing:-.4px}
+p{color:var(--mut);margin-bottom:14px}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:8px 0}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
+.kpi .v{font-size:30px;font-weight:800;letter-spacing:-1px}
+.kpi .v.up{color:var(--acc)}.kpi .v.down{color:#ff7a8a}
+.kpi .l{color:var(--mut);font-size:12.5px;margin-top:4px}
+.bars{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-top:8px}
+.bar{display:grid;grid-template-columns:140px 1fr 56px;align-items:center;gap:12px;margin:10px 0;font-size:13px}
+.bar .track{height:12px;background:#0c0f13;border-radius:6px;overflow:hidden}
+.bar .fill{height:100%;background:linear-gradient(90deg,var(--acc2),var(--acc));border-radius:6px}
+.bar .n{font-family:ui-monospace,monospace;color:var(--fg);text-align:right}
+.bar .lbl{color:var(--mut)}
+ul{color:var(--mut);padding-left:20px;margin-bottom:14px}
+li{margin:6px 0}
+footer{margin-top:50px;border-top:1px solid var(--line);padding-top:18px;color:#5b626b;font-size:12.5px;font-family:ui-monospace,monospace}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="tag">Generated report · agent output</div>
+  <h1>Q2 Onboarding Funnel Analysis</h1>
+  <div class="meta">generated 2026-06-12 · source: events.warehouse · confidential — internal only</div>
+
+  <p>Conversion from sign-up to first transaction improved <b style="color:var(--acc)">+8.4pts</b>
+  quarter-over-quarter, driven mainly by the simplified KYC step. The largest remaining drop-off is
+  at <b>bank-link</b>, where 31% of users abandon.</p>
+
+  <div class="kpis">
+    <div class="kpi"><div class="v up">62.1%</div><div class="l">Signup → activated</div></div>
+    <div class="kpi"><div class="v up">+8.4pts</div><div class="l">QoQ activation</div></div>
+    <div class="kpi"><div class="v down">31%</div><div class="l">Bank-link drop-off</div></div>
+  </div>
+
+  <h2>Funnel by step</h2>
+  <div class="bars">
+    <div class="bar"><span class="lbl">Sign-up</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="n">100%</span></div>
+    <div class="bar"><span class="lbl">KYC complete</span><span class="track"><span class="fill" style="width:88%"></span></span><span class="n">88%</span></div>
+    <div class="bar"><span class="lbl">Bank linked</span><span class="track"><span class="fill" style="width:61%"></span></span><span class="n">61%</span></div>
+    <div class="bar"><span class="lbl">First txn</span><span class="track"><span class="fill" style="width:48%"></span></span><span class="n">48%</span></div>
+  </div>
+
+  <h2>Recommendations</h2>
+  <ul>
+    <li>Pre-fill bank details from the linked debit card to cut the bank-link step.</li>
+    <li>Add a "skip for now" path so activation isn't blocked on bank-link.</li>
+    <li>Re-target the 31% abandoners with a 24h reminder.</li>
+  </ul>
+
+  <footer>This page was generated as a static artifact and published with <b>drop</b> — served
+  internal-only, gated by Workspace login. No data left the network.</footer>
+</div>
+</body>
+</html>
