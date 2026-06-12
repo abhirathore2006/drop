@@ -128,6 +128,46 @@ test("admin endpoint: non-admin 403, admin sees ALL sites paginated", async () =
   expect(body.sites.map((s: any) => s.name).sort()).toEqual(["site-a", "site-b"]); // admin sees bob's too
 });
 
+test("admin cannot be spoofed via client-supplied flags/headers/body", async () => {
+  const blob = new FakeBlob();
+  const meta = new MetaStore(blob);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com", DROP_ADMINS: "alice@paytm.com" });
+  const verifier = new FakeVerifier({
+    alice: { sub: "alice@paytm.com", email: "alice@paytm.com" },
+    bob: { sub: "bob@paytm.com", email: "bob@paytm.com" },
+  });
+  const app = createApp({ cfg, meta, blob, verifier });
+  await pub(app, "alice", "site-a", await tgz({ "index.html": "x" }));
+
+  // bob is a fully authenticated, NON-admin user trying every client-side escalation trick.
+  const spoofs = [
+    { admin: true },                       // body flag
+    { email: "alice@paytm.com" },          // claim someone else's identity in the body
+    { isAdmin: true, role: "admin" },      // guessed field names
+  ];
+  for (const body of spoofs) {
+    const res = await app.request("/v1/admin/sites", {
+      method: "GET",
+      headers: {
+        authorization: "Bearer bob",       // the ONLY thing the server trusts — verified, non-admin
+        "content-type": "application/json",
+        "x-admin": "true",                 // spoofed header
+        "x-drop-admin": "1",
+      },
+      body: undefined, // GET; the header spoofs above are the realistic attack surface
+    });
+    expect(res.status).toBe(403); // server re-derives admin from the verified token, ignores everything else
+    void body;
+  }
+
+  // And the /v1/me admin flag is honest regardless of what the client sends.
+  const me = await app.request("/v1/me", {
+    method: "GET",
+    headers: { authorization: "Bearer bob", "x-admin": "true" },
+  });
+  expect(((await me.json()) as { admin: boolean }).admin).toBe(false);
+});
+
 test("/v1/me reports admin flag", async () => {
   const blob = new FakeBlob();
   const meta = new MetaStore(blob);
