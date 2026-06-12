@@ -1,4 +1,5 @@
 {
+  "name": "my-site",
   "spaFallback": "index.html",
   "cleanUrls": true,
   "notFound": "404.html",

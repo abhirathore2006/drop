@@ -1,8 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { validateName } from "./names.ts";
 
 // Per-site config, published as `_drop.json` at the site root. The API parses it
 // at publish time (it is NOT served as a file); the edge applies it per request.
 export interface SiteConfig {
+  name?: string; // site name — lets `drop publish ./dist` identify the target from the bundle
   spaFallback?: string | false; // doc to serve for navigation misses (default "index.html"); false disables
   notFound?: string; // custom 404 document (served with 404)
   cleanUrls?: boolean; // /about → try /about.html
@@ -43,6 +45,9 @@ function strArr(v: unknown): string[] | undefined {
 export function parseSiteConfig(text: string): SiteConfig {
   const raw = JSON.parse(text) as Record<string, unknown>;
   const cfg: SiteConfig = {};
+
+  const name = str(raw.name, 63);
+  if (name && validateName(name) === null) cfg.name = name;
 
   if (raw.spaFallback === false) cfg.spaFallback = false;
   else if (str(raw.spaFallback)) cfg.spaFallback = str(raw.spaFallback);

@@ -118,6 +118,13 @@ test("publish parses _drop.json into config and does not serve it", async () => 
   expect(files.keys.some((k) => k.endsWith("/index.html"))).toBe(true);
 });
 
+test("publish rejects when _drop.json name mismatches the target", async () => {
+  const { app } = build();
+  const tar = await tgz({ "index.html": "<html>", "_drop.json": JSON.stringify({ name: "otherapp" }) });
+  const res = await pub(app, "alice", "myapp", tar); // URL says myapp, bundle says otherapp
+  expect(res.status).toBe(400);
+});
+
 test("ls lists owned + collaborated sites", async () => {
   const { app } = build();
   await pub(app, "alice", "one", await tgz({ "index.html": "x" }));

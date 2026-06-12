@@ -5,6 +5,7 @@ import { defaultSessionPath, loadSession, saveSession, type Session } from "../c
 import { Client } from "../cli/client.ts";
 import { packDir } from "../cli/pack.ts";
 import { devLoginToken, serverLogin } from "../cli/login.ts";
+import { resolveSiteName } from "../cli/resolve-name.ts";
 
 function apiBase(s?: Session): string {
   return process.env.DROP_API ?? s?.apiBase ?? "https://api.drop.company.com";
@@ -70,13 +71,16 @@ export function buildMcp(): McpServer {
       description: "Publish a built static folder to <name>.drop.company.com. Returns the live URL.",
       inputSchema: {
         directory: z.string().describe("path to the built folder, e.g. ./dist"),
-        name: z.string().describe("site name / subdomain label"),
+        name: z.string().optional().describe("site name (optional — taken from _drop.json, else generated)"),
       },
     },
     async ({ directory, name }) =>
       run(async () => {
-        const tarball = await packDir(resolve(directory));
-        return (await getClient()).publish(name, tarball);
+        const dir = resolve(directory);
+        const resolved = await resolveSiteName(dir, name);
+        const tarball = await packDir(dir);
+        const res = await (await getClient()).publish(resolved.name, tarball);
+        return { ...res, name: resolved.name, nameSource: resolved.source };
       }),
   );
 

@@ -4,6 +4,7 @@ import { defaultSessionPath, loadSession, saveSession } from "./session.ts";
 import { Client } from "./client.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
+import { resolveSiteName } from "./resolve-name.ts";
 
 function apiBase(opts: { api?: string }): string {
   return opts.api ?? process.env.DROP_API ?? "https://api.drop.company.com";
@@ -52,14 +53,18 @@ export function buildProgram(): Command {
     });
 
   program
-    .command("publish <dir> <name>")
-    .description("Publish a built folder to <name>.drop.company.com")
-    .action(async (dir: string, name: string) => {
+    .command("publish <dir> [name]")
+    .description("Publish a built folder (name optional — taken from _drop.json, else generated)")
+    .action(async (dir: string, nameArg?: string) => {
+      const { name, source } = await resolveSiteName(dir, nameArg);
       console.log(`  ▸ packing ${dir}`);
       const tarball = await packDir(dir);
-      console.log("  ▸ dropping…");
+      console.log(`  ▸ dropping to ${name}…`);
       const res = await (await client()).publish(name, tarball);
       console.log(`  ✓ live at ${res.url}`);
+      if (source === "generated") {
+        console.log(`  tip: add  "name": "${name}"  to _drop.json to keep this URL across deploys.`);
+      }
     });
 
   program

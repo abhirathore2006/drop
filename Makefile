@@ -112,9 +112,9 @@ login:
 	@$(NODE) dist/drop.js login --api http://localhost:$(API_PORT)
 
 DIR  ?= ./dist
-NAME ?= myapp
+NAME ?=
 publish:
 	@test -f dist/drop.js || $(NODE) build.mjs cli >/dev/null
 	@$(LOADENV) if [ "$$DROP_DEV_AUTH" = "1" ]; then $(NODE) dist/drop.js dev-login alice alice@paytm.com --api http://localhost:$(API_PORT) >/dev/null; fi
 	@$(NODE) dist/drop.js publish $(DIR) $(NAME) --api http://localhost:$(API_PORT)
-	@echo "view:  http://$(NAME).$(BASE_DOMAIN):$(EDGE_PORT)/   (local: http + edge port, not the https prod URL)"
+	@[ -n "$(NAME)" ] && echo "view:  http://$(NAME).$(BASE_DOMAIN):$(EDGE_PORT)/" || echo "(local URL is http://<name>.$(BASE_DOMAIN):$(EDGE_PORT)/ )"

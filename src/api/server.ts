@@ -89,6 +89,12 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         return c.json({ error: `invalid _drop.json: ${(e as Error).message}` }, 400);
       }
     }
+    // Guard: the bundle's declared name must match the target being published to.
+    // (Ownership of `name` was already enforced above via canWrite/claim.)
+    if (config?.name && config.name !== name) {
+      await d.blob.deletePrefix(prefix).catch(() => {});
+      return c.json({ error: `_drop.json name "${config.name}" does not match target site "${name}"` }, 400);
+    }
 
     await d.meta.putVersion(name, {
       id: verId,

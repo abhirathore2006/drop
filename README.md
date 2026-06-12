@@ -68,6 +68,7 @@ matching config.
 
 ```jsonc
 {
+  "name": "myapp",                      // target site — lets `drop publish ./dist` skip the name arg
   "spaFallback": "index.html",          // doc for navigation misses; false to disable
   "cleanUrls": true,                    // /about → /about.html
   "notFound": "404.html",               // custom 404 document
@@ -86,6 +87,10 @@ matching config.
 
 - **cache-control** is just a `headers` rule. **HTTP password** is `basicAuth` (passwords
   plain or `sha256:<hex>`). **redirects** support a trailing `*` glob with `:splat`.
+- **`name`** lets the bundle identify itself: `drop publish ./dist` (no name) uses
+  `_drop.json`'s `name`; with neither, a friendly name is generated (e.g. `twilight-cherry-8f3a`).
+  The server still validates **you own** that name (and rejects a bundle whose `name`
+  contradicts the publish target).
 - It's a static-site config in the spirit of `vercel.json` / Netlify `_redirects`+`_headers`.
 
 ## Use it from an AI client (MCP — no CLI needed)
