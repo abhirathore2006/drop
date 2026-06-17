@@ -6,6 +6,9 @@ API_PORT     ?= 8473
 EDGE_PORT    ?= 8474
 FLOCI_PORT   ?= 4566
 FLOCI_VOLUME ?= drop-floci-data
+PG_PORT      ?= 5432
+PG_VOLUME    ?= drop-pg-data
+PG_IMAGE     ?= docker.io/library/postgres:16-alpine
 BASE_DOMAIN  ?= drop.localhost
 BUCKET       ?= drop
 RUN          := .run
@@ -17,11 +20,11 @@ NPM          := $(NODE_BIN)/npm
 
 # Local S3 (Floci) defaults. Auth config (dev vs Google) comes from .env — see
 # .env.example. With no .env, DROP_DEV_AUTH defaults to 1 (dev-auth).
-ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_PORT) DROP_S3_KEY_ID=test DROP_S3_SECRET=test DROP_BASE_DOMAIN=$(BASE_DOMAIN)
+ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_PORT) DROP_S3_KEY_ID=test DROP_S3_SECRET=test DROP_BASE_DOMAIN=$(BASE_DOMAIN) DROP_DATABASE_URL=postgres://drop:drop@localhost:$(PG_PORT)/drop
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci publish login stop-all build reset
+.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -34,7 +37,7 @@ help:
 	@echo "  make publish DIR=./dist NAME=x  publish a folder and print its URL"
 	@echo "  make login                      sign in with Google (server-mediated, real auth)"
 	@echo "  make stop-all                   also stop the podman machine"
-	@echo "  make reset                      wipe the persistent Floci volume (all sites)"
+	@echo "  make reset                      wipe the Floci + Postgres volumes (all sites + metadata)"
 	@echo ""
 	@echo "  corp/Zscaler CA for podman pulls:  make setup CORP_CA=~/certs/Zscalerroot.cer"
 
@@ -57,6 +60,9 @@ setup:
 	@echo "▸ pulling Floci image…"; podman pull docker.io/floci/floci:latest >/dev/null 2>&1 \
 	  && echo "✓ floci image ready" \
 	  || echo "! could not pull floci — if behind Zscaler:  make setup CORP_CA=~/certs/Zscalerroot.cer"
+	@echo "▸ pulling Postgres image…"; podman pull $(PG_IMAGE) >/dev/null 2>&1 \
+	  && echo "✓ postgres image ready" \
+	  || echo "! could not pull postgres — if behind Zscaler:  make setup CORP_CA=~/certs/Zscalerroot.cer"
 	@echo "✓ setup complete — run 'make start'"
 
 build:
@@ -68,12 +74,19 @@ floci:
 	@for i in $$(seq 1 40); do curl -s -o /dev/null http://localhost:$(FLOCI_PORT)/ 2>/dev/null && break; sleep 1; done
 	@echo "✓ floci  :$(FLOCI_PORT)  (persistent volume: $(FLOCI_VOLUME))"
 
-# Wipe the persistent Floci volume (all published sites). Stops Floci first.
-reset:
-	@-podman stop drop-floci >/dev/null 2>&1 || true
-	@-podman volume rm $(FLOCI_VOLUME) >/dev/null 2>&1 && echo "✓ wiped $(FLOCI_VOLUME)" || echo "(no volume to wipe)"
+postgres:
+	@podman machine start >/dev/null 2>&1 || true
+	@podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' || podman run -d --rm --name drop-postgres -p $(PG_PORT):5432 -e POSTGRES_USER=drop -e POSTGRES_PASSWORD=drop -e POSTGRES_DB=drop -v $(PG_VOLUME):/var/lib/postgresql/data $(PG_IMAGE) >/dev/null
+	@for i in $$(seq 1 40); do podman exec drop-postgres pg_isready -U drop -d drop >/dev/null 2>&1 && break; sleep 1; done
+	@echo "✓ postgres  :$(PG_PORT)  (persistent volume: $(PG_VOLUME))"
 
-start: floci
+# Wipe the persistent volumes (all published sites + all metadata). Stops both first.
+reset:
+	@-podman stop drop-floci drop-postgres >/dev/null 2>&1 || true
+	@-podman volume rm $(FLOCI_VOLUME) >/dev/null 2>&1 && echo "✓ wiped $(FLOCI_VOLUME)" || echo "(no floci volume to wipe)"
+	@-podman volume rm $(PG_VOLUME) >/dev/null 2>&1 && echo "✓ wiped $(PG_VOLUME)" || echo "(no postgres volume to wipe)"
+
+start: floci postgres
 	@mkdir -p $(RUN)
 	@$(NODE) build.mjs >/dev/null && echo "✓ built bundles"
 	@$(LOADENV) $(ENV) DROP_HTTP_PORT=$(API_PORT)  nohup $(NODE) dist/api.js  > $(RUN)/api.log  2>&1 & echo $$! > $(RUN)/api.pid
@@ -88,8 +101,8 @@ stop:
 	@-if [ -f $(RUN)/edge.pid ]; then kill `cat $(RUN)/edge.pid` 2>/dev/null; rm -f $(RUN)/edge.pid; fi
 	@-pkill -f 'dist/api.js'  2>/dev/null || true
 	@-pkill -f 'dist/edge.js' 2>/dev/null || true
-	@-podman stop drop-floci >/dev/null 2>&1 || true
-	@echo "✓ stopped api + edge + floci  (podman machine still up; 'make stop-all' to stop it)"
+	@-podman stop drop-floci drop-postgres >/dev/null 2>&1 || true
+	@echo "✓ stopped api + edge + floci + postgres  (podman machine still up; 'make stop-all' to stop it)"
 
 stop-all: stop
 	@-podman machine stop >/dev/null 2>&1 || true
@@ -101,6 +114,7 @@ status:
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && echo "api:   up    (:$(API_PORT))" || echo "api:   down"
 	@curl -s -o /dev/null http://localhost:$(EDGE_PORT)/ 2>/dev/null && echo "edge:  up    (:$(EDGE_PORT))" || echo "edge:  down"
 	@(podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' && echo "floci: up    (:$(FLOCI_PORT))") || echo "floci: down"
+	@(podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' && echo "pg:    up    (:$(PG_PORT))") || echo "pg:    down"
 
 logs:
 	@mkdir -p $(RUN); touch $(RUN)/api.log $(RUN)/edge.log; tail -f $(RUN)/api.log $(RUN)/edge.log
