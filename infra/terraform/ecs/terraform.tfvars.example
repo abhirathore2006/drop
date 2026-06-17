@@ -1,0 +1,35 @@
+# terraform.tfvars.example — copy to terraform.tfvars and fill in.
+# Shared infra (VPC, ECR, S3, ACM, RDS, Secrets, Route53 zone) is read from the
+# foundation remote state — you do NOT set those here. NO REAL SECRETS in this file.
+#
+# Before `terraform init`, point the backend at your real state bucket/region:
+#   terraform init \
+#     -backend-config="bucket=my-org-tfstate" \
+#     -backend-config="region=us-east-1"
+
+region      = "us-east-1"
+name_prefix = "drop"
+
+# Optional: leave empty to inherit base_domain from the foundation remote state.
+base_domain = "drop.example.com"
+
+# S3 bucket holding the foundation + ecs Terraform state (used to read foundation outputs).
+tfstate_bucket = "my-org-tfstate"
+
+# Image tag to deploy from the foundation ECR repo.
+image_tag = "0.1.0"
+
+# Non-secret app config.
+google_client_id = "REPLACE_ME.apps.googleusercontent.com"
+allowed_domains  = "example.com"      # comma-separated; empty = any Google account
+admins           = "admin@example.com" # comma-separated platform admins
+
+# CIDR allowed to reach the INTERNAL ALB on :443 (corp / VPN range).
+corp_cidr = "10.0.0.0/8"
+
+# Sizing (optional — defaults shown).
+# api_desired_count  = 2
+# edge_desired_count = 2
+# task_cpu           = 256
+# task_memory        = 512
+# log_retention_days = 30

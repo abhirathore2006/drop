@@ -5,6 +5,12 @@ metadata:
   labels:
     {{- include "drop.labels" . | nindent 4 }}
     app.kubernetes.io/component: edge
+  annotations:
+    # Per-target-group health check for the AWS Load Balancer Controller — the edge
+    # answers on /_drop_health (NOT /healthz), so it needs its own path. Ignored by
+    # non-ALB ingress controllers.
+    alb.ingress.kubernetes.io/healthcheck-path: /_drop_health
+    alb.ingress.kubernetes.io/healthcheck-port: traffic-port
 spec:
   type: ClusterIP
   ports:

@@ -5,6 +5,11 @@ metadata:
   labels:
     {{- include "drop.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
+  annotations:
+    # Per-target-group health check for the AWS Load Balancer Controller (the api
+    # answers on /healthz). Ignored by non-ALB ingress controllers.
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/healthcheck-port: traffic-port
 spec:
   type: ClusterIP
   ports:

@@ -1,0 +1,28 @@
+# Copy to terraform.tfvars and fill in. NEVER commit real secrets.
+# Sensitive values (db_password, google_client_secret) are best supplied via
+# environment variables instead: TF_VAR_db_password=..., TF_VAR_google_client_secret=...
+
+region      = "us-east-1"
+name_prefix = "drop"
+
+# DNS — api.<base_domain> is the control plane; *.<base_domain> are sites.
+base_domain     = "drop.example.com"
+route53_zone_id = "ZONE_ID_REPLACE_ME"
+
+# Existing network (a VPC is NOT created by this config).
+vpc_id             = "vpc-REPLACE_ME"
+private_subnet_ids = ["subnet-REPLACE_ME_A", "subnet-REPLACE_ME_B"]
+
+# Database
+db_username          = "drop"
+db_name              = "drop"
+db_instance_class    = "db.t4g.micro"
+db_allocated_storage = 20
+# db_password — prefer TF_VAR_db_password env var.
+# db_password = "REPLACE_ME"
+
+# Google OAuth — prefer TF_VAR_google_client_secret env var.
+# google_client_secret = "REPLACE_ME"
+
+# Corp / VPC CIDR allowed to reach RDS on 5432.
+corp_cidr = "10.0.0.0/8"

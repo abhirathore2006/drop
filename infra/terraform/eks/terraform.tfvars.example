@@ -1,0 +1,27 @@
+# Example tfvars for the Drop EKS root config. Copy to terraform.tfvars and edit.
+# Do NOT put secrets here — DROP_GOOGLE_CLIENT_SECRET / DROP_SESSION_SECRET /
+# DROP_DATABASE_URL live in Secrets Manager (owned by the foundation config) and
+# are read at apply time.
+
+region      = "us-east-1"
+name_prefix = "drop"
+
+# S3 bucket that stores Terraform remote state (used to read foundation.tfstate).
+# Must match backend.tf's bucket.
+tfstate_bucket = "REPLACE_ME-tfstate"
+
+# Non-secret app config (Google OAuth Web client ID — NOT the secret).
+google_client_id = "REPLACE_ME.apps.googleusercontent.com"
+allowed_domains  = "example.com" # comma-separated; empty = any Google account
+admins           = "admin@example.com"
+
+# EKS sizing (optional — defaults shown).
+# cluster_version     = "1.31"
+# node_instance_types = ["t3.large"]
+# node_desired_size   = 2
+# node_min_size       = 2
+# node_max_size       = 4
+
+# Kubernetes placement (optional — defaults shown).
+# namespace            = "drop"
+# service_account_name = "drop"
