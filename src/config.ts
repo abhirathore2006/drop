@@ -6,6 +6,7 @@ export interface Config {
   s3Region: string;
   s3KeyId?: string;
   s3Secret?: string;
+  databaseUrl: string; // postgres connection string (required)
   googleClientId?: string;
   googleClientSecret?: string;
   allowedDomains: string[]; // empty = any Google account
@@ -24,6 +25,8 @@ export interface Config {
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   const s3Bucket = env.DROP_S3_BUCKET ?? "";
   if (!s3Bucket) throw new Error("DROP_S3_BUCKET is required");
+  const databaseUrl = env.DROP_DATABASE_URL ?? "";
+  if (!databaseUrl) throw new Error("DROP_DATABASE_URL is required");
   return {
     httpPort: Number(env.DROP_HTTP_PORT ?? "8080"),
     baseDomain: env.DROP_BASE_DOMAIN ?? "drop.company.com",
@@ -32,6 +35,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     s3Region: env.DROP_S3_REGION ?? "us-east-1",
     s3KeyId: env.DROP_S3_KEY_ID || undefined,
     s3Secret: env.DROP_S3_SECRET || undefined,
+    databaseUrl,
     googleClientId: env.DROP_GOOGLE_CLIENT_ID || undefined,
     googleClientSecret: env.DROP_GOOGLE_CLIENT_SECRET || undefined,
     allowedDomains: (env.DROP_ALLOWED_DOMAINS ?? "")

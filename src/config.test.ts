@@ -1,9 +1,12 @@
 import { test, expect } from "bun:test";
 import { loadConfig } from "./config.ts";
 
+const BASE = { DROP_S3_BUCKET: "drop-sites", DROP_DATABASE_URL: "postgres://x/y" };
+
 test("loadConfig reads env and applies defaults", () => {
-  const c = loadConfig({ DROP_S3_BUCKET: "drop-sites" });
+  const c = loadConfig(BASE);
   expect(c.s3Bucket).toBe("drop-sites");
+  expect(c.databaseUrl).toBe("postgres://x/y");
   expect(c.httpPort).toBe(8080);
   expect(c.baseDomain).toBe("drop.company.com");
   expect(c.keepVersions).toBe(10);
@@ -13,7 +16,7 @@ test("loadConfig reads env and applies defaults", () => {
 
 test("loadConfig parses allowed domains and dev auth", () => {
   const c = loadConfig({
-    DROP_S3_BUCKET: "b",
+    ...BASE,
     DROP_ALLOWED_DOMAINS: "paytm.com, paytmbank.com",
     DROP_DEV_AUTH: "1",
   });
@@ -22,5 +25,9 @@ test("loadConfig parses allowed domains and dev auth", () => {
 });
 
 test("loadConfig throws when bucket missing", () => {
-  expect(() => loadConfig({})).toThrow();
+  expect(() => loadConfig({ DROP_DATABASE_URL: "postgres://x/y" })).toThrow();
+});
+
+test("loadConfig throws when database url missing", () => {
+  expect(() => loadConfig({ DROP_S3_BUCKET: "b" })).toThrow();
 });
