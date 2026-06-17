@@ -16,10 +16,19 @@ $ drop publish ./dist myapp
 
 A full HTML documentation site lives in [`docs/`](docs/) — overview, getting-started,
 configuration, CLI/MCP/dashboard, roles &amp; visibility, architecture (with diagrams),
-and deployment. It's plain static HTML (no build step), ready for **GitHub Pages**:
-in the repo settings, set **Pages → Source: Deploy from a branch → `main` / `/docs`**.
-Locally, open `docs/index.html` in a browser. (Authoritative source-of-truth docs:
-this README and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).)
+and deployment. It's plain static HTML (no build step, Mermaid vendored so it renders
+offline). The same `docs/` folder is served two ways:
+
+- **GitHub Pages** — set **Pages → Source: Deploy from a branch → `main` / `/docs`**
+  (or open `docs/index.html` locally).
+- **With the deployment** — the control-plane app serves it at **`/docs`**
+  (e.g. `https://api.drop.example.com/docs/`), alongside the dashboard at `/` and
+  login at `/auth/*`. It ships in the image, so the docs are always available next to
+  the running app — no separate hosting. Override the directory with `DROP_DOCS_DIR`
+  (default `docs`).
+
+(Authoritative source-of-truth docs: this README and
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).)
 
 ## How it works
 

@@ -44,6 +44,9 @@ header{
 .who{display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:12.5px;color:var(--mut)}
 .who a{color:var(--mut);text-decoration:none;border-bottom:1px dashed transparent}
 .who a:hover{color:var(--acc);border-bottom-color:var(--acc)}
+.hdr-right{display:flex;align-items:center;gap:18px}
+.navlink{font-family:var(--mono);font-size:12.5px;color:var(--mut);text-decoration:none;border-bottom:1px dashed transparent}
+.navlink:hover{color:var(--acc);border-bottom-color:var(--acc)}
 .head{display:flex;align-items:baseline;justify-content:space-between;margin:38px 0 20px}
 .head h1{font-family:var(--mono);font-size:13px;font-weight:500;letter-spacing:3px;text-transform:uppercase;color:var(--mut)}
 .head .count{font-family:var(--mono);font-size:13px;color:var(--dim)}
@@ -118,7 +121,10 @@ header{
 <div class="wrap">
   <header>
     <div class="brand"><span class="tri">▸</span>drop<span class="v">control</span></div>
-    <div class="who" id="who"></div>
+    <div class="hdr-right">
+      <a class="navlink" href="/docs/">docs ↗</a>
+      <div class="who" id="who"></div>
+    </div>
   </header>
   <main id="main"><div class="spin">loading…</div></main>
 </div>

@@ -221,6 +221,20 @@ test("publish parses _drop.json into config and does not serve it", async () => 
   await db.destroy();
 });
 
+test("serves the docs site at /docs (public, no auth)", async () => {
+  const { app, db } = await mk();
+  const idx = await app.request("/docs/");
+  expect(idx.status).toBe(200);
+  expect(await idx.text()).toContain("Ship internal sites");
+  const css = await app.request("/docs/assets/style.css");
+  expect(css.status).toBe(200);
+  expect(css.headers.get("content-type") ?? "").toContain("css");
+  const bare = await app.request("/docs");
+  expect([301, 302, 307, 308]).toContain(bare.status);
+  expect(bare.headers.get("location")).toBe("/docs/");
+  await db.destroy();
+});
+
 test("publish rejects when _drop.json name mismatches the target", async () => {
   const { app, db } = await mk();
   const tar = await tgz({ "index.html": "<html>", "_drop.json": JSON.stringify({ name: "otherapp" }) });

@@ -20,6 +20,7 @@ export interface Config {
   keepVersions: number;
   edgeDiskCacheDir?: string; // edge: where to cache asset bytes on disk (off if unset)
   edgeDiskCacheBytes: number; // edge: disk cache budget
+  docsDir: string; // api: static docs site served at /docs (relative to cwd)
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -58,5 +59,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     keepVersions: Number(env.DROP_KEEP_VERSIONS ?? "10"),
     edgeDiskCacheDir: env.DROP_EDGE_DISK_CACHE || undefined,
     edgeDiskCacheBytes: Number(env.DROP_EDGE_DISK_CACHE_BYTES ?? String(5 * 1024 * 1024 * 1024)),
+    docsDir: env.DROP_DOCS_DIR ?? "docs",
   };
 }

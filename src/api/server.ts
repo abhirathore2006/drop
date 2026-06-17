@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { Readable } from "node:stream";
 import * as streamConsumers from "node:stream/consumers";
 import { hashPassword, parseSiteConfig, type SiteConfig } from "../site-config.ts";
@@ -39,6 +40,18 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
   // Dashboard (public page; its JS calls /v1/* with the session cookie).
   app.get("/", (c) => c.html(dashboardHtml(d.cfg.baseDomain)));
+
+  // Public docs site — the same static files GitHub Pages serves (docs/), now
+  // shipped with the deployment and served at /docs. Uses relative links, so it
+  // works equally at https://api.…/docs/ and on GitHub Pages.
+  app.get("/docs", (c) => c.redirect("/docs/"));
+  app.use(
+    "/docs/*",
+    serveStatic({
+      root: d.cfg.docsDir,
+      rewriteRequestPath: (p) => p.replace(/^\/docs/, "") || "/",
+    }),
+  );
 
   app.use("/v1/*", authMiddleware(d.verifier));
 
