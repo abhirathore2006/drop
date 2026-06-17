@@ -1,14 +1,11 @@
 import { Command } from "commander";
 import { rm } from "node:fs/promises";
 import { defaultSessionPath, loadSession, saveSession } from "./session.ts";
+import { loadConfig, saveConfig, resolveApiBase } from "./config.ts";
 import { Client } from "./client.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName } from "./resolve-name.ts";
-
-function apiBase(opts: { api?: string }): string {
-  return opts.api ?? process.env.DROP_API ?? "https://api.drop.example.com";
-}
 
 async function client(): Promise<Client> {
   try {
@@ -26,11 +23,29 @@ export function buildProgram(): Command {
   program.name("drop").description("Publish static sites to *.drop.example.com");
   program.option("--api <url>", "control plane base URL");
 
+  // Set the control-plane URL once, so you don't pass --api on every command.
+  const config = program.command("config").description("Manage CLI config");
+  config
+    .command("set-api <url>")
+    .description("Persist the control-plane API URL (used when --api / DROP_API are unset)")
+    .action(async (url: string) => {
+      const cfg = await loadConfig();
+      cfg.apiBase = url.replace(/\/$/, "");
+      await saveConfig(cfg);
+      console.log(`✓ API URL set to ${cfg.apiBase}`);
+    });
+  config
+    .command("show")
+    .description("Show the saved config and the resolved API URL")
+    .action(async () => {
+      show({ configured: await loadConfig(), resolvedApi: await resolveApiBase(program.opts()) });
+    });
+
   program
     .command("login")
     .description("Sign in with Google (via the Drop server)")
     .action(async () => {
-      const base = apiBase(program.opts());
+      const base = await resolveApiBase(program.opts());
       const token = await serverLogin(base);
       await saveSession(defaultSessionPath(), { apiBase: base, token });
       console.log("✓ logged in");
@@ -40,8 +55,9 @@ export function buildProgram(): Command {
     .command("dev-login <sub> <email>")
     .description("Local-only login (requires DROP_DEV_AUTH=1 on the API)")
     .action(async (sub: string, email: string) => {
-      await saveSession(defaultSessionPath(), { apiBase: apiBase(program.opts()), token: devLoginToken(sub, email) });
-      console.log("✓ dev session saved");
+      const base = await resolveApiBase(program.opts());
+      await saveSession(defaultSessionPath(), { apiBase: base, token: devLoginToken(sub, email) });
+      console.log(`✓ dev session saved (${base})`);
     });
 
   program
