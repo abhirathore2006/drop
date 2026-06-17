@@ -56,6 +56,7 @@ const m0001_init: Migration = {
       .addColumn("status", "text", (c) => c.notNull().defaultTo("pending"))
       .addColumn("mode", "text", (c) => c.notNull())
       .addColumn("token", "text")
+      .addColumn("error", "text")
       .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
       .execute();
   },

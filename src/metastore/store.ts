@@ -209,6 +209,10 @@ export class MetaStore {
       .execute();
   }
 
+  async deleteVersion(name: string, id: string): Promise<void> {
+    await this.db.deleteFrom("versions").where("site_name", "=", name).where("id", "=", id).execute();
+  }
+
   /** Version audit records, newest first (sortable id). */
   async listVersions(name: string): Promise<VersionMeta[]> {
     const rows = await this.db

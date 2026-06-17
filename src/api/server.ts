@@ -1,16 +1,19 @@
 import { Hono } from "hono";
 import { Readable } from "node:stream";
 import * as streamConsumers from "node:stream/consumers";
-import { parseSiteConfig, type SiteConfig } from "../site-config.ts";
+import { hashPassword, parseSiteConfig, type SiteConfig } from "../site-config.ts";
 import type { Config } from "../config.ts";
 import type { BlobStore } from "../blob/types.ts";
+import type { Db } from "../db/db.ts";
 import type { Verifier } from "../auth/types.ts";
 import { authMiddleware, type AuthEnv } from "../auth/middleware.ts";
 import { MetaStore } from "../metastore/store.ts";
+import type { Site, Visibility } from "../metastore/types.ts";
+import { UserStore } from "../users/store.ts";
+import { can, type Action, type Actor } from "../authz/permissions.ts";
 import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
-import { canAdmin, canWrite, isAdmin } from "./authz.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { dashboardHtml } from "./dashboard.ts";
 
@@ -18,6 +21,8 @@ export interface Deps {
   cfg: Config;
   meta: MetaStore;
   blob: BlobStore;
+  db: Db;
+  users: UserStore;
   verifier: Verifier;
   now?: () => Date;
 }
@@ -30,16 +35,26 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.get("/healthz", (c) => c.text("ok"));
 
   // Public server-mediated login routes (/auth/*) — clients only need DROP_API.
-  registerAuthRoutes(app, d.cfg, d.blob);
+  registerAuthRoutes(app, d.cfg, d.db, d.users);
 
   // Dashboard (public page; its JS calls /v1/* with the session cookie).
   app.get("/", (c) => c.html(dashboardHtml(d.cfg.baseDomain)));
 
   app.use("/v1/*", authMiddleware(d.verifier));
 
-  app.get("/v1/me", (c) =>
-    c.json({ email: c.get("identity").email, admin: isAdmin(c.get("identity").email, d.cfg.admins) }),
-  );
+  const ensureUser = (email: string) => d.users.upsertOnLogin(email, null);
+
+  async function actorFor(email: string, site: Site | null): Promise<Actor> {
+    const u = await d.users.getUser(email);
+    const siteRole = site ? (site.members.find((m) => m.email === email)?.role ?? null) : null;
+    return { email, platformRole: u?.role ?? "member", siteRole };
+  }
+  const isPlatformAdmin = async (email: string) => (await d.users.getUser(email))?.role === "admin";
+
+  app.get("/v1/me", async (c) => {
+    const email = c.get("identity").email;
+    return c.json({ email, admin: await isPlatformAdmin(email) });
+  });
 
   // ---- publish ----
   app.post("/v1/sites/:name/versions", async (c) => {
@@ -51,21 +66,18 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // resolve or claim
     let site = await d.meta.getSitePlain(name);
     if (!site) {
+      await ensureUser(email); // FK: owner membership references users
       const claimed = await d.meta.claimSite(name, email);
-      if (claimed) {
-        site = claimed;
-        await d.meta.addUserSite(email, name); // index the new owner
-      } else {
-        site = await d.meta.getSitePlain(name);
-      }
+      site = claimed ?? (await d.meta.getSitePlain(name));
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
-    if (!canWrite(site, email)) return c.json({ error: `site is owned by ${site.owner}` }, 403);
+    const actor = await actorFor(email, site);
+    if (!can(actor, "publish")) return c.json({ error: `site is owned by ${site.owner}` }, 403);
 
     if (!c.req.raw.body) return c.json({ error: "empty body" }, 400);
     const verId = newVersionId(now());
     const prefix = d.meta.filesPrefix(name, verId);
-    const nodeStream = Readable.fromWeb(c.req.raw.body as any);
+    const nodeStream = Readable.fromWeb(c.req.raw.body as Parameters<typeof Readable.fromWeb>[0]);
 
     let result: { files: number; bytes: number };
     const captured: { raw?: Buffer } = {}; // object wrapper so the closure write survives CFA
@@ -73,8 +85,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       result = await extractTarGz(
         nodeStream,
         async (rel, body, size, ct) => {
-          // _drop.json is config, not a served asset — capture it, don't store it
-          // (it may contain basic-auth credentials).
+          // _drop.json is config, not a served asset (it may carry credentials).
           if (rel === "_drop.json") {
             captured.raw = await streamConsumers.buffer(body);
             return;
@@ -97,8 +108,6 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         return c.json({ error: `invalid _drop.json: ${(e as Error).message}` }, 400);
       }
     }
-    // Guard: the bundle's declared name must match the target being published to.
-    // (Ownership of `name` was already enforced above via canWrite/claim.)
     if (config?.name && config.name !== name) {
       await d.blob.deletePrefix(prefix).catch(() => {});
       return c.json({ error: `_drop.json name "${config.name}" does not match target site "${name}"` }, 400);
@@ -112,8 +121,15 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       bytes: result.bytes,
       config,
     });
-    // commit point: CAS-flip the live pointer (+ denormalize config for the edge)
-    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId, config }));
+    // commit point: flip the live pointer (+ denormalize config). A bundle that
+    // carries basicAuth implies password visibility.
+    const hasBasicAuth = !!config?.basicAuth && Object.keys(config.basicAuth.users).length > 0;
+    await d.meta.updateSite(name, (s) => ({
+      ...s,
+      currentVersion: verId,
+      config,
+      visibility: hasBasicAuth ? "password" : s.visibility,
+    }));
 
     void pruneVersions(d, name);
     return c.json({ url: siteUrl(name), version: verId, files: result.files, bytes: result.bytes });
@@ -125,7 +141,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!canWrite(site, email)) return c.json({ error: "not permitted" }, 403);
+    if (!can(await actorFor(email, site), "rollback")) return c.json({ error: "not permitted" }, 403);
 
     const body = (await c.req.json().catch(() => ({}))) as { to?: string };
     let target = body.to ?? "";
@@ -147,16 +163,36 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!canWrite(site, email)) return c.json({ error: "not permitted" }, 403);
+    if (!can(await actorFor(email, site), "read")) return c.json({ error: "not permitted" }, 403);
     const versions = await d.meta.listVersions(name);
     return c.json({
       name: site.name,
       owner: site.owner,
       collaborators: site.collaborators,
+      members: site.members,
+      visibility: site.visibility,
       current: site.currentVersion,
       url: siteUrl(name),
       versions,
     });
+  });
+
+  // ---- set visibility (owner/admin) ----
+  app.post("/v1/sites/:name/visibility", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (!can(await actorFor(email, site), "configure")) return c.json({ error: "owner only" }, 403);
+    const body = (await c.req.json().catch(() => ({}))) as { visibility?: string; password?: string };
+    const vis = body.visibility as Visibility;
+    if (vis !== "public" && vis !== "private" && vis !== "password") {
+      return c.json({ error: "visibility must be public|private|password" }, 400);
+    }
+    if (vis === "password" && !body.password) return c.json({ error: "password required for password visibility" }, 400);
+    const hash = vis === "password" ? hashPassword(body.password!) : null;
+    await d.meta.setVisibility(name, vis, hash);
+    return c.json({ name, visibility: vis });
   });
 
   // ---- delete ----
@@ -165,38 +201,44 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!canAdmin(site, email)) return c.json({ error: "owner only" }, 403);
+    if (!can(await actorFor(email, site), "delete")) return c.json({ error: "owner only" }, 403);
+    await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);
-    for (const m of [site.owner, ...site.collaborators]) {
-      await d.meta.removeUserSite(m, name).catch(() => {});
-    }
     return c.json({ deleted: name });
   });
 
-  // ---- list my sites (fast: per-user marker index) ----
+  // ---- list my sites ----
   app.get("/v1/sites", async (c) => {
     const email = c.get("identity").email;
     const names = await d.meta.listUserSites(email);
-    const out: any[] = [];
+    const out: unknown[] = [];
     for (const name of names) {
       const s = await d.meta.getSitePlain(name);
-      if (s) out.push({ name: s.name, owner: s.owner, url: siteUrl(name), current: s.currentVersion });
+      if (s) out.push({ name: s.name, owner: s.owner, visibility: s.visibility, url: siteUrl(name), current: s.currentVersion });
     }
     return c.json({ sites: out });
   });
 
-  // ---- admin: browse ALL sites (cursor-paginated; DROP_ADMINS only) ----
+  // ---- admin: browse ALL sites (keyset-paginated; platform admins only) ----
   app.get("/v1/admin/sites", async (c) => {
     const email = c.get("identity").email;
-    if (!isAdmin(email, d.cfg.admins)) return c.json({ error: "admin only" }, 403);
+    if (!(await isPlatformAdmin(email))) return c.json({ error: "admin only" }, 403);
     const cursor = c.req.query("cursor") || undefined;
     const limit = Math.min(Number(c.req.query("limit") ?? "100") || 100, 1000);
     const prefix = c.req.query("prefix") || undefined;
     const { names, nextCursor } = await d.meta.listSitesPage({ cursor, limit, prefix });
-    const out: any[] = [];
+    const out: unknown[] = [];
     for (const name of names) {
       const s = await d.meta.getSitePlain(name);
-      if (s) out.push({ name: s.name, owner: s.owner, current: s.currentVersion, url: siteUrl(name), collaborators: s.collaborators.length });
+      if (s)
+        out.push({
+          name: s.name,
+          owner: s.owner,
+          visibility: s.visibility,
+          current: s.currentVersion,
+          url: siteUrl(name),
+          collaborators: s.collaborators.length,
+        });
     }
     return c.json({ sites: out, nextCursor });
   });
@@ -207,15 +249,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!canAdmin(site, email)) return c.json({ error: "owner only" }, 403);
-    const body = (await c.req.json().catch(() => ({}))) as { email?: string };
+    if (!can(await actorFor(email, site), "share")) return c.json({ error: "owner only" }, 403);
+    const body = (await c.req.json().catch(() => ({}))) as { email?: string; role?: string };
     if (!body.email) return c.json({ error: "email required" }, 400);
-    const add = body.email;
-    await d.meta.updateSite(name, (s) =>
-      s.collaborators.includes(add) ? s : { ...s, collaborators: [...s.collaborators, add] },
-    );
-    await d.meta.addUserSite(add, name); // index for the collaborator
-    return c.json({ added: add });
+    const role = body.role === "viewer" ? "viewer" : "editor";
+    await ensureUser(body.email); // FK
+    await d.meta.addMember(name, body.email, role);
+    return c.json({ added: body.email, role });
   });
 
   app.delete("/v1/sites/:name/collaborators/:email", async (c) => {
@@ -224,12 +264,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const target = c.req.param("email");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!canAdmin(site, email)) return c.json({ error: "owner only" }, 403);
-    await d.meta.updateSite(name, (s) => ({
-      ...s,
-      collaborators: s.collaborators.filter((x) => x !== target),
-    }));
-    await d.meta.removeUserSite(target, name).catch(() => {});
+    if (!can(await actorFor(email, site), "share")) return c.json({ error: "owner only" }, 403);
+    await d.meta.removeMember(name, target);
     return c.json({ removed: target });
   });
 
@@ -239,23 +275,18 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!canAdmin(site, email)) return c.json({ error: "owner only" }, 403);
+    if (!can(await actorFor(email, site), "transfer")) return c.json({ error: "owner only" }, 403);
     const body = (await c.req.json().catch(() => ({}))) as { email?: string };
     if (!body.email) return c.json({ error: "email required" }, 400);
-    const newOwner = body.email;
-    await d.meta.updateSite(name, (s) => ({
-      ...s,
-      owner: newOwner,
-      collaborators: [...new Set([...s.collaborators.filter((x) => x !== newOwner), s.owner])],
-    }));
-    await d.meta.addUserSite(newOwner, name); // new owner indexed; old owner kept as collaborator (marker stays)
-    return c.json({ owner: newOwner });
+    await ensureUser(body.email); // FK
+    await d.meta.transferOwner(name, body.email);
+    return c.json({ owner: body.email });
   });
 
   return app;
 }
 
-/** Delete file/version objects beyond keepVersions (never the current one). */
+/** Delete file/version records beyond keepVersions (never the current one). */
 async function pruneVersions(d: Deps, name: string): Promise<void> {
   try {
     const site = await d.meta.getSitePlain(name);
@@ -265,7 +296,7 @@ async function pruneVersions(d: Deps, name: string): Promise<void> {
       const v = versions[i]!;
       if (v.id === site.currentVersion) continue;
       await d.blob.deletePrefix(d.meta.filesPrefix(name, v.id)).catch(() => {});
-      await d.blob.deletePrefix(d.meta.versionKey(name, v.id)).catch(() => {});
+      await d.meta.deleteVersion(name, v.id).catch(() => {});
     }
   } catch {
     /* best effort */

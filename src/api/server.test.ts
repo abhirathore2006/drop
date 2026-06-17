@@ -5,6 +5,8 @@ import { buffer } from "node:stream/consumers";
 import { createApp } from "./server.ts";
 import { FakeBlob } from "../blob/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
+import { UserStore } from "../users/store.ts";
+import { makeTestDb } from "../db/testdb.ts";
 import { FakeVerifier } from "../auth/oidc.ts";
 import { loadConfig } from "../config.ts";
 
@@ -15,15 +17,18 @@ async function tgz(files: Record<string, string>): Promise<Buffer> {
   return await buffer(p.pipe(createGzip()));
 }
 
-function build() {
+async function mk(opts: { admins?: string[] } = {}) {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  if (opts.admins) await users.seedAdmins(opts.admins);
   const blob = new FakeBlob();
-  const meta = new MetaStore(blob);
-  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com" });
+  const meta = new MetaStore(db);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.company.com" });
   const verifier = new FakeVerifier({
     alice: { sub: "alice@paytm.com", email: "alice@paytm.com" },
     bob: { sub: "bob@paytm.com", email: "bob@paytm.com" },
   });
-  return { app: createApp({ cfg, meta, blob, verifier }), meta, blob };
+  return { app: createApp({ cfg, meta, blob, db, users, verifier }), meta, blob, db, users };
 }
 
 const pub = (app: any, tok: string, name: string, body: Buffer) =>
@@ -40,64 +45,88 @@ const call = (app: any, method: string, path: string, tok: string, body?: any) =
   });
 
 test("publish claims, sets pointer, returns url", async () => {
-  const { app, meta } = build();
+  const { app, meta, db } = await mk();
   const res = await pub(app, "alice", "myapp", await tgz({ "index.html": "<html>" }));
   expect(res.status).toBe(200);
   expect((await res.json()).url).toBe("https://myapp.drop.company.com");
   const site = (await meta.getSitePlain("myapp"))!;
   expect(site.owner).toBe("alice@paytm.com");
   expect(site.currentVersion).not.toBeNull();
+  expect(site.visibility).toBe("public");
+  await db.destroy();
 });
 
 test("publish to a foreign site is 403", async () => {
-  const { app } = build();
+  const { app, db } = await mk();
   expect((await pub(app, "alice", "shared", await tgz({ "index.html": "x" }))).status).toBe(200);
   expect((await pub(app, "bob", "shared", await tgz({ "index.html": "y" }))).status).toBe(403);
+  await db.destroy();
 });
 
 test("bad name -> 400", async () => {
-  const { app } = build();
+  const { app, db } = await mk();
   expect((await pub(app, "alice", "Bad_Name", await tgz({ "index.html": "x" }))).status).toBe(400);
+  await db.destroy();
 });
 
 test("traversal upload -> 400", async () => {
-  const { app } = build();
-  const res = await pub(app, "alice", "evil", await tgz({ "../escape.js": "x" }));
-  expect(res.status).toBe(400);
+  const { app, db } = await mk();
+  expect((await pub(app, "alice", "evil", await tgz({ "../escape.js": "x" }))).status).toBe(400);
+  await db.destroy();
 });
 
 test("rollback to previous version", async () => {
-  const { app } = build();
+  const { app, db } = await mk();
   await pub(app, "alice", "myapp", await tgz({ "index.html": "v1" }));
   await pub(app, "alice", "myapp", await tgz({ "index.html": "v2" }));
-  const res = await call(app, "POST", "/v1/sites/myapp/rollback", "alice", {});
-  expect(res.status).toBe(200);
+  expect((await call(app, "POST", "/v1/sites/myapp/rollback", "alice", {})).status).toBe(200);
+  await db.destroy();
 });
 
-test("collaborator lifecycle", async () => {
-  const { app } = build();
+test("collaborator lifecycle: editor can publish, cannot share", async () => {
+  const { app, db } = await mk();
   await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
-  // bob can't publish yet
   expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(403);
-  // alice shares with bob
   expect((await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@paytm.com" })).status).toBe(200);
-  // now bob can publish
   expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(200);
-  // but bob (collaborator) can't share
   expect((await call(app, "POST", "/v1/sites/myapp/collaborators", "bob", { email: "carol@paytm.com" })).status).toBe(403);
+  await db.destroy();
+});
+
+test("viewer role can read but not publish", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@paytm.com", role: "viewer" });
+  expect((await call(app, "GET", "/v1/sites/myapp", "bob")).status).toBe(200); // read ok
+  expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(403); // publish denied
+  await db.destroy();
 });
 
 test("get site authz + owner-only delete", async () => {
-  const { app } = build();
+  const { app, db } = await mk();
   await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
   expect((await call(app, "GET", "/v1/sites/myapp", "alice")).status).toBe(200);
   expect((await call(app, "GET", "/v1/sites/myapp", "bob")).status).toBe(403);
   expect((await call(app, "DELETE", "/v1/sites/myapp", "bob")).status).toBe(403);
   expect((await call(app, "DELETE", "/v1/sites/myapp", "alice")).status).toBe(200);
+  await db.destroy();
+});
+
+test("transfer ownership moves owner, keeps old as collaborator", async () => {
+  const { app, meta, db } = await mk();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  expect((await call(app, "POST", "/v1/sites/myapp/transfer", "alice", { email: "bob@paytm.com" })).status).toBe(200);
+  const s = (await meta.getSitePlain("myapp"))!;
+  expect(s.owner).toBe("bob@paytm.com");
+  expect(s.collaborators).toContain("alice@paytm.com");
+  // now bob (new owner) can publish, alice (now editor) can still publish but not delete
+  expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(200);
+  expect((await call(app, "DELETE", "/v1/sites/myapp", "alice")).status).toBe(403);
+  await db.destroy();
 });
 
 test("ls returns only the caller's own + shared sites", async () => {
-  const { app } = build();
+  const { app, db } = await mk();
   await pub(app, "alice", "a-one", await tgz({ "index.html": "x" }));
   await pub(app, "alice", "a-two", await tgz({ "index.html": "x" }));
   await pub(app, "bob", "b-one", await tgz({ "index.html": "x" }));
@@ -107,87 +136,75 @@ test("ls returns only the caller's own + shared sites", async () => {
   expect(alice.sites.map((s: any) => s.name).sort()).toEqual(["a-one", "a-two"]);
   const bob = await (await call(app, "GET", "/v1/sites", "bob")).json();
   expect(bob.sites.map((s: any) => s.name).sort()).toEqual(["a-one", "b-one"]); // shared a-one shows up
+  await db.destroy();
 });
 
-test("admin endpoint: non-admin 403, admin sees ALL sites paginated", async () => {
-  const blob = new FakeBlob();
-  const meta = new MetaStore(blob);
-  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com", DROP_ADMINS: "alice@paytm.com" });
-  const verifier = new FakeVerifier({
-    alice: { sub: "alice@paytm.com", email: "alice@paytm.com" },
-    bob: { sub: "bob@paytm.com", email: "bob@paytm.com" },
+test("visibility: set password + private; reflected on get", async () => {
+  const { app, meta, db } = await mk();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  expect((await call(app, "POST", "/v1/sites/myapp/visibility", "alice", { visibility: "password", password: "s3cr3t" })).status).toBe(200);
+  let ptr = (await meta.getPointer("myapp"))!;
+  expect(ptr.visibility).toBe("password");
+  expect(ptr.passwordHash).toMatch(/^sha256:/);
+  expect((await call(app, "POST", "/v1/sites/myapp/visibility", "alice", { visibility: "private" })).status).toBe(200);
+  ptr = (await meta.getPointer("myapp"))!;
+  expect(ptr.visibility).toBe("private");
+  expect(ptr.passwordHash).toBeNull();
+  // password visibility requires a password
+  expect((await call(app, "POST", "/v1/sites/myapp/visibility", "alice", { visibility: "password" })).status).toBe(400);
+  // non-owner cannot configure
+  expect((await call(app, "POST", "/v1/sites/myapp/visibility", "bob", { visibility: "public" })).status).toBe(403);
+  await db.destroy();
+});
+
+test("publishing a bundle with basicAuth sets password visibility", async () => {
+  const { app, meta, db } = await mk();
+  const tar = await tgz({
+    "index.html": "<html>",
+    "_drop.json": JSON.stringify({ basicAuth: { users: { admin: "sha256:abc" } } }),
   });
-  const app = createApp({ cfg, meta, blob, verifier });
+  expect((await pub(app, "alice", "secret", tar)).status).toBe(200);
+  expect((await meta.getSitePlain("secret"))!.visibility).toBe("password");
+  await db.destroy();
+});
+
+test("admin endpoint: non-admin 403, admin sees ALL sites", async () => {
+  const { app, db } = await mk({ admins: ["alice@paytm.com"] });
   await pub(app, "alice", "site-a", await tgz({ "index.html": "x" }));
   await pub(app, "bob", "site-b", await tgz({ "index.html": "x" }));
-
-  expect((await call(app, "GET", "/v1/admin/sites", "bob")).status).toBe(403); // bob not an admin
+  expect((await call(app, "GET", "/v1/admin/sites", "bob")).status).toBe(403);
   const r = await call(app, "GET", "/v1/admin/sites", "alice");
   expect(r.status).toBe(200);
-  const body = await r.json();
-  expect(body.sites.map((s: any) => s.name).sort()).toEqual(["site-a", "site-b"]); // admin sees bob's too
+  expect((await r.json()).sites.map((s: any) => s.name).sort()).toEqual(["site-a", "site-b"]);
+  await db.destroy();
 });
 
 test("admin cannot be spoofed via client-supplied flags/headers/body", async () => {
-  const blob = new FakeBlob();
-  const meta = new MetaStore(blob);
-  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com", DROP_ADMINS: "alice@paytm.com" });
-  const verifier = new FakeVerifier({
-    alice: { sub: "alice@paytm.com", email: "alice@paytm.com" },
-    bob: { sub: "bob@paytm.com", email: "bob@paytm.com" },
-  });
-  const app = createApp({ cfg, meta, blob, verifier });
+  const { app, db } = await mk({ admins: ["alice@paytm.com"] });
   await pub(app, "alice", "site-a", await tgz({ "index.html": "x" }));
-
-  // bob is a fully authenticated, NON-admin user trying every client-side escalation trick.
-  const spoofs = [
-    { admin: true },                       // body flag
-    { email: "alice@paytm.com" },          // claim someone else's identity in the body
-    { isAdmin: true, role: "admin" },      // guessed field names
-  ];
-  for (const body of spoofs) {
+  // bob is authenticated but NOT an admin; every escalation trick must fail.
+  for (const _ of [{ admin: true }, { email: "alice@paytm.com" }, { isAdmin: true, role: "admin" }]) {
     const res = await app.request("/v1/admin/sites", {
       method: "GET",
-      headers: {
-        authorization: "Bearer bob",       // the ONLY thing the server trusts — verified, non-admin
-        "content-type": "application/json",
-        "x-admin": "true",                 // spoofed header
-        "x-drop-admin": "1",
-      },
-      body: undefined, // GET; the header spoofs above are the realistic attack surface
+      headers: { authorization: "Bearer bob", "x-admin": "true", "x-drop-admin": "1" },
     });
-    expect(res.status).toBe(403); // server re-derives admin from the verified token, ignores everything else
-    void body;
+    expect(res.status).toBe(403);
+    void _;
   }
-
-  // And the /v1/me admin flag is honest regardless of what the client sends.
-  const me = await app.request("/v1/me", {
-    method: "GET",
-    headers: { authorization: "Bearer bob", "x-admin": "true" },
-  });
+  const me = await app.request("/v1/me", { method: "GET", headers: { authorization: "Bearer bob", "x-admin": "true" } });
   expect(((await me.json()) as { admin: boolean }).admin).toBe(false);
+  await db.destroy();
 });
 
-test("/v1/me reports admin flag", async () => {
-  const blob = new FakeBlob();
-  const meta = new MetaStore(blob);
-  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com", DROP_ADMINS: "alice@paytm.com" });
-  const verifier = new FakeVerifier({
-    alice: { sub: "alice@paytm.com", email: "alice@paytm.com" },
-    bob: { sub: "bob@paytm.com", email: "bob@paytm.com" },
-  });
-  const app = createApp({ cfg, meta, blob, verifier });
+test("/v1/me reports admin flag from the users table", async () => {
+  const { app, db } = await mk({ admins: ["alice@paytm.com"] });
   expect((await (await call(app, "GET", "/v1/me", "alice")).json()).admin).toBe(true);
   expect((await (await call(app, "GET", "/v1/me", "bob")).json()).admin).toBe(false);
+  await db.destroy();
 });
 
 test("publish parses _drop.json into config and does not serve it", async () => {
-  const blob = new FakeBlob();
-  const meta = new MetaStore(blob);
-  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.company.com" });
-  const verifier = new FakeVerifier({ alice: { sub: "alice@paytm.com", email: "alice@paytm.com" } });
-  const app = createApp({ cfg, meta, blob, verifier });
-
+  const { app, meta, blob, db } = await mk();
   const tar = await tgz({
     "index.html": "<html>",
     "_drop.json": JSON.stringify({ spaFallback: "app.html", redirects: [{ from: "/old", to: "/new" }] }),
@@ -198,23 +215,15 @@ test("publish parses _drop.json into config and does not serve it", async () => 
   expect(site.config?.spaFallback).toBe("app.html");
   expect(site.config?.redirects?.[0]!.to).toBe("/new");
 
-  const files = await blob.list(meta.filesPrefix("cfgsite", site.currentVersion!));
-  expect(files.keys.some((k) => k.endsWith("/_drop.json"))).toBe(false); // not a served file
-  expect(files.keys.some((k) => k.endsWith("/index.html"))).toBe(true);
+  const prefix = meta.filesPrefix("cfgsite", site.currentVersion!);
+  expect(await blob.get(prefix + "_drop.json")).toBeNull(); // not a served file
+  expect(await blob.get(prefix + "index.html")).not.toBeNull();
+  await db.destroy();
 });
 
 test("publish rejects when _drop.json name mismatches the target", async () => {
-  const { app } = build();
+  const { app, db } = await mk();
   const tar = await tgz({ "index.html": "<html>", "_drop.json": JSON.stringify({ name: "otherapp" }) });
-  const res = await pub(app, "alice", "myapp", tar); // URL says myapp, bundle says otherapp
-  expect(res.status).toBe(400);
-});
-
-test("ls lists owned + collaborated sites", async () => {
-  const { app } = build();
-  await pub(app, "alice", "one", await tgz({ "index.html": "x" }));
-  await pub(app, "bob", "two", await tgz({ "index.html": "x" }));
-  const res = await call(app, "GET", "/v1/sites", "alice");
-  const { sites } = await res.json();
-  expect(sites.map((s: any) => s.name)).toEqual(["one"]);
+  expect((await pub(app, "alice", "myapp", tar)).status).toBe(400);
+  await db.destroy();
 });

@@ -46,13 +46,16 @@ export interface VersionsTable {
   config: JsonConfig;
 }
 
+type HandleStatus = "pending" | "done" | "denied";
+
 export interface AuthHandlesTable {
   id: string;
   poll_token: string;
   code_verifier: string;
-  status: ColumnType<"pending" | "done", "pending" | "done" | undefined, "pending" | "done">;
+  status: ColumnType<HandleStatus, HandleStatus | undefined, HandleStatus>;
   mode: "cli" | "browser";
   token: string | null;
+  error: string | null;
   created_at: Generated<Ts>;
 }
 

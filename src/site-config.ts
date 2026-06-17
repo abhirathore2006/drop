@@ -137,6 +137,23 @@ function pwMatches(provided: string, stored: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/** Hash a plaintext password for storage in `sites.password_hash`. */
+export function hashPassword(plain: string): string {
+  return "sha256:" + createHash("sha256").update(plain).digest("hex");
+}
+
+/**
+ * Validate an `Authorization: Basic` header against a single stored password
+ * hash (username ignored) — the site-visibility "password" mode.
+ */
+export function passwordHashOk(header: string | undefined, storedHash: string | null): boolean {
+  if (!storedHash || !header || !/^basic /i.test(header)) return false;
+  const decoded = Buffer.from(header.slice(6).trim(), "base64").toString("utf8");
+  const i = decoded.indexOf(":");
+  const provided = i < 0 ? decoded : decoded.slice(i + 1);
+  return pwMatches(provided, storedHash);
+}
+
 /** Validate an `Authorization: Basic` header against the config's users. */
 export function basicAuthOk(header: string | undefined, users: Record<string, string>): boolean {
   if (!header || !/^basic /i.test(header)) return false;
