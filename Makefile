@@ -12,6 +12,7 @@ PG_IMAGE     ?= docker.io/library/postgres:16-alpine
 BASE_DOMAIN  ?= drop.localhost
 BUCKET       ?= drop
 RUN          := .run
+CERT         := infra/nginx/certs/drop.localhost.pem
 
 NODE_VERSION := $(shell cat .nvmrc 2>/dev/null)
 NODE_BIN     := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin
@@ -24,7 +25,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset
+.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -38,6 +39,8 @@ help:
 	@echo "  make login                      sign in with Google (server-mediated, real auth)"
 	@echo "  make stop-all                   also stop the podman machine"
 	@echo "  make reset                      wipe the Floci + Postgres volumes (all sites + metadata)"
+	@echo "  make trust-cert                 trust the local HTTPS cert in the OS store (sudo)"
+	@echo "  make untrust-cert               remove it again"
 	@echo ""
 	@echo "  corporate CA for podman pulls:  make setup CORP_CA=~/certs/your-root-ca.cer"
 
@@ -67,6 +70,40 @@ setup:
 
 build:
 	@$(NODE) build.mjs
+
+# Trust the local HTTPS cert (infra/nginx/certs) in the OS root store so browsers
+# stop warning — OS-detected (macOS / Linux / Windows). Generates the cert first if
+# missing. Needs sudo. Tip: if mkcert is installed, gen-certs.sh already issues a
+# browser-trusted cert and this is unnecessary.
+trust-cert:
+	@test -f $(CERT) || ./infra/nginx/gen-certs.sh
+	@echo "▸ trusting $(CERT) on $$(uname -s) (sudo)…"
+	@case "$$(uname -s)" in \
+	  Darwin) sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$(CERT)" \
+	    && echo "✓ added to the macOS System keychain — restart your browser" ;; \
+	  Linux) \
+	    if [ -d /usr/local/share/ca-certificates ]; then \
+	      sudo cp "$(CERT)" /usr/local/share/ca-certificates/drop-localhost.crt && sudo update-ca-certificates >/dev/null && echo "✓ added to system trust (Debian/Ubuntu)"; \
+	    elif [ -d /etc/pki/ca-trust/source/anchors ]; then \
+	      sudo cp "$(CERT)" /etc/pki/ca-trust/source/anchors/drop-localhost.crt && sudo update-ca-trust && echo "✓ added to system trust (RHEL/Fedora)"; \
+	    else echo "! unknown Linux trust store — add $(CERT) to your CA anchors manually"; fi; \
+	    if command -v certutil >/dev/null 2>&1 && [ -d "$$HOME/.pki/nssdb" ]; then \
+	      certutil -d "sql:$$HOME/.pki/nssdb" -A -t "C,," -n drop-localhost -i "$(CERT)" && echo "  + added to the NSS store (Chrome/Firefox)"; fi ;; \
+	  *) echo "Windows — run in an elevated PowerShell:"; \
+	     echo "  Import-Certificate -FilePath $(CERT) -CertStoreLocation Cert:\\LocalMachine\\Root" ;; \
+	esac
+
+untrust-cert:
+	@case "$$(uname -s)" in \
+	  Darwin) sudo security delete-certificate -c "*.drop.localhost" /Library/Keychains/System.keychain 2>/dev/null && echo "✓ removed from the macOS keychain" || echo "(not found)" ;; \
+	  Linux) \
+	    sudo rm -f /usr/local/share/ca-certificates/drop-localhost.crt /etc/pki/ca-trust/source/anchors/drop-localhost.crt; \
+	    (command -v update-ca-certificates >/dev/null 2>&1 && sudo update-ca-certificates --fresh >/dev/null 2>&1) || (command -v update-ca-trust >/dev/null 2>&1 && sudo update-ca-trust); \
+	    if command -v certutil >/dev/null 2>&1 && [ -d "$$HOME/.pki/nssdb" ]; then certutil -d "sql:$$HOME/.pki/nssdb" -D -n drop-localhost 2>/dev/null || true; fi; \
+	    echo "✓ removed (Linux)" ;; \
+	  *) echo "Windows — elevated PowerShell:"; \
+	     echo "  Get-ChildItem Cert:\\LocalMachine\\Root | ? { \$$_.Subject -match 'drop.localhost' } | Remove-Item" ;; \
+	esac
 
 floci:
 	@podman machine start >/dev/null 2>&1 || true
