@@ -4,11 +4,10 @@ import {
   GetObjectCommand,
   CreateBucketCommand,
   ListObjectsV2Command,
-  DeleteObjectCommand,
   DeleteObjectsCommand,
 } from "@aws-sdk/client-s3";
 import type { Readable } from "node:stream";
-import type { BlobStore, GetResult, ListResult, ListPage, ListPageOptions, PutOptions } from "./types.ts";
+import type { BlobStore, GetResult, ListResult, PutOptions } from "./types.ts";
 import { PreconditionFailedError } from "./types.ts";
 
 export interface S3Options {
@@ -117,10 +116,6 @@ export class S3Blob implements BlobStore {
     }
   }
 
-  async delete(key: string): Promise<void> {
-    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
-  }
-
   async deletePrefix(prefix: string): Promise<void> {
     let token: string | undefined;
     do {
@@ -153,22 +148,5 @@ export class S3Blob implements BlobStore {
       token = out.IsTruncated ? out.NextContinuationToken : undefined;
     } while (token);
     return { keys, prefixes };
-  }
-
-  async listPage(prefix: string, opts: ListPageOptions = {}): Promise<ListPage> {
-    const out = await this.client.send(
-      new ListObjectsV2Command({
-        Bucket: this.bucket,
-        Prefix: prefix,
-        Delimiter: opts.delimiter,
-        ContinuationToken: opts.cursor,
-        MaxKeys: opts.limit,
-      }),
-    );
-    return {
-      keys: (out.Contents ?? []).map((o) => o.Key!).filter(Boolean),
-      prefixes: (out.CommonPrefixes ?? []).map((p) => p.Prefix!).filter(Boolean),
-      nextCursor: out.IsTruncated ? out.NextContinuationToken : undefined,
-    };
   }
 }

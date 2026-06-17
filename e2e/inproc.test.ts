@@ -4,29 +4,37 @@ import { join } from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { FakeBlob } from "../src/blob/fake.ts";
 import { MetaStore } from "../src/metastore/store.ts";
+import { UserStore } from "../src/users/store.ts";
+import { makeTestDb } from "../src/db/testdb.ts";
+import type { Db } from "../src/db/db.ts";
 import { DevHeaderVerifier } from "../src/auth/oidc.ts";
 import { createApp } from "../src/api/server.ts";
 import { createEdge } from "../src/edge/server.ts";
 import { loadConfig } from "../src/config.ts";
 import { packDir } from "../src/cli/pack.ts";
 
-// api and edge share one in-memory store, so the edge sees what the api publishes.
+// api and edge share ONE in-memory Postgres (PGlite) + blob, so the edge sees
+// what the api publishes.
 const blob = new FakeBlob();
-const meta = new MetaStore(blob);
-const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_BASE_DOMAIN: "drop.localhost", DROP_DEV_AUTH: "1" });
+const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "pglite", DROP_BASE_DOMAIN: "drop.localhost", DROP_DEV_AUTH: "1" });
 
+let db: Db;
 let api: ReturnType<typeof Bun.serve>;
 let edge: ReturnType<typeof Bun.serve>;
 
-beforeAll(() => {
-  api = Bun.serve({ port: 0, fetch: createApp({ cfg, meta, blob, verifier: new DevHeaderVerifier() }).fetch });
+beforeAll(async () => {
+  db = await makeTestDb();
+  const meta = new MetaStore(db);
+  const users = new UserStore(db);
+  api = Bun.serve({ port: 0, fetch: createApp({ cfg, meta, blob, db, users, verifier: new DevHeaderVerifier() }).fetch });
   // pointerTtlMs: 0 so tests read the current pointer immediately (the 10s prod
   // cache is exercised separately and would otherwise mask same-test republishes).
   edge = Bun.serve({ port: 0, fetch: createEdge({ meta, blob, baseDomain: "drop.localhost", pointerTtlMs: 0 }).fetch });
 });
-afterAll(() => {
+afterAll(async () => {
   api.stop(true);
   edge.stop(true);
+  await db.destroy();
 });
 
 const TOKEN = "alice:alice@paytm.com";

@@ -29,18 +29,6 @@ export interface ListResult {
   prefixes: string[];
 }
 
-export interface ListPageOptions {
-  delimiter?: string;
-  cursor?: string; // opaque continuation token from a previous page
-  limit?: number; // max keys+prefixes per page
-}
-
-export interface ListPage {
-  keys: string[];
-  prefixes: string[];
-  nextCursor?: string; // present if there are more pages
-}
-
 export interface BlobStore {
   /** Stores the object. Throws PreconditionFailedError if a conditional fails. */
   put(
@@ -54,15 +42,11 @@ export interface BlobStore {
   /** Returns null when the key does not exist. */
   get(key: string): Promise<GetResult | null>;
 
-  /** Delete a single object by exact key. */
-  delete(key: string): Promise<void>;
-
+  /** Delete every object under a key prefix (prune a version's bytes / a site). */
   deletePrefix(prefix: string): Promise<void>;
 
+  /** List keys (and common prefixes with a delimiter) under a prefix. */
   list(prefix: string, delimiter?: string): Promise<ListResult>;
-
-  /** A single page of a listing, with a continuation cursor for the next page. */
-  listPage(prefix: string, opts?: ListPageOptions): Promise<ListPage>;
 
   /** Idempotently create the bucket (Floci / MinIO / AWS). */
   ensureBucket(): Promise<void>;

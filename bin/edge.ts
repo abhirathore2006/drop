@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { loadConfig } from "../src/config.ts";
 import { S3Blob } from "../src/blob/s3.ts";
+import { makeDb } from "../src/db/db.ts";
 import { MetaStore } from "../src/metastore/store.ts";
 import { createEdge } from "../src/edge/server.ts";
 
@@ -13,7 +14,8 @@ const blob = new S3Blob({
   keyId: cfg.s3KeyId,
   secret: cfg.s3Secret,
 });
-const meta = new MetaStore(blob);
+const { db } = makeDb(cfg.databaseUrl); // read-only; the API owns migrations
+const meta = new MetaStore(db);
 
 const app = createEdge({
   meta,

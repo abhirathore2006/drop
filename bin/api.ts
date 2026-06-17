@@ -1,7 +1,10 @@
 import { serve } from "@hono/node-server";
 import { loadConfig } from "../src/config.ts";
 import { S3Blob } from "../src/blob/s3.ts";
+import { makeDb } from "../src/db/db.ts";
+import { runMigrations } from "../src/db/migrate.ts";
 import { MetaStore } from "../src/metastore/store.ts";
+import { UserStore } from "../src/users/store.ts";
 import { DevHeaderVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
 import { createApp } from "../src/api/server.ts";
@@ -17,7 +20,12 @@ const blob = new S3Blob({
   secret: cfg.s3Secret,
 });
 await blob.ensureBucket();
-const meta = new MetaStore(blob);
+
+const { db } = makeDb(cfg.databaseUrl);
+await runMigrations(db); // advisory-locked; multi-replica safe
+const users = new UserStore(db);
+await users.seedAdmins(cfg.admins); // DROP_ADMINS bootstrap
+const meta = new MetaStore(db);
 
 let verifier: Verifier;
 if (cfg.devAuth) {
@@ -37,7 +45,7 @@ if (cfg.devAuth) {
   verifier = new SessionVerifier(cfg.sessionSecret);
 }
 
-const app = createApp({ cfg, meta, blob, verifier });
+const app = createApp({ cfg, meta, blob, db, users, verifier });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });

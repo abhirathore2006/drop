@@ -1,5 +1,5 @@
 import type { Readable } from "node:stream";
-import type { BlobStore, GetResult, ListResult, ListPage, ListPageOptions, PutOptions } from "./types.ts";
+import type { BlobStore, GetResult, ListResult, PutOptions } from "./types.ts";
 import { PreconditionFailedError } from "./types.ts";
 
 interface Obj {
@@ -53,10 +53,6 @@ export class FakeBlob implements BlobStore {
     };
   }
 
-  async delete(key: string): Promise<void> {
-    this.objs.delete(key);
-  }
-
   async deletePrefix(prefix: string): Promise<void> {
     for (const k of [...this.objs.keys()]) if (k.startsWith(prefix)) this.objs.delete(k);
   }
@@ -77,22 +73,5 @@ export class FakeBlob implements BlobStore {
       keys.push(k);
     }
     return { keys: keys.sort(), prefixes: [...prefixes].sort() };
-  }
-
-  async listPage(prefix: string, opts: ListPageOptions = {}): Promise<ListPage> {
-    const all = await this.list(prefix, opts.delimiter);
-    // Merge keys + prefixes into one ordered stream, page by numeric cursor.
-    const items = [...all.prefixes.map((p) => ({ p })), ...all.keys.map((k) => ({ k }))].sort((a, b) =>
-      (("p" in a ? a.p : a.k!) < ("p" in b ? b.p : b.k!) ? -1 : 1),
-    );
-    const start = opts.cursor ? Number(opts.cursor) : 0;
-    const limit = opts.limit ?? 1000;
-    const page = items.slice(start, start + limit);
-    const next = start + limit < items.length ? String(start + limit) : undefined;
-    return {
-      keys: page.filter((x) => "k" in x).map((x: any) => x.k),
-      prefixes: page.filter((x) => "p" in x).map((x: any) => x.p),
-      nextCursor: next,
-    };
   }
 }
