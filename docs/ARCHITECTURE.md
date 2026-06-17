@@ -11,8 +11,8 @@ Drop is a self-hosted static-site publisher. Two stateless Hono services share a
 File **bytes** live in S3 (`sites/<name>/files/<verId>/…`). Everything else —
 sites, members, versions, users, auth handles — lives in Postgres.
 
-Ports: api `8473`, edge `8474`, Postgres `5432`, S3/Floci `4566` (local), portless
-`443` (local, optional).
+Ports: api `8473`, edge `8474`, Postgres `5432`, S3/Floci `4566` (local), nginx
+`443` (local HTTPS, optional).
 
 ---
 
@@ -198,32 +198,31 @@ served pages) from roles (who may *manage* the site).
 
 ## 5. Local development topology
 
-`make start` runs api/edge as Node processes against Floci (S3) and Postgres in
-podman. `make portless` (optional) fronts them with trusted HTTPS on `:443`.
+Two local options. **`make start`** runs api/edge as Node processes against Floci (S3)
+and Postgres in podman — fast iteration over plain `http://…:<port>`. The
+**`docker compose`** stack runs everything in containers behind **nginx** for trusted
+HTTPS on `:443` — mirroring the prod ingress.
 
 ```mermaid
 flowchart LR
     b["Browser / CLI"]
 
-    subgraph pl["portless (optional) :443<br/>local CA · ~/.portless/ca.pem"]
+    subgraph nx["nginx :443 (compose)<br/>TLS · host routing"]
         direction TB
-        r{{"host router<br/>--wildcard"}}
+        r{{"api.* → api<br/>*.drop.localhost → edge"}}
     end
 
-    subgraph host["host (Node processes)"]
+    subgraph svc["containers (compose) / processes (make start)"]
         api["api :8473"]
         edge["edge :8474"]
-    end
-
-    subgraph podman["podman containers"]
-        floci[("Floci S3 :4566<br/>vol: drop-floci-data")]
-        pg[("Postgres :5432<br/>vol: drop-pg-data")]
+        floci[("Floci S3 :4566")]
+        pg[("Postgres :5432")]
     end
 
     b -->|"https://api.drop.localhost"| r
     b -->|"https://&lt;name&gt;.drop.localhost"| r
-    r -->|"alias api.drop"| api
-    r -->|"alias drop + wildcard"| edge
+    r -->|"X-Forwarded-Host"| api
+    r -->|"X-Forwarded-Host"| edge
 
     api --> floci
     api --> pg
@@ -231,10 +230,10 @@ flowchart LR
     edge --> pg
 ```
 
-Without portless, reach the edge at `http://<name>.drop.localhost:8474` and the api
-at `http://localhost:8473`. With portless you get production-shaped URLs
-(`https://…`, no ports); the edge reads `x-forwarded-host` so the site name
-survives the proxy.
+With `make start`, reach the edge at `http://<name>.drop.localhost:8474` and the api at
+`http://localhost:8473`. With the compose stack you get `https://api.drop.localhost/`
+and `https://<name>.drop.localhost/` on `:443`; nginx sets `X-Forwarded-Host`, which
+the edge reads so the site name survives the proxy.
 
 ---
 

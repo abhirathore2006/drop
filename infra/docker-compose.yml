@@ -1,9 +1,29 @@
-# Run with Podman: `podman compose -f infra/docker-compose.yml up --build`
-# No database — Floci (S3-compatible AWS emulator) is the only backing store.
-# Images are fully-qualified for Podman's strict registry resolution.
+# Full local stack in containers, behind nginx for trusted HTTPS on :443.
+#   1. ./infra/nginx/gen-certs.sh                         # once: TLS cert for *.drop.localhost
+#   2. docker compose -f infra/docker-compose.yml up --build
+#   -> https://api.drop.localhost/        control plane + dashboard + /docs
+#   -> https://<name>.drop.localhost/     published sites (wildcard -> edge)
+# Metadata lives in Postgres; file bytes in Floci (S3-compatible). The api migrates
+# Postgres on boot; the edge connects read-only. nginx mirrors the prod ingress.
 services:
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_USER: drop
+      POSTGRES_PASSWORD: drop
+      POSTGRES_DB: drop
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drop -d drop"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "5432:5432"
+
   floci:
-    # Floci — S3-compatible AWS emulator (https://floci.io). Holds files + metadata.
+    # Floci — S3-compatible emulator (https://floci.io). Holds the served file bytes.
     image: docker.io/floci/floci:latest
     environment:
       FLOCI_STORAGE_MODE: hybrid
@@ -17,11 +37,14 @@ services:
       context: ..
       dockerfile: infra/Dockerfile.api
     depends_on:
+      postgres:
+        condition: service_healthy
       floci:
         condition: service_started
     environment:
       DROP_HTTP_PORT: "8080"
       DROP_BASE_DOMAIN: "drop.localhost"
+      DROP_DATABASE_URL: "postgres://drop:drop@postgres:5432/drop"
       DROP_S3_BUCKET: "drop-sites"
       DROP_S3_ENDPOINT: "http://floci:4566"
       DROP_S3_REGION: "us-east-1"
@@ -36,11 +59,14 @@ services:
       context: ..
       dockerfile: infra/Dockerfile.edge
     depends_on:
+      postgres:
+        condition: service_healthy
       floci:
         condition: service_started
     environment:
       DROP_HTTP_PORT: "8080"
       DROP_BASE_DOMAIN: "drop.localhost"
+      DROP_DATABASE_URL: "postgres://drop:drop@postgres:5432/drop"
       DROP_S3_BUCKET: "drop-sites"
       DROP_S3_ENDPOINT: "http://floci:4566"
       DROP_S3_REGION: "us-east-1"
@@ -52,6 +78,20 @@ services:
     ports:
       - "8474:8080"
 
+  nginx:
+    # Local HTTPS reverse proxy — trusted certs + stable names; mirrors prod ingress.
+    # Run ./infra/nginx/gen-certs.sh first to populate ./nginx/certs.
+    image: docker.io/library/nginx:1.27-alpine
+    depends_on:
+      - api
+      - edge
+    volumes:
+      - ./nginx/drop.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    ports:
+      - "443:443"
+
 volumes:
+  pg-data:
   floci-data:
   edge-cache:

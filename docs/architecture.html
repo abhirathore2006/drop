@@ -40,7 +40,7 @@
     <p>File <strong>bytes</strong> live in S3 (<code>sites/&lt;name&gt;/files/&lt;verId&gt;/…</code>).
     Everything else — sites, members, versions, users, auth handles — lives in Postgres. Ports: api
     <code>8473</code>, edge <code>8474</code>, Postgres <code>5432</code>, S3/Floci <code>4566</code>
-    (local), portless <code>443</code> (local, optional).</p>
+    (local), nginx <code>443</code> (local HTTPS, optional).</p>
 
     <h2>1. System overview</h2>
     <p>The api and edge are the only moving parts; both scale horizontally because all shared state is in
@@ -71,11 +71,12 @@
     <div class="mermaid" id="m4"></div>
 
     <h2>5. Local development topology</h2>
-    <p><code>make start</code> runs api/edge as Node processes against Floci (S3) and Postgres in podman.
-    <code>make portless</code> (optional) fronts them with trusted HTTPS on <code>:443</code>. Without
-    portless, reach the edge at <code>http://&lt;name&gt;.drop.localhost:8474</code> and the api at
-    <code>http://localhost:8473</code>. The edge reads <code>x-forwarded-host</code> so the site name
-    survives the proxy. See <a href="getting-started.html">Getting started</a>.</p>
+    <p>Two options. <code>make start</code> runs api/edge as Node processes against Floci (S3) and Postgres in
+    podman — fast iteration over <code>http://…:&lt;port&gt;</code>. The <code>docker compose</code> stack runs
+    everything in containers behind <strong>nginx</strong> for trusted HTTPS on <code>:443</code>, mirroring the
+    prod ingress: <code>https://api.drop.localhost/</code> and <code>https://&lt;name&gt;.drop.localhost/</code>.
+    nginx sets <code>X-Forwarded-Host</code>, which the edge reads so the site name survives the proxy.
+    See <a href="getting-started.html">Getting started</a>.</p>
     <div class="mermaid" id="m5"></div>
 
     <h2>6. Production topology (Kubernetes)</h2>
@@ -221,22 +222,20 @@ m4: `erDiagram
     }`,
 m5: `flowchart LR
     b["Browser / CLI"]
-    subgraph pl["portless (optional) :443<br/>local CA · ~/.portless/ca.pem"]
+    subgraph nx["nginx :443 (compose)<br/>TLS · host routing"]
         direction TB
-        r{{"host router<br/>--wildcard"}}
+        r{{"api.* → api<br/>*.drop.localhost → edge"}}
     end
-    subgraph host["host (Node processes)"]
+    subgraph svc["containers (compose) / processes (make start)"]
         api["api :8473"]
         edge["edge :8474"]
-    end
-    subgraph podman["podman containers"]
-        floci[("Floci S3 :4566<br/>vol: drop-floci-data")]
-        pg[("Postgres :5432<br/>vol: drop-pg-data")]
+        floci[("Floci S3 :4566")]
+        pg[("Postgres :5432")]
     end
     b -->|"https://api.drop.localhost"| r
     b -->|"https://&lt;name&gt;.drop.localhost"| r
-    r -->|"alias api.drop"| api
-    r -->|"alias drop + wildcard"| edge
+    r -->|"X-Forwarded-Host"| api
+    r -->|"X-Forwarded-Host"| edge
     api --> floci
     api --> pg
     edge --> floci

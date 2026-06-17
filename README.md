@@ -120,44 +120,34 @@ volumes). Published sites + metadata persist across restarts in named volumes. T
 either curl with `-H "Host: <name>.drop.localhost"` or add
 `127.0.0.1 <name>.drop.localhost` to `/etc/hosts` to view in a browser.
 
-### Seamless local URLs (optional, via portless)
+### Trusted local HTTPS (optional, via nginx in containers)
 
-By default the edge is at `http://<name>.drop.localhost:8474`. For
-**trusted HTTPS with stable names**, front the running stack with
-[portless](https://portless.sh):
+The `make` flow above serves over plain `http://…:<port>`. For **trusted HTTPS with
+stable names** — and a setup that mirrors production — run the whole stack in
+containers behind **nginx** (works on macOS, Linux, and Windows via Docker/Podman
+Desktop or WSL2):
 
 ```bash
-npm i -g portless        # one-time (Node 24+)
-make start               # api :8473 + edge :8474 as usual
-make portless            # local-CA HTTPS proxy + routes; prints the live URLs
+./infra/nginx/gen-certs.sh                              # once: cert for *.drop.localhost
+docker compose -f infra/docker-compose.yml up --build   # postgres + floci + api + edge + nginx
 ```
 
-`make portless` registers `alias api.drop → :8473`, `alias drop → :8474`, and a
-`--wildcard` so every `*.drop.localhost` falls through to the edge (which routes by
-`Host`). The edge honors `x-forwarded-host`, so the site name survives the proxy.
-It then prints the actual URLs, e.g.:
+You then get, behind nginx on `:443`:
 
 - `https://api.drop.localhost/` → control plane + dashboard (and `/docs/`)
 - `https://<name>.drop.localhost/` → any published site (edge, wildcard)
 
-**Ports & `:443`:** the bare `https://…` (no port) requires portless to bind
-**port 443, which needs root**. Run plain (no sudo) and portless falls back to a
-high port (e.g. `:1355`) — fully working, just with a port:
-`https://api.drop.localhost:1355/docs/`. `make portless` detects and prints whichever
-port it bound. For bare `:443`, run it privileged:
+nginx terminates TLS on `:443` and routes by hostname — `api.drop.localhost` → api,
+`*.drop.localhost` → edge — setting `X-Forwarded-Host` (which the edge honors), so the
+site name survives the proxy. This is the same shape as the production ingress
+(ALB/Ingress), just local. `gen-certs.sh` uses [mkcert](https://github.com/FiloSottile/mkcert)
+for a browser-trusted cert if installed, else a self-signed one (browser warning).
 
-```bash
-sudo $(command -v portless) proxy stop && sudo $(command -v portless) proxy start --wildcard
-# or persist across reboots:
-sudo $(command -v portless) service install --wildcard
-```
-
-`make portless-stop` tears the proxy down.
-
-> The `:443` proxy is a single shared portless daemon and `--wildcard` only takes
-> effect at start, so `make portless` **restarts** it to guarantee the wildcard
-> route (persisted aliases survive). Real Google login locally still uses the
-> loopback URL — Google won't accept a `.localhost` OAuth redirect; portless shines
+> This containerized stack uses the same host ports as `make start` (8473/8474/5432/4566)
+> plus `443` — run **`make stop` first** so they don't collide. Binding host `:443`
+> works out of the box on Docker/Podman Desktop; rootless Podman on Linux may need
+> `net.ipv4.ip_unprivileged_port_start=443`. Real Google login locally still uses the
+> loopback URL (Google won't accept a `.localhost` OAuth redirect) — HTTPS here shines
 > for dev-auth, the dashboard, and viewing sites.
 
 > Prefer everything in containers? `make -C infra up` builds + runs api/edge in

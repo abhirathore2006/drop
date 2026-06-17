@@ -36,7 +36,7 @@ test("serves a static asset", async () => {
   expect(res.status).toBe(200);
 });
 
-test("routes by x-forwarded-host when behind a proxy (portless/ALB)", async () => {
+test("routes by x-forwarded-host when behind a proxy (nginx/ALB)", async () => {
   const app = await setup();
   // The direct Host is the proxy's own host; the real site is in x-forwarded-host.
   const res = await app.request("/", {
