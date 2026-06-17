@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AWS deployment · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (_drop.json)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html" class="active">AWS deployment</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Reference</p>
+<h1>AWS deployment</h1>
+<p class="lead">Deploy Drop on AWS two ways from <strong>one</strong> container image: <strong>Variant A</strong> on Amazon EKS via the Helm chart, or <strong>Variant B</strong> on ECS Fargate (no Kubernetes). Both share a foundation — one ECR image, a private S3 bucket, an ACM wildcard cert, RDS PostgreSQL 16, and three Secrets Manager secrets — and both put Drop behind <strong>one internal ALB</strong>. Drop is internal/confidential: nothing here is internet-facing; the ALB is reachable only from the corp network / VPN.</p>
+
+<h2>Shared foundation</h2>
+<p class="lead">Everything below is required by <strong>both</strong> deployment variants (EKS/Helm and ECS/EC2): one ECR image, a private S3 bucket, an ACM wildcard cert, an RDS PostgreSQL 16 instance, and three Secrets Manager secrets — wired together by the shell vars you export once here.</p>
+
+<h3>Prerequisites &amp; vars</h3>
+<p>Install AWS CLI v2, Docker, and Node 24 (Drop's runtime). You'll need an existing VPC with private subnets reachable from the corp network / VPN — Drop is internal, so nothing here is internet-facing. Export these once; every command in this guide reuses them.</p>
+<pre><code><span class="tok-c"># Identity / region</span>
+export REGION=us-east-1
+export ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+
+<span class="tok-c"># Existing network (fill in your own IDs)</span>
+export VPC_ID=vpc-0123456789abcdef0
+export PRIVATE_SUBNETS="subnet-0aaa111 subnet-0bbb222"   <span class="tok-c"># 2+ AZs</span>
+
+<span class="tok-c"># Drop domain — sites live at *.$BASE_DOMAIN, control plane at api.$BASE_DOMAIN</span>
+export BASE_DOMAIN=drop.example.com
+
+<span class="tok-c"># S3 bucket name for site bytes (must be globally unique — add a suffix if taken)</span>
+export BUCKET=drop-sites
+
+<span class="tok-c"># Route 53 hosted zone that serves $BASE_DOMAIN</span>
+export ZONE_ID=Z0123456789ABCDEFGHIJ
+
+<span class="tok-c"># Corp network / VPN range allowed to reach the ALB on :443</span>
+export CORP_CIDR=10.0.0.0/8
+
+<span class="tok-c"># Filled in by later steps:  $ALB_SG $APP_SG $RDS_SG $CERT_ARN $ECR_URI $DB_ENDPOINT</span></code></pre>
+<div class="note tip"><span class="lbl">Note</span><p>The corp CIDR / VPN range that may reach the ALB on :443 is exported as <code>$CORP_CIDR</code> (e.g. <code>10.0.0.0/8</code>) and reused when the security groups are created in the variant-specific sections — keep it set.</p></div>
+
+<h3>1 — ECR: build &amp; push the image</h3>
+<p>Drop ships <strong>one</strong> image (<code>infra/Dockerfile</code>) containing both bundles; the role is chosen at run time by overriding the command (<code>node dist/api.js</code> or <code>node dist/edge.js</code>). The image copies a prebuilt bundle — it runs <strong>no</strong> npm — so you build the bundle on the host first with <code>node build.mjs</code>, then <code>docker build</code>.</p>
+<pre><code><span class="tok-c"># Create the repo (one repo for both roles)</span>
+aws ecr create-repository \
+  --repository-name drop \
+  --image-scanning-configuration scanOnPush=true \
+  --region "$REGION"
+
+export ECR_URI=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/drop
+
+<span class="tok-c"># Log Docker in to ECR</span>
+aws ecr get-login-password --region "$REGION" \
+  | docker login --username AWS --password-stdin \
+      "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
+
+<span class="tok-c"># Build the self-contained bundle on the host (esbuild → dist/), then the image</span>
+node build.mjs
+docker build -f infra/Dockerfile -t "$ECR_URI:0.1.0" .
+
+<span class="tok-c"># Push</span>
+docker push "$ECR_URI:0.1.0"</code></pre>
+<div class="note"><span class="lbl">Note</span><p>The container listens on <code>8080</code> (<code>DROP_HTTP_PORT=8080</code>, the default). Health checks: the <strong>api</strong> answers <code>GET /healthz</code> and the <strong>edge</strong> answers <code>GET /_drop_health</code> — both return HTTP 200 with body <code>ok</code>.</p></div>
+
+<h3>2 — S3: private bucket + IAM policy</h3>
+<p>File bytes live in a private bucket. The app authenticates with an <strong>IAM role</strong> (IRSA on EKS, task role on ECS, instance role on EC2) — <strong>never</strong> static keys.</p>
+<pre><code><span class="tok-c"># Create the bucket (us-east-1 takes no LocationConstraint)</span>
+if [ "$REGION" = "us-east-1" ]; then
+  aws s3api create-bucket --bucket "$BUCKET" --region "$REGION"
+else
+  aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
+    --create-bucket-configuration LocationConstraint="$REGION"
+fi
+
+<span class="tok-c"># Lock it down: block all public access, default encryption</span>
+aws s3api put-public-access-block --bucket "$BUCKET" \
+  --public-access-block-configuration \
+  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+
+aws s3api put-bucket-encryption --bucket "$BUCKET" \
+  --server-side-encryption-configuration \
+  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'</code></pre>
+<p>Attach this policy document to the app role (created in the variant-specific section). Object-level actions on <code>/*</code>, list at the bucket root:</p>
+<pre><code>cat &gt; drop-s3-policy.json &lt;&lt;EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DropObjectRW",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::$BUCKET/*"
+    },
+    {
+      "Sid": "DropList",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::$BUCKET"
+    }
+  ]
+}
+EOF
+
+aws iam create-policy \
+  --policy-name drop-s3 \
+  --policy-document file://drop-s3-policy.json</code></pre>
+<div class="note tip"><span class="lbl">Note</span><p>Note the <code>arn:aws:iam::$ACCOUNT:policy/drop-s3</code> returned here — you attach it to the IRSA role (EKS) or task/instance role (ECS/EC2) in the variant section.</p></div>
+
+<h3>3 — ACM: wildcard certificate</h3>
+<p>One wildcard cert for <code>*.$BASE_DOMAIN</code> covers <strong>both</strong> <code>api.$BASE_DOMAIN</code> and every site host (each a single label under <code>$BASE_DOMAIN</code>). Use DNS validation.</p>
+<pre><code>export CERT_ARN=$(aws acm request-certificate \
+  --domain-name "*.$BASE_DOMAIN" \
+  --validation-method DNS \
+  --region "$REGION" \
+  --query CertificateArn --output text)
+
+<span class="tok-c"># Read the CNAME ACM wants you to publish</span>
+aws acm describe-certificate --certificate-arn "$CERT_ARN" --region "$REGION" \
+  --query 'Certificate.DomainValidationOptions[0].ResourceRecord'</code></pre>
+<p>Create that CNAME in Route 53 (substitute the <code>Name</code>/<code>Value</code> from the output above), then wait for validation:</p>
+<pre><code>cat &gt; acm-validation.json &lt;&lt;EOF
+{
+  "Changes": [{
+    "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "_REPLACE_WITH_ACM_NAME",
+      "Type": "CNAME",
+      "TTL": 300,
+      "ResourceRecords": [{ "Value": "_REPLACE_WITH_ACM_VALUE" }]
+    }
+  }]
+}
+EOF
+
+aws route53 change-resource-record-sets \
+  --hosted-zone-id "$ZONE_ID" \
+  --change-batch file://acm-validation.json
+
+aws acm wait certificate-validated --certificate-arn "$CERT_ARN" --region "$REGION"</code></pre>
+<div class="note"><span class="lbl">Note</span><p>A single wildcard does <em>not</em> cover the apex <code>$BASE_DOMAIN</code> itself — Drop only needs the one-label hosts (<code>api.$BASE_DOMAIN</code> and each <code>&lt;site&gt;.$BASE_DOMAIN</code>), so <code>*.$BASE_DOMAIN</code> is sufficient.</p></div>
+
+<h3>4 — RDS: PostgreSQL 16</h3>
+<p>All metadata (sites, members, versions, users, auth) lives in Postgres. The <strong>api</strong> runs schema migrations on boot under a <code>pg_advisory_lock</code> (so a multi-replica rollout is safe — one pod migrates, the rest wait); the <strong>edge</strong> connects read-only and never migrates. Create the instance private, inside <code>$PRIVATE_SUBNETS</code>.</p>
+<pre><code><span class="tok-c"># RDS security group — ingress 5432 is opened from APP-SG in the variant section</span>
+export RDS_SG=$(aws ec2 create-security-group \
+  --group-name drop-rds-sg \
+  --description "Drop RDS Postgres" \
+  --vpc-id "$VPC_ID" \
+  --query GroupId --output text)
+
+<span class="tok-c"># DB subnet group across the private subnets</span>
+aws rds create-db-subnet-group \
+  --db-subnet-group-name drop-db-subnets \
+  --db-subnet-group-description "Drop private subnets" \
+  --subnet-ids $PRIVATE_SUBNETS
+
+<span class="tok-c"># Generate and stash the DB password (used to build DROP_DATABASE_URL in step 5)</span>
+export DB_PASSWORD=$(openssl rand -hex 24)
+
+<span class="tok-c"># PostgreSQL 16, private (no public IP)</span>
+aws rds create-db-instance \
+  --db-instance-identifier drop-db \
+  --engine postgres \
+  --engine-version 16 \
+  --db-instance-class db.t4g.small \
+  --allocated-storage 20 \
+  --storage-type gp3 \
+  --storage-encrypted \
+  --master-username dropadmin \
+  --master-user-password "$DB_PASSWORD" \
+  --db-name drop \
+  --db-subnet-group-name drop-db-subnets \
+  --vpc-security-group-ids "$RDS_SG" \
+  --no-publicly-accessible \
+  --backup-retention-period 7
+
+aws rds wait db-instance-available --db-instance-identifier drop-db
+
+<span class="tok-c"># Capture the endpoint host for the connection string</span>
+export DB_ENDPOINT=$(aws rds describe-db-instances \
+  --db-instance-identifier drop-db \
+  --query 'DBInstances[0].Endpoint.Address' --output text)</code></pre>
+<div class="note warn"><span class="lbl">Note</span><p><code>$DB_PASSWORD</code> only exists in this shell. Capture it into <code>DROP_DATABASE_URL</code> in step 5 immediately — it is not retrievable from RDS afterward.</p></div>
+
+<h3>5 — Secrets Manager</h3>
+<p>Drop reads three secret values at runtime. Create one secret each — named exactly for the env var it carries — so the variant section can mount them by name / ARN.</p>
+<table class="tbl">
+<tr><th>Secret name</th><th>What it is</th></tr>
+<tr><td><code>DROP_GOOGLE_CLIENT_SECRET</code></td><td>Client secret of your Google "Web application" OAuth client (redirect URI <code>https://api.$BASE_DOMAIN/auth/callback</code>).</td></tr>
+<tr><td><code>DROP_SESSION_SECRET</code></td><td>Random key that signs Drop session tokens — <code>openssl rand -hex 32</code>.</td></tr>
+<tr><td><code>DROP_DATABASE_URL</code></td><td><code>postgres://</code> URL built from the RDS endpoint above.</td></tr>
+</table>
+<pre><code><span class="tok-c"># Google OAuth client secret (from the Google Cloud console)</span>
+aws secretsmanager create-secret \
+  --name DROP_GOOGLE_CLIENT_SECRET \
+  --secret-string "GOCSPX-xxxxxxxxxxxxxxxx" \
+  --region "$REGION"
+
+<span class="tok-c"># Session signing secret</span>
+aws secretsmanager create-secret \
+  --name DROP_SESSION_SECRET \
+  --secret-string "$(openssl rand -hex 32)" \
+  --region "$REGION"
+
+<span class="tok-c"># Build the connection string from the RDS endpoint, then store it</span>
+export DROP_DATABASE_URL="postgres://dropadmin:$DB_PASSWORD@$DB_ENDPOINT:5432/drop"
+
+aws secretsmanager create-secret \
+  --name DROP_DATABASE_URL \
+  --secret-string "$DROP_DATABASE_URL" \
+  --region "$REGION"</code></pre>
+<div class="note"><span class="lbl">Note</span><p>These three are the <em>only</em> secrets. Everything else is plain env, set per role in the variant section — api: <code>DROP_DEV_AUTH=0</code>, <code>DROP_BASE_DOMAIN</code>, <code>DROP_PUBLIC_URL=https://api.$BASE_DOMAIN</code>, <code>DROP_S3_BUCKET</code>, <code>DROP_S3_REGION</code>, <code>DROP_ALLOWED_DOMAINS</code>, <code>DROP_ADMINS</code>, <code>DROP_GOOGLE_CLIENT_ID</code>; edge: <code>DROP_BASE_DOMAIN</code>, <code>DROP_S3_BUCKET</code>, <code>DROP_S3_REGION</code>, <code>DROP_EDGE_DISK_CACHE=/cache</code>.</p></div>
+
+<h2>Variant A — Kubernetes (EKS)</h2>
+<p class="lead">Run Drop on Amazon EKS: the api and edge run as two Deployments from one image, S3 access flows through an IRSA-bound ServiceAccount (no static keys), and a single internal ALB — provisioned by the AWS Load Balancer Controller from the chart's Ingress — does host-based routing for <code>api.&lt;baseDomain&gt;</code> and <code>*.&lt;baseDomain&gt;</code>. This variant assumes the shared foundation (VPC, private subnets, ACM wildcard cert, RDS, S3, ECR, Secrets Manager) is already in place.</p>
+
+<p>The whole section uses one consistent set of shell variables. Set them once from your foundation outputs:</p>
+<pre><code><span class="tok-c"># Foundation outputs — reuse these across every command below</span>
+export REGION=us-east-1
+export ACCOUNT=123456789012
+export VPC_ID=vpc-0123456789abcdef0
+export PRIVATE_SUBNETS="subnet-0aaa111 subnet-0bbb222"   <span class="tok-c"># 2+ AZs, private</span>
+export BASE_DOMAIN=drop.example.com
+export RDS_SG=sg-0rds0123456789abc                       <span class="tok-c"># RDS-SG from the foundation (ingress 5432 from cluster)</span>
+export CERT_ARN=arn:aws:acm:$REGION:$ACCOUNT:certificate/abcd-1234   <span class="tok-c"># *.$BASE_DOMAIN</span>
+export ECR_URI=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/drop
+export DB_ENDPOINT=drop-db.xxxx.$REGION.rds.amazonaws.com
+export BUCKET=drop-sites
+export ZONE_ID=Z0123456789ABCDEFGHIJ                     <span class="tok-c"># Route 53 hosted zone for $BASE_DOMAIN</span>
+
+export CLUSTER=drop</code></pre>
+
+<div class="note"><span class="lbl">Note</span><p>The ACM cert is a single wildcard for <code>*.$BASE_DOMAIN</code>. Because <code>api.$BASE_DOMAIN</code> and every site host are one label under <code>$BASE_DOMAIN</code>, that one cert covers the API and all sites — no per-site certs. On EKS the ALB security group (ALB-SG, ingress 443 from <code>$CORP_CIDR</code>) and the app security group (APP-SG, ingress 8080 from ALB-SG) are managed by the AWS Load Balancer Controller and EKS respectively; you only wire RDS-SG to the cluster in step 5.</p></div>
+
+<h3>1. Create the cluster in the private subnets</h3>
+<p>Create an EKS cluster with a managed node group placed in <code>$PRIVATE_SUBNETS</code>, and enable the IAM OIDC provider in the same step (required for IRSA in step 2). <code>eksctl</code> takes the subnet list comma-separated:</p>
+<pre><code>eksctl create cluster \
+  --name $CLUSTER \
+  --region $REGION \
+  --version 1.30 \
+  --vpc-private-subnets $(echo $PRIVATE_SUBNETS | tr ' ' ',') \
+  --node-private-networking \
+  --managed \
+  --nodes 2 --nodes-min 2 --nodes-max 6 \
+  --node-type m6i.large \
+  --with-oidc
+
+<span class="tok-c"># Point kubectl at the new cluster</span>
+aws eks update-kubeconfig --name $CLUSTER --region $REGION</code></pre>
+<div class="note tip"><span class="lbl">Tip</span><p>Prefer the console or an existing IaC pipeline? Create the cluster with <code>aws eks create-cluster</code> / <code>aws eks create-nodegroup</code> into the same <code>$PRIVATE_SUBNETS</code>, then run <code>eksctl utils associate-iam-oidc-provider --cluster $CLUSTER --region $REGION --approve</code> to get the OIDC provider that the next steps depend on.</p></div>
+
+<h3>2. IRSA: bind the Drop ServiceAccount to the S3 IAM role</h3>
+<p>Drop reaches S3 through the pod's IAM role — no access keys. The S3 IAM policy (<code>drop-s3</code>) was already created in foundation step 2; here we have eksctl create an IAM role bound to the <code>drop</code> ServiceAccount in the <code>drop</code> namespace. The Helm chart creates that ServiceAccount (<code>serviceAccount.create=true</code>) and we annotate it with the role ARN in step 4.</p>
+<pre><code><span class="tok-c"># Bind an IAM role to the drop/drop ServiceAccount (IRSA).</span>
+<span class="tok-c"># --role-only: eksctl makes the role; the chart creates the ServiceAccount.</span>
+eksctl create iamserviceaccount \
+  --cluster $CLUSTER --region $REGION \
+  --namespace drop --name drop \
+  --attach-policy-arn arn:aws:iam::$ACCOUNT:policy/drop-s3 \
+  --role-name drop-s3 \
+  --role-only \
+  --approve
+
+export DROP_ROLE_ARN=arn:aws:iam::$ACCOUNT:role/drop-s3</code></pre>
+<div class="note"><span class="lbl">Note</span><p><code>--role-only</code> tells eksctl to create just the IAM role (with the OIDC trust policy for <code>system:serviceaccount:drop:drop</code>) and not the ServiceAccount object — the Helm chart owns that. We pass <code>$DROP_ROLE_ARN</code> to <code>serviceAccount.annotations."eks.amazonaws.com/role-arn"</code> in step 4 so the two line up.</p></div>
+
+<h3>3. Install the AWS Load Balancer Controller</h3>
+<p>The controller turns the chart's <code>alb</code> Ingress into a real internal ALB with target groups and listeners. Give it its own IAM policy and IRSA role, then install it via Helm.</p>
+<pre><code><span class="tok-c"># Download and create the controller's IAM policy</span>
+curl -fsSL -o /tmp/alb-iam-policy.json \
+  https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.8.1/docs/install/iam_policy.json
+
+aws iam create-policy \
+  --policy-name AWSLoadBalancerControllerIAMPolicy \
+  --policy-document file:///tmp/alb-iam-policy.json
+
+<span class="tok-c"># IRSA role for the controller's ServiceAccount in kube-system</span>
+eksctl create iamserviceaccount \
+  --cluster $CLUSTER --region $REGION \
+  --namespace kube-system --name aws-load-balancer-controller \
+  --attach-policy-arn arn:aws:iam::$ACCOUNT:policy/AWSLoadBalancerControllerIAMPolicy \
+  --role-name AmazonEKSLoadBalancerControllerRole \
+  --approve
+
+<span class="tok-c"># Install the controller via Helm (it discovers the VPC from cluster metadata)</span>
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update
+
+helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  --namespace kube-system \
+  --set clusterName=$CLUSTER \
+  --set region=$REGION \
+  --set vpcId=$VPC_ID \
+  --set serviceAccount.create=false \
+  --set serviceAccount.name=aws-load-balancer-controller
+
+<span class="tok-c"># Wait until it's ready</span>
+kubectl -n kube-system rollout status deploy/aws-load-balancer-controller</code></pre>
+
+<h3>4. Install Drop with the Helm chart</h3>
+<p>The Secret holding the three sensitive values must exist in the <code>drop</code> namespace before install. Pull them from AWS Secrets Manager and create a Kubernetes Secret whose keys match the chart's expected key names (<code>DROP_GOOGLE_CLIENT_SECRET</code>, <code>DROP_SESSION_SECRET</code>, <code>DROP_DATABASE_URL</code>), then reference it via <code>secret.existingSecret</code>.</p>
+<pre><code>kubectl create namespace drop --dry-run=client -o yaml | kubectl apply -f -
+
+<span class="tok-c"># Pull secrets from AWS Secrets Manager into the chart's expected keys.</span>
+<span class="tok-c"># The secret names match the foundation (named for the env var each carries).</span>
+kubectl -n drop create secret generic drop-secrets \
+  --from-literal=DROP_GOOGLE_CLIENT_SECRET="$(aws secretsmanager get-secret-value \
+      --secret-id DROP_GOOGLE_CLIENT_SECRET --region $REGION --query SecretString --output text)" \
+  --from-literal=DROP_SESSION_SECRET="$(aws secretsmanager get-secret-value \
+      --secret-id DROP_SESSION_SECRET --region $REGION --query SecretString --output text)" \
+  --from-literal=DROP_DATABASE_URL="$(aws secretsmanager get-secret-value \
+      --secret-id DROP_DATABASE_URL --region $REGION --query SecretString --output text)"</code></pre>
+
+<p>Now install the chart at <code>infra/helm/drop</code>. The ALB annotations make the controller build <strong>one internal ALB</strong> with an HTTPS:443 listener using the ACM wildcard cert, IP-mode target groups (pods are targeted directly), and a health check that the API answers at <code>/healthz</code>.</p>
+<pre><code>helm upgrade --install drop infra/helm/drop \
+  --namespace drop --create-namespace \
+  --set image.repository=$ECR_URI \
+  --set image.tag=0.1.0 \
+  --set baseDomain=$BASE_DOMAIN \
+  --set apiHost=api.$BASE_DOMAIN \
+  --set config.s3Bucket=$BUCKET \
+  --set config.s3Region=$REGION \
+  --set config.allowedDomains=example.com \
+  --set config.admins=admin@example.com \
+  --set googleClientId=YOUR_ID.apps.googleusercontent.com \
+  --set secret.existingSecret=drop-secrets \
+  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=$DROP_ROLE_ARN \
+  --set ingress.className=alb \
+  --set ingress.annotations."alb\.ingress\.kubernetes\.io/scheme"=internal \
+  --set ingress.annotations."alb\.ingress\.kubernetes\.io/target-type"=ip \
+  --set ingress.annotations."alb\.ingress\.kubernetes\.io/listen-ports"='[{"HTTPS":443}]' \
+  --set ingress.annotations."alb\.ingress\.kubernetes\.io/certificate-arn"=$CERT_ARN \
+  --set ingress.annotations."alb\.ingress\.kubernetes\.io/healthcheck-path"=/healthz</code></pre>
+
+<table class="tbl">
+  <thead><tr><th>Helm value</th><th>Set to</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td><code>image.repository</code></td><td><code>$ECR_URI</code></td><td>The one ECR image; api/edge differ only by command override.</td></tr>
+    <tr><td><code>baseDomain</code></td><td><code>$BASE_DOMAIN</code></td><td>Sites are served at <code>*.$BASE_DOMAIN</code>.</td></tr>
+    <tr><td><code>apiHost</code></td><td><code>api.$BASE_DOMAIN</code></td><td>Control plane + dashboard + OAuth callback host.</td></tr>
+    <tr><td><code>config.s3Bucket</code> / <code>config.s3Region</code></td><td><code>$BUCKET</code> / <code>$REGION</code></td><td>Where file bytes live; accessed via the IRSA role.</td></tr>
+    <tr><td><code>config.allowedDomains</code></td><td><code>example.com</code></td><td>Comma-separated Google domains allowed to sign in.</td></tr>
+    <tr><td><code>config.admins</code></td><td><code>admin@example.com</code></td><td>Comma-separated emails seeded as platform admins on API boot.</td></tr>
+    <tr><td><code>googleClientId</code></td><td>OAuth client ID</td><td>Non-secret; the matching secret is in <code>drop-secrets</code>.</td></tr>
+    <tr><td><code>secret.existingSecret</code></td><td><code>drop-secrets</code></td><td>Supplies <code>DROP_GOOGLE_CLIENT_SECRET</code>, <code>DROP_SESSION_SECRET</code>, <code>DROP_DATABASE_URL</code>.</td></tr>
+    <tr><td><code>serviceAccount.annotations."eks.amazonaws.com/role-arn"</code></td><td><code>$DROP_ROLE_ARN</code></td><td>Binds the pod ServiceAccount to the S3 IAM role (IRSA).</td></tr>
+    <tr><td><code>ingress.className</code></td><td><code>alb</code></td><td>Hands the Ingress to the AWS Load Balancer Controller.</td></tr>
+  </tbody>
+</table>
+
+<div class="note warn"><span class="lbl">Note</span><p>Drop is internal/confidential, so the ALB must be <code>scheme: internal</code> — never internet-facing. It is reachable only from the corp network / VPN, gated by ALB-SG ingress 443 from <code>$CORP_CIDR</code>. Default <code>publicUrl</code> is <code>https://$apiHost</code>, so your Google OAuth "Web application" client must list <code>https://api.$BASE_DOMAIN/auth/callback</code> as an authorized redirect URI.</p></div>
+
+<div class="note"><span class="lbl">Note</span><p>The single <code>healthcheck-path=/healthz</code> annotation is the ALB default for every target group the controller creates. The chart's edge Service answers <code>/_drop_health</code>, not <code>/healthz</code> — set <code>alb.ingress.kubernetes.io/healthcheck-path: /_drop_health</code> as a <em>Service-level</em> annotation on the edge Service (which overrides the Ingress default for that target group) if your chart revision exposes edge Service annotations; otherwise the edge target group should be pointed at <code>/_drop_health</code> in the console after first rollout. The api target group correctly uses the Ingress default <code>/healthz</code>.</p></div>
+
+<div class="note"><span class="lbl">Note</span><p>The API runs schema migrations on boot under a Postgres <code>pg_advisory_lock</code>, so rolling out multiple api replicas is safe — one pod migrates while the others wait, then all serve. The edge connects read-only and never migrates. Health checks: api answers <code>GET /healthz</code>, edge answers <code>GET /_drop_health</code> (both <code>200 "ok"</code>).</p></div>
+
+<h3>5. Allow the cluster to reach RDS</h3>
+<p>The chart targets pods directly (IP-mode), so database traffic egresses from the EKS nodes. Add an ingress rule on RDS-SG that permits Postgres (5432) from the cluster's node/primary security group.</p>
+<pre><code><span class="tok-c"># Discover the cluster security group EKS attaches to nodes/control-plane ENIs</span>
+export NODE_SG=$(aws eks describe-cluster --name $CLUSTER --region $REGION \
+  --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+
+<span class="tok-c"># RDS-SG: ingress 5432 from the EKS cluster SG</span>
+aws ec2 authorize-security-group-ingress \
+  --group-id $RDS_SG \
+  --protocol tcp --port 5432 \
+  --source-group $NODE_SG \
+  --region $REGION</code></pre>
+<div class="note tip"><span class="lbl">Tip</span><p>If your node group uses a separate custom security group (the APP-SG role from the foundation), point <code>--source-group</code> at that SG instead so the rule matches the foundation's SG chain (ALB-SG → APP-SG → RDS-SG).</p></div>
+
+<h3>6. Point DNS at the controller-created ALB</h3>
+<p>The controller provisions the ALB once the Ingress is admitted. Read its DNS name and hosted-zone ID off the Ingress, then create Route 53 ALIAS records for <code>api.$BASE_DOMAIN</code> and the wildcard <code>*.$BASE_DOMAIN</code>.</p>
+<pre><code><span class="tok-c"># Wait for the ALB to be provisioned, then grab its DNS name</span>
+kubectl -n drop get ingress drop \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+export ALB_DNS=$(kubectl -n drop get ingress drop \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+<span class="tok-c"># The ALB's own canonical hosted-zone ID (for the ALIAS target)</span>
+export ALB_ZONE=$(aws elbv2 describe-load-balancers --region $REGION \
+  --query "LoadBalancers[?DNSName=='$ALB_DNS'].CanonicalHostedZoneId | [0]" \
+  --output text)
+
+<span class="tok-c"># ALIAS api.$BASE_DOMAIN + *.$BASE_DOMAIN -&gt; the ALB</span>
+cat &gt; /tmp/drop-dns.json &lt;&lt;JSON
+{
+  "Comment": "Drop ALB aliases",
+  "Changes": [
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "api.$BASE_DOMAIN",
+        "Type": "A",
+        "AliasTarget": { "HostedZoneId": "$ALB_ZONE", "DNSName": "$ALB_DNS", "EvaluateTargetHealth": true }
+      }
+    },
+    {
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "*.$BASE_DOMAIN",
+        "Type": "A",
+        "AliasTarget": { "HostedZoneId": "$ALB_ZONE", "DNSName": "$ALB_DNS", "EvaluateTargetHealth": true }
+      }
+    }
+  ]
+}
+JSON
+
+aws route53 change-resource-record-sets \
+  --hosted-zone-id $ZONE_ID \
+  --change-batch file:///tmp/drop-dns.json</code></pre>
+
+<div class="note"><span class="lbl">Note</span><p>One ALB, host-based routing: requests to <code>api.$BASE_DOMAIN</code> hit the api target group (8080), and everything else under <code>*.$BASE_DOMAIN</code> hits the edge target group (8080). Both records are ALIASes to the same internal ALB; the wildcard cert covers both. Because the ALB is internal it resolves to private IPs — use a private hosted zone associated with <code>$VPC_ID</code> (or internal DNS) for these records. Verify from inside the corp network / VPN: <code>curl -I https://api.$BASE_DOMAIN/healthz</code> should return <code>200</code>.</p></div>
+
+<h2>Variant B — Without Kubernetes (ECS Fargate)</h2>
+
+<p class="lead">If you don't want to run EKS, you can deploy the exact same Drop image on <strong>ECS Fargate</strong>: two services (<code>api</code> and <code>edge</code>) running the one container image (<code>infra/Dockerfile</code>, port <code>8080</code>) with a per-service command override, both fronted by one <strong>internal</strong> Application Load Balancer that host-routes <code>api.&lt;baseDomain&gt;</code> to the api target group and everything else to the edge target group. This variant assumes you've already built and pushed the image to ECR, created the RDS PostgreSQL 16 instance, the private S3 bucket, the ACM wildcard cert, and the three Secrets Manager secrets (see the shared foundation section).</p>
+
+<p>The shell variables below are consistent with every other section of this guide. Set them once before running the commands:</p>
+
+<table class="tbl">
+<tr><th>Variable</th><th>Meaning</th><th>Example</th></tr>
+<tr><td><code>$REGION</code></td><td>AWS region</td><td><code>us-east-1</code></td></tr>
+<tr><td><code>$ACCOUNT</code></td><td>AWS account ID</td><td><code>123456789012</code></td></tr>
+<tr><td><code>$VPC_ID</code></td><td>VPC hosting Drop</td><td><code>vpc-0123456789abcdef0</code></td></tr>
+<tr><td><code>$PRIVATE_SUBNETS</code></td><td>Private subnets for the tasks &amp; ALB (space-separated)</td><td><code>subnet-0aaa111 subnet-0bbb222</code></td></tr>
+<tr><td><code>$BASE_DOMAIN</code></td><td>Base domain for sites</td><td><code>drop.example.com</code></td></tr>
+<tr><td><code>$CORP_CIDR</code></td><td>Corp network / VPN range allowed to reach the ALB</td><td><code>10.0.0.0/8</code></td></tr>
+<tr><td><code>$CERT_ARN</code></td><td>ACM wildcard cert for <code>*.$BASE_DOMAIN</code></td><td><code>arn:aws:acm:...</code></td></tr>
+<tr><td><code>$ECR_URI</code></td><td>ECR image URI (with tag)</td><td><code>$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/drop:0.1.0</code></td></tr>
+<tr><td><code>$DB_ENDPOINT</code></td><td>RDS endpoint host</td><td><code>drop-db.xxxx.$REGION.rds.amazonaws.com</code></td></tr>
+<tr><td><code>$BUCKET</code></td><td>Private S3 bucket for file bytes</td><td><code>drop-sites</code></td></tr>
+<tr><td><code>$ZONE_ID</code></td><td>Route 53 hosted-zone ID for <code>$BASE_DOMAIN</code></td><td><code>Z0123456789ABCDEFGHIJ</code></td></tr>
+<tr><td><code>$RDS_SG</code></td><td>Security group already attached to RDS</td><td><code>sg-0rds0123456789abc</code></td></tr>
+</table>
+
+<pre><code><span class="tok-c"># Region / account / network — set to match your environment</span>
+REGION=us-east-1
+ACCOUNT=123456789012
+VPC_ID=vpc-0123456789abcdef0
+PRIVATE_SUBNETS="subnet-0aaa111 subnet-0bbb222"
+BASE_DOMAIN=drop.example.com
+CORP_CIDR=10.0.0.0/8                 <span class="tok-c"># corp network / VPN range allowed to reach the ALB</span>
+ECR_URI=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/drop:0.1.0
+DB_ENDPOINT=drop-db.xxxx.$REGION.rds.amazonaws.com
+BUCKET=drop-sites
+ZONE_ID=Z0123456789ABCDEFGHIJ
+RDS_SG=sg-0rds0123456789abc
+CERT_ARN=arn:aws:acm:$REGION:$ACCOUNT:certificate/REPLACE-ME
+
+<span class="tok-c"># Secrets Manager ARNs (created in the foundation; named for the env var each carries)</span>
+SEC_DB=$(aws secretsmanager describe-secret --secret-id DROP_DATABASE_URL \
+  --region $REGION --query ARN --output text)
+SEC_SESSION=$(aws secretsmanager describe-secret --secret-id DROP_SESSION_SECRET \
+  --region $REGION --query ARN --output text)
+SEC_GOOGLE=$(aws secretsmanager describe-secret --secret-id DROP_GOOGLE_CLIENT_SECRET \
+  --region $REGION --query ARN --output text)</code></pre>
+
+<h3>1. Security groups</h3>
+
+<p>Three groups: <strong>ALB-SG</strong> accepts HTTPS from the corp CIDR/VPN only (Drop is internal/confidential); <strong>APP-SG</strong> accepts <code>8080</code> only from the ALB; and the existing <strong>RDS-SG</strong> gets a <code>5432</code> ingress rule from APP-SG so the tasks can reach Postgres.</p>
+
+<pre><code><span class="tok-c"># ALB security group — HTTPS 443 from the corp network / VPN only</span>
+ALB_SG=$(aws ec2 create-security-group --region $REGION \
+  --group-name drop-alb-sg --description "Drop internal ALB" \
+  --vpc-id $VPC_ID --query GroupId --output text)
+aws ec2 authorize-security-group-ingress --region $REGION \
+  --group-id $ALB_SG --protocol tcp --port 443 --cidr $CORP_CIDR
+
+<span class="tok-c"># App (task) security group — 8080 only from the ALB</span>
+APP_SG=$(aws ec2 create-security-group --region $REGION \
+  --group-name drop-app-sg --description "Drop ECS tasks" \
+  --vpc-id $VPC_ID --query GroupId --output text)
+aws ec2 authorize-security-group-ingress --region $REGION \
+  --group-id $APP_SG --protocol tcp --port 8080 --source-group $ALB_SG
+
+<span class="tok-c"># Wire RDS-SG to accept Postgres 5432 from the tasks</span>
+aws ec2 authorize-security-group-ingress --region $REGION \
+  --group-id $RDS_SG --protocol tcp --port 5432 --source-group $APP_SG</code></pre>
+
+<h3>2. Internal ALB, target groups, and the HTTPS listener</h3>
+
+<p>Create the ALB with <code>--scheme internal</code> (it is reachable only on the corp network / VPN, never from the public internet). Both target groups use <code>--target-type ip</code> on port <code>8080</code> — required for Fargate <code>awsvpc</code> tasks — but differ in their health-check path: the api TG checks <code>/healthz</code>, the edge TG checks <code>/_drop_health</code> (both return <code>200 "ok"</code>).</p>
+
+<pre><code><span class="tok-c"># Internal ALB across the private subnets</span>
+ALB_ARN=$(aws elbv2 create-load-balancer --region $REGION \
+  --name drop-alb --scheme internal --type application \
+  --subnets $PRIVATE_SUBNETS --security-groups $ALB_SG \
+  --query 'LoadBalancers[0].LoadBalancerArn' --output text)
+
+<span class="tok-c"># api target group — health check GET /healthz</span>
+API_TG=$(aws elbv2 create-target-group --region $REGION \
+  --name drop-api-tg --protocol HTTP --port 8080 --target-type ip \
+  --vpc-id $VPC_ID \
+  --health-check-protocol HTTP --health-check-path /healthz \
+  --matcher HttpCode=200 \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+
+<span class="tok-c"># edge target group — health check GET /_drop_health</span>
+EDGE_TG=$(aws elbv2 create-target-group --region $REGION \
+  --name drop-edge-tg --protocol HTTP --port 8080 --target-type ip \
+  --vpc-id $VPC_ID \
+  --health-check-protocol HTTP --health-check-path /_drop_health \
+  --matcher HttpCode=200 \
+  --query 'TargetGroups[0].TargetGroupArn' --output text)
+
+<span class="tok-c"># HTTPS:443 listener — DEFAULT action forwards to the edge TG (*.baseDomain)</span>
+LISTENER_ARN=$(aws elbv2 create-listener --region $REGION \
+  --load-balancer-arn $ALB_ARN \
+  --protocol HTTPS --port 443 \
+  --certificates CertificateArn=$CERT_ARN \
+  --ssl-policy ELBSecurityPolicy-TLS13-1-2-2021-06 \
+  --default-actions Type=forward,TargetGroupArn=$EDGE_TG \
+  --query 'Listeners[0].ListenerArn' --output text)
+
+<span class="tok-c"># Host-header rule: api.&lt;baseDomain&gt; -&gt; api TG (everything else falls through to edge)</span>
+aws elbv2 create-rule --region $REGION \
+  --listener-arn $LISTENER_ARN --priority 10 \
+  --conditions Field=host-header,HostHeaderConfig="{Values=[api.$BASE_DOMAIN]}" \
+  --actions Type=forward,TargetGroupArn=$API_TG</code></pre>
+
+<div class="note tip"><span class="lbl">Note</span><p>The single ACM wildcard cert for <code>*.$BASE_DOMAIN</code> covers both <code>api.$BASE_DOMAIN</code> and the site hosts (each one label under <code>$BASE_DOMAIN</code>), so the one HTTPS listener serves every host. The default action sends <code>*.$BASE_DOMAIN</code> to the edge; only the explicit <code>api.$BASE_DOMAIN</code> rule diverts to the api.</p></div>
+
+<h3>3. IAM roles — execution role and task role</h3>
+
+<p>Fargate needs two roles. The <strong>task execution role</strong> lets ECS pull from ECR, write logs, and read the secret values at launch. The <strong>task role</strong> is the identity the app code runs as — it carries the S3 policy (no static keys).</p>
+
+<pre><code><span class="tok-c"># Trust policy shared by both roles — assumed by ECS tasks</span>
+cat &gt; /tmp/ecs-trust.json &lt;&lt;'JSON'
+{ "Version": "2012-10-17",
+  "Statement": [{ "Effect": "Allow",
+    "Principal": { "Service": "ecs-tasks.amazonaws.com" },
+    "Action": "sts:AssumeRole" }] }
+JSON
+
+<span class="tok-c"># Execution role: ECR pull + CloudWatch Logs (managed policy) ...</span>
+aws iam create-role --role-name drop-exec-role \
+  --assume-role-policy-document file:///tmp/ecs-trust.json
+aws iam attach-role-policy --role-name drop-exec-role \
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+<span class="tok-c"># ... plus permission to read the three Secrets Manager secrets at launch</span>
+cat &gt; /tmp/exec-secrets.json &lt;&lt;JSON
+{ "Version": "2012-10-17",
+  "Statement": [{ "Effect": "Allow",
+    "Action": "secretsmanager:GetSecretValue",
+    "Resource": ["$SEC_DB","$SEC_SESSION","$SEC_GOOGLE"] }] }
+JSON
+aws iam put-role-policy --role-name drop-exec-role \
+  --policy-name drop-read-secrets --policy-document file:///tmp/exec-secrets.json
+
+<span class="tok-c"># Task role: the app's runtime identity, carrying the S3 access policy</span>
+aws iam create-role --role-name drop-task-role \
+  --assume-role-policy-document file:///tmp/ecs-trust.json
+
+cat &gt; /tmp/s3-policy.json &lt;&lt;JSON
+{ "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow",
+      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::$BUCKET/*" },
+    { "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::$BUCKET" } ] }
+JSON
+aws iam put-role-policy --role-name drop-task-role \
+  --policy-name drop-s3 --policy-document file:///tmp/s3-policy.json
+
+EXEC_ROLE_ARN=arn:aws:iam::$ACCOUNT:role/drop-exec-role
+TASK_ROLE_ARN=arn:aws:iam::$ACCOUNT:role/drop-task-role</code></pre>
+
+<h3>4. Task definitions (api and edge)</h3>
+
+<p>Both task definitions use the same image <code>$ECR_URI</code> and map container port <code>8080</code>; they differ only in the <code>command</code> override and their environment. Plain config goes in <code>environment</code>; the three secrets are pulled by ARN via <code>secrets[].valueFrom</code> (resolved by the execution role). Create the log group first.</p>
+
+<pre><code>aws logs create-log-group --region $REGION --log-group-name /ecs/drop || true</code></pre>
+
+<p>The api task — runs <code>node dist/api.js</code>, performs OAuth + dashboard + schema migrations on boot:</p>
+
+<pre><code>cat &gt; /tmp/drop-api.json &lt;&lt;JSON
+{
+  "family": "drop-api",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256", "memory": "512",
+  "executionRoleArn": "$EXEC_ROLE_ARN",
+  "taskRoleArn": "$TASK_ROLE_ARN",
+  "containerDefinitions": [{
+    "name": "api",
+    "image": "$ECR_URI",
+    "command": ["node","dist/api.js"],
+    "portMappings": [{ "containerPort": 8080, "protocol": "tcp" }],
+    "environment": [
+      { "name": "DROP_HTTP_PORT",        "value": "8080" },
+      { "name": "DROP_DEV_AUTH",         "value": "0" },
+      { "name": "DROP_BASE_DOMAIN",      "value": "$BASE_DOMAIN" },
+      { "name": "DROP_PUBLIC_URL",       "value": "https://api.$BASE_DOMAIN" },
+      { "name": "DROP_S3_BUCKET",        "value": "$BUCKET" },
+      { "name": "DROP_S3_REGION",        "value": "$REGION" },
+      { "name": "DROP_ALLOWED_DOMAINS",  "value": "example.com" },
+      { "name": "DROP_ADMINS",           "value": "admin@example.com" },
+      { "name": "DROP_GOOGLE_CLIENT_ID", "value": "REPLACE.apps.googleusercontent.com" }
+    ],
+    "secrets": [
+      { "name": "DROP_DATABASE_URL",          "valueFrom": "$SEC_DB" },
+      { "name": "DROP_SESSION_SECRET",        "valueFrom": "$SEC_SESSION" },
+      { "name": "DROP_GOOGLE_CLIENT_SECRET",  "valueFrom": "$SEC_GOOGLE" }
+    ],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/drop",
+        "awslogs-region": "$REGION",
+        "awslogs-stream-prefix": "api"
+      }
+    }
+  }]
+}
+JSON
+aws ecs register-task-definition --region $REGION --cli-input-json file:///tmp/drop-api.json</code></pre>
+
+<p>The edge task — runs <code>node dist/edge.js</code>, connects to Postgres read-only and caches asset bytes on local disk at <code>/cache</code>:</p>
+
+<pre><code>cat &gt; /tmp/drop-edge.json &lt;&lt;JSON
+{
+  "family": "drop-edge",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256", "memory": "512",
+  "executionRoleArn": "$EXEC_ROLE_ARN",
+  "taskRoleArn": "$TASK_ROLE_ARN",
+  "containerDefinitions": [{
+    "name": "edge",
+    "image": "$ECR_URI",
+    "command": ["node","dist/edge.js"],
+    "portMappings": [{ "containerPort": 8080, "protocol": "tcp" }],
+    "environment": [
+      { "name": "DROP_HTTP_PORT",       "value": "8080" },
+      { "name": "DROP_BASE_DOMAIN",     "value": "$BASE_DOMAIN" },
+      { "name": "DROP_S3_BUCKET",       "value": "$BUCKET" },
+      { "name": "DROP_S3_REGION",       "value": "$REGION" },
+      { "name": "DROP_EDGE_DISK_CACHE", "value": "/cache" }
+    ],
+    "secrets": [
+      { "name": "DROP_DATABASE_URL", "valueFrom": "$SEC_DB" }
+    ],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/drop",
+        "awslogs-region": "$REGION",
+        "awslogs-stream-prefix": "edge"
+      }
+    }
+  }]
+}
+JSON
+aws ecs register-task-definition --region $REGION --cli-input-json file:///tmp/drop-edge.json</code></pre>
+
+<div class="note"><span class="lbl">Note</span><p>The edge needs only <code>DROP_DATABASE_URL</code> as a secret (it reads the version pointer read-only) — it does not handle OAuth, so it carries neither <code>DROP_SESSION_SECRET</code> nor the Google secret. The <code>/cache</code> directory is the container's ephemeral Fargate disk; it is just a cache (S3 is source of truth) and re-warms on restart.</p></div>
+
+<h3>5. ECS services (api and edge)</h3>
+
+<p>Create the cluster, then one Fargate service per role. Both run in <code>$PRIVATE_SUBNETS</code> with <strong>APP-SG</strong> and no public IP; each registers itself into its target group, where the ALB health-checks it on the role's path.</p>
+
+<pre><code>aws ecs create-cluster --region $REGION --cluster-name drop
+
+<span class="tok-c"># turn the space-separated subnet list into the comma form the CLI wants</span>
+SUBNETS_CSV=$(echo $PRIVATE_SUBNETS | tr ' ' ',')
+NETCFG="awsvpcConfiguration={subnets=[$SUBNETS_CSV],securityGroups=[$APP_SG],assignPublicIp=DISABLED}"
+
+<span class="tok-c"># api service -> api target group (container "api", port 8080)</span>
+aws ecs create-service --region $REGION --cluster drop \
+  --service-name drop-api --task-definition drop-api \
+  --desired-count 2 --launch-type FARGATE \
+  --network-configuration "$NETCFG" \
+  --health-check-grace-period-seconds 60 \
+  --load-balancers targetGroupArn=$API_TG,containerName=api,containerPort=8080
+
+<span class="tok-c"># edge service -> edge target group (container "edge", port 8080)</span>
+aws ecs create-service --region $REGION --cluster drop \
+  --service-name drop-edge --task-definition drop-edge \
+  --desired-count 2 --launch-type FARGATE \
+  --network-configuration "$NETCFG" \
+  --health-check-grace-period-seconds 60 \
+  --load-balancers targetGroupArn=$EDGE_TG,containerName=edge,containerPort=8080</code></pre>
+
+<div class="note warn"><span class="lbl">Note</span><p>Bring the <strong>api</strong> service up first and let it reach a steady state. On boot the api runs schema migrations under a <code>pg_advisory_lock</code> (multi-replica safe — one task migrates, the rest wait), and the edge connects read-only assuming the schema already exists.</p></div>
+
+<h3>6. DNS — Route 53 ALIAS records</h3>
+
+<p>Point both <code>api.$BASE_DOMAIN</code> and the wildcard <code>*.$BASE_DOMAIN</code> at the internal ALB with ALIAS A records. Fetch the ALB's DNS name and its canonical hosted-zone ID first.</p>
+
+<pre><code>ALB_DNS=$(aws elbv2 describe-load-balancers --region $REGION \
+  --load-balancer-arns $ALB_ARN \
+  --query 'LoadBalancers[0].DNSName' --output text)
+ALB_ZONE=$(aws elbv2 describe-load-balancers --region $REGION \
+  --load-balancer-arns $ALB_ARN \
+  --query 'LoadBalancers[0].CanonicalHostedZoneId' --output text)
+
+cat &gt; /tmp/dns.json &lt;&lt;JSON
+{ "Changes": [
+  { "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "api.$BASE_DOMAIN", "Type": "A",
+      "AliasTarget": { "HostedZoneId": "$ALB_ZONE",
+        "DNSName": "$ALB_DNS", "EvaluateTargetHealth": true } } },
+  { "Action": "UPSERT",
+    "ResourceRecordSet": {
+      "Name": "*.$BASE_DOMAIN", "Type": "A",
+      "AliasTarget": { "HostedZoneId": "$ALB_ZONE",
+        "DNSName": "$ALB_DNS", "EvaluateTargetHealth": true } } }
+] }
+JSON
+aws route53 change-resource-record-sets --hosted-zone-id $ZONE_ID \
+  --change-batch file:///tmp/dns.json</code></pre>
+
+<div class="note"><span class="lbl">Note</span><p>Because the ALB is <code>internal</code>, these records resolve to private IPs. Use a <strong>private hosted zone</strong> associated with <code>$VPC_ID</code> (or your internal DNS) so corp-network / VPN clients resolve <code>api.$BASE_DOMAIN</code> and the site hosts. Set the Google OAuth "Web application" client's redirect URI to <code>https://api.$BASE_DOMAIN/auth/callback</code>.</p></div>
+
+<h3>Plain-EC2 alternative</h3>
+
+<div class="note"><span class="lbl">Note</span><p>If you'd rather not run a container orchestrator at all, you can skip ECS and run the prebuilt bundle directly on EC2 instances behind the <em>same</em> internal ALB. Build with <code>node build.mjs</code>, copy <code>dist/</code> to the host, and run two <strong>systemd</strong> units — one executing <code>node dist/api.js</code> and one <code>node dist/edge.js</code>, both listening on <code>8080</code> (set <code>DROP_HTTP_PORT=8080</code> and the same env/secrets shown above; source secrets from Secrets Manager at start). Give the instances APP-SG and an <strong>instance profile</strong> carrying the same S3 policy from step 3 (no static keys). Register the api instances into the api target group (<code>/healthz</code>) and the edge instances into the edge target group (<code>/_drop_health</code>) using <code>--target-type instance</code> instead of <code>ip</code>; the listener, host-header rule, and Route 53 records are identical.</p></div>
+
+<div class="next">
+  <a href="deployment.html"><div class="d">← Back</div><div class="t">Deployment</div></a>
+  <a href="index.html"><div class="d">Up →</div><div class="t">Overview</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>
