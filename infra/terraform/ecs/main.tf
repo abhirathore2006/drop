@@ -7,7 +7,7 @@
 #   * Health: api GET /healthz, edge GET /_drop_health (both 200 "ok").
 #   * ONE INTERNAL ALB, host routing: api.<base_domain> -> api TG (8080);
 #     *.<base_domain> (default) -> edge TG (8080). Single ACM wildcard cert on :443.
-#   * RDS Postgres 16 (foundation) -> DROP_DATABASE_URL (secret). API migrates on boot
+#   * RDS Postgres 18 (foundation) -> DROP_DATABASE_URL (secret). API migrates on boot
 #     under a pg advisory lock; edge is read-only.
 #   * S3 private bucket (foundation) for file bytes; access via the ECS TASK ROLE.
 #

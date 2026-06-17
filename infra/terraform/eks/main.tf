@@ -9,7 +9,7 @@
 #     chart's Ingress). Host routing: api.<base_domain> -> api Service (8080),
 #     *.<base_domain> -> edge Service (8080). HTTPS :443 with one ACM wildcard cert.
 #   - api health GET /healthz; edge health GET /_drop_health (both 200 "ok").
-#   - RDS PostgreSQL 16 -> DROP_DATABASE_URL (secret). API migrates on boot under a
+#   - RDS PostgreSQL 18 -> DROP_DATABASE_URL (secret). API migrates on boot under a
 #     pg_advisory_lock (multi-replica safe); the edge is read-only and never migrates.
 #   - S3 private bucket for file bytes; access via IRSA (no static keys).
 #

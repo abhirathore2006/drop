@@ -33,12 +33,12 @@
   <main class="content"><article>
 <p class="crumbs">Reference</p>
 <h1>AWS deployment</h1>
-<p class="lead">Deploy Drop on AWS two ways from <strong>one</strong> container image: <strong>Variant A</strong> on Amazon EKS via the Helm chart, or <strong>Variant B</strong> on ECS Fargate (no Kubernetes). Both share a foundation — one ECR image, a private S3 bucket, an ACM wildcard cert, RDS PostgreSQL 16, and three Secrets Manager secrets — and both put Drop behind <strong>one internal ALB</strong>. Drop is internal/confidential: nothing here is internet-facing; the ALB is reachable only from the corp network / VPN.</p>
+<p class="lead">Deploy Drop on AWS two ways from <strong>one</strong> container image: <strong>Variant A</strong> on Amazon EKS via the Helm chart, or <strong>Variant B</strong> on ECS Fargate (no Kubernetes). Both share a foundation — one ECR image, a private S3 bucket, an ACM wildcard cert, RDS PostgreSQL 18, and three Secrets Manager secrets — and both put Drop behind <strong>one internal ALB</strong>. Drop is internal/confidential: nothing here is internet-facing; the ALB is reachable only from the corp network / VPN.</p>
 
 <div class="note tip"><span class="lbl">Terraform</span><p>Prefer infrastructure-as-code? The same components are scaffolded as Terraform in <code>infra/terraform/</code> — a <code>foundation</code> config plus <code>eks</code> and <code>ecs</code> root configs that read it via remote state (S3-native locking, no DynamoDB). See <code>infra/terraform/README.md</code>. The AWS CLI commands below are the click-by-click equivalent.</p></div>
 
 <h2>Shared foundation</h2>
-<p class="lead">Everything below is required by <strong>both</strong> deployment variants (EKS/Helm and ECS/EC2): one ECR image, a private S3 bucket, an ACM wildcard cert, an RDS PostgreSQL 16 instance, and three Secrets Manager secrets — wired together by the shell vars you export once here.</p>
+<p class="lead">Everything below is required by <strong>both</strong> deployment variants (EKS/Helm and ECS/EC2): one ECR image, a private S3 bucket, an ACM wildcard cert, an RDS PostgreSQL 18 instance, and three Secrets Manager secrets — wired together by the shell vars you export once here.</p>
 
 <h3>Prerequisites &amp; vars</h3>
 <p>Install AWS CLI v2, Docker, and Node 24 (Drop's runtime). You'll need an existing VPC with private subnets reachable from the corp network / VPN — Drop is internal, so nothing here is internet-facing. Export these once; every command in this guide reuses them.</p>
@@ -165,7 +165,7 @@ aws route53 change-resource-record-sets \
 aws acm wait certificate-validated --certificate-arn "$CERT_ARN" --region "$REGION"</code></pre>
 <div class="note"><span class="lbl">Note</span><p>A single wildcard does <em>not</em> cover the apex <code>$BASE_DOMAIN</code> itself — Drop only needs the one-label hosts (<code>api.$BASE_DOMAIN</code> and each <code>&lt;site&gt;.$BASE_DOMAIN</code>), so <code>*.$BASE_DOMAIN</code> is sufficient.</p></div>
 
-<h3>4 — RDS: PostgreSQL 16</h3>
+<h3>4 — RDS: PostgreSQL 18</h3>
 <p>All metadata (sites, members, versions, users, auth) lives in Postgres. The <strong>api</strong> runs schema migrations on boot under a <code>pg_advisory_lock</code> (so a multi-replica rollout is safe — one pod migrates, the rest wait); the <strong>edge</strong> connects read-only and never migrates. Create the instance private, inside <code>$PRIVATE_SUBNETS</code>.</p>
 <pre><code><span class="tok-c"># RDS security group — ingress 5432 is opened from APP-SG in the variant section</span>
 export RDS_SG=$(aws ec2 create-security-group \
@@ -183,11 +183,11 @@ aws rds create-db-subnet-group \
 <span class="tok-c"># Generate and stash the DB password (used to build DROP_DATABASE_URL in step 5)</span>
 export DB_PASSWORD=$(openssl rand -hex 24)
 
-<span class="tok-c"># PostgreSQL 16, private (no public IP)</span>
+<span class="tok-c"># PostgreSQL 18, private (no public IP)</span>
 aws rds create-db-instance \
   --db-instance-identifier drop-db \
   --engine postgres \
-  --engine-version 16 \
+  --engine-version 18 \
   --db-instance-class db.t4g.small \
   --allocated-storage 20 \
   --storage-type gp3 \
@@ -440,7 +440,7 @@ aws route53 change-resource-record-sets \
 
 <h2>Variant B — Without Kubernetes (ECS Fargate)</h2>
 
-<p class="lead">If you don't want to run EKS, you can deploy the exact same Drop image on <strong>ECS Fargate</strong>: two services (<code>api</code> and <code>edge</code>) running the one container image (<code>infra/Dockerfile</code>, port <code>8080</code>) with a per-service command override, both fronted by one <strong>internal</strong> Application Load Balancer that host-routes <code>api.&lt;baseDomain&gt;</code> to the api target group and everything else to the edge target group. This variant assumes you've already built and pushed the image to ECR, created the RDS PostgreSQL 16 instance, the private S3 bucket, the ACM wildcard cert, and the three Secrets Manager secrets (see the shared foundation section).</p>
+<p class="lead">If you don't want to run EKS, you can deploy the exact same Drop image on <strong>ECS Fargate</strong>: two services (<code>api</code> and <code>edge</code>) running the one container image (<code>infra/Dockerfile</code>, port <code>8080</code>) with a per-service command override, both fronted by one <strong>internal</strong> Application Load Balancer that host-routes <code>api.&lt;baseDomain&gt;</code> to the api target group and everything else to the edge target group. This variant assumes you've already built and pushed the image to ECR, created the RDS PostgreSQL 18 instance, the private S3 bucket, the ACM wildcard cert, and the three Secrets Manager secrets (see the shared foundation section).</p>
 
 <p>The shell variables below are consistent with every other section of this guide. Set them once before running the commands:</p>
 

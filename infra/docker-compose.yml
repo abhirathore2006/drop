@@ -9,7 +9,7 @@
 # Postgres on boot; the edge connects read-only. nginx mirrors the prod ingress.
 services:
   postgres:
-    image: docker.io/library/postgres:16-alpine
+    image: docker.io/library/postgres:18-alpine
     environment:
       POSTGRES_USER: drop
       POSTGRES_PASSWORD: drop

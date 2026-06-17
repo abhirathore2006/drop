@@ -3,7 +3,7 @@
 #   - ECR repository for the single unified image (api + edge bundles).
 #   - Private S3 bucket for site file bytes + an IAM policy granting Drop's S3 perms.
 #   - ACM wildcard cert (*.<base_domain>) validated via Route53 DNS.
-#   - RDS PostgreSQL 16 (the API migrates on boot; the edge is read-only).
+#   - RDS PostgreSQL 18 (the API migrates on boot; the edge is read-only).
 #   - Secrets Manager: DROP_SESSION_SECRET, DROP_GOOGLE_CLIENT_SECRET, DROP_DATABASE_URL.
 # =============================================================================
 
@@ -151,7 +151,7 @@ resource "aws_acm_certificate_validation" "wildcard" {
 }
 
 # -----------------------------------------------------------------------------
-# RDS PostgreSQL 16 — all Drop metadata. API migrates on boot under a
+# RDS PostgreSQL 18 — all Drop metadata. API migrates on boot under a
 # pg_advisory_lock (multi-replica safe); the edge connects read-only.
 # DB subnet group lives in the existing private subnets. SG below allows 5432
 # from the corp/VPC CIDR only (the ALB is internal; no public DB exposure).
@@ -188,9 +188,9 @@ module "rds" {
   identifier = "${var.name_prefix}-pg"
 
   engine               = "postgres"
-  engine_version       = "16"
-  family               = "postgres16"
-  major_engine_version = "16"
+  engine_version       = "18"
+  family               = "postgres18"
+  major_engine_version = "18"
   instance_class       = var.db_instance_class
 
   allocated_storage     = var.db_allocated_storage
