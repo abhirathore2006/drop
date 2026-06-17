@@ -95,9 +95,11 @@
   </article></main>
 </div>
 
-<script type="module">
-  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-  // Mermaid sources are fed via textContent so the browser never HTML-parses them.
+<script src="assets/mermaid.min.js"></script>
+<script>
+  // Mermaid is vendored locally (mermaid 11.15.0, MIT) — the docs render fully offline.
+  // Sources are fed via textContent so the browser never HTML-parses them.
+  (function () {
   const diagrams = {
 m1: `flowchart TB
     subgraph clients["Clients"]
@@ -262,7 +264,8 @@ m6: `flowchart TB
     if (el) el.textContent = src;
   }
   mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict", flowchart: { useMaxWidth: true } });
-  try { await mermaid.run({ querySelector: ".mermaid" }); } catch (e) { console.error(e); }
+  mermaid.run({ querySelector: ".mermaid" }).catch(function (e) { console.error(e); });
+  })();
 </script>
 </body>
 </html>
