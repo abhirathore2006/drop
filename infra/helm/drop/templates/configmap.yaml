@@ -10,3 +10,4 @@ data:
   DROP_S3_BUCKET: {{ .Values.config.s3Bucket | quote }}
   DROP_S3_REGION: {{ .Values.config.s3Region | quote }}
   DROP_ALLOWED_DOMAINS: {{ .Values.config.allowedDomains | quote }}
+  DROP_ADMINS: {{ .Values.config.admins | quote }}

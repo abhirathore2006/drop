@@ -57,6 +57,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "drop.secretName" . }}
                   key: {{ .Values.secret.sessionSecretKey }}
+            - name: DROP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "drop.secretName" . }}
+                  key: {{ .Values.secret.databaseUrlKey }}
           readinessProbe:
             httpGet:
               path: /healthz

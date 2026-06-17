@@ -38,13 +38,19 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "drop.fullname" . }}-config
-          {{- if .Values.edge.diskCache.enabled }}
           env:
+            # Edge reads metadata from Postgres (read-only; the API owns migrations).
+            - name: DROP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "drop.secretName" . }}
+                  key: {{ .Values.secret.databaseUrlKey }}
+            {{- if .Values.edge.diskCache.enabled }}
             - name: DROP_EDGE_DISK_CACHE
               value: {{ .Values.edge.diskCache.mountPath | quote }}
             - name: DROP_EDGE_DISK_CACHE_BYTES
               value: {{ .Values.edge.diskCache.sizeBytes | quote }}
-          {{- end }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /_drop_health

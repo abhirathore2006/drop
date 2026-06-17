@@ -1,15 +1,21 @@
 # Drop Helm chart
 
-Deploys the **api** + **edge** as Deployments behind one Ingress, backed by S3.
-No database. One image (`infra/Dockerfile`) with both bundles; the command is
-overridden per Deployment (`node dist/api.js` / `node dist/edge.js`).
+Deploys the **api** + **edge** as Deployments behind one Ingress. File bytes are
+stored in S3; all metadata lives in an **external Postgres** (the chart does not
+bundle a database). One image (`infra/Dockerfile`) with both bundles; the command
+is overridden per Deployment (`node dist/api.js` / `node dist/edge.js`).
+
+The API runs schema migrations on boot under a Postgres advisory lock, so a
+multi-replica rollout is safe (one pod migrates, the rest wait then serve). The
+edge connects read-only and never migrates.
 
 ## Prereqs
 - An image pushed to your registry (ECR): `podman build -f infra/Dockerfile -t <repo>/drop:<tag> . && podman push …`
 - A wildcard TLS cert for `*.<baseDomain>` (ACM via ingress annotations, or a TLS Secret).
 - An IAM role (IRSA) with read/write on the S3 bucket, referenced from `serviceAccount.annotations`.
-- A Secret with `DROP_GOOGLE_CLIENT_SECRET` + `DROP_SESSION_SECRET` (e.g. via External Secrets),
-  or set `secret.create=true`.
+- A managed **Postgres** (RDS / CloudSQL / company DB) reachable from the cluster.
+- A Secret with `DROP_GOOGLE_CLIENT_SECRET`, `DROP_SESSION_SECRET`, and
+  `DROP_DATABASE_URL` (e.g. via External Secrets), or set `secret.create=true`.
 - A Google **Web application** OAuth client whose redirect URI is `https://<apiHost>/auth/callback`.
 
 ## Install

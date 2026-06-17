@@ -14,19 +14,25 @@ config:
   s3Region: us-east-1
   allowedDomains: "paytm.com" # comma-separated; empty = any Google account
   allowedEmails: "" # optional per-person allowlist, comma-separated
+  admins: "" # comma-separated emails seeded as platform admins on API boot
   publicUrl: "" # default https://{apiHost}; its /auth/callback is the OAuth redirect
 
 googleClientId: "" # not secret → ConfigMap/env
 
-# Secrets: prefer referencing an existing Secret (e.g. synced from AWS Secrets
-# Manager via External Secrets). Otherwise set create=true (dev only).
+# Postgres holds all metadata (sites, members, versions, users, auth handles).
+# Use an EXTERNAL managed database (RDS / CloudSQL / company DB) — the chart does
+# not bundle one (backups/HA are the platform's responsibility). The API runs
+# migrations on boot under an advisory lock (multi-replica safe); the edge is
+# read-only and does not migrate.
 secret:
-  existingSecret: "" # name of a Secret holding the two keys below
+  existingSecret: "" # name of a Secret holding the keys below
   googleClientSecretKey: DROP_GOOGLE_CLIENT_SECRET
   sessionSecretKey: DROP_SESSION_SECRET
+  databaseUrlKey: DROP_DATABASE_URL
   create: false
   googleClientSecret: ""
   sessionSecret: "" # generate: openssl rand -hex 32
+  databaseUrl: "" # postgres://user:pass@host:5432/drop
 
 # S3 auth is via the pod's IAM role (IRSA) — no access keys. Put the role ARN here.
 serviceAccount:
