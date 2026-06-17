@@ -1,6 +1,6 @@
 # Drop
 
-Self-hosted, Surge.sh-style static-site publishing for `*.drop.company.com`.
+Self-hosted, Surge.sh-style static-site publishing for `*.drop.example.com`.
 Push a built folder, get a URL. **TypeScript on Node (v24, see `.nvmrc`);
 S3-compatible storage only — no database**; gated by Google login.
 (Bun is used only to run the test suite.)
@@ -9,7 +9,7 @@ S3-compatible storage only — no database**; gated by Google login.
 $ drop publish ./dist myapp
   ▸ packing ./dist
   ▸ dropping…
-  ✓ live at https://myapp.drop.company.com
+  ✓ live at https://myapp.drop.example.com
 ```
 
 ## How it works
@@ -85,7 +85,7 @@ Uses Node (version in `.nvmrc`): `nvm use` (or `nvm install`) first.
 
 ```bash
 make setup        # one-time: node (via nvm) + deps + podman VM + Floci & Postgres images
-                  # behind Zscaler:  make setup CORP_CA=~/certs/Zscalerroot.cer
+                  # behind a TLS-inspecting proxy:  make setup CORP_CA=~/certs/your-root-ca.cer
 make start        # Floci (S3) + Postgres + api(:8473) + edge(:8474), dev-auth on
 make publish DIR=./your/dist NAME=myapp
 curl -H "Host: myapp.drop.localhost" http://localhost:8474/
@@ -130,7 +130,7 @@ matching config.
     { "source": "/assets/*", "headers": { "cache-control": "public, max-age=31536000, immutable" } },
     { "source": "/*",        "headers": { "x-frame-options": "DENY" } }
   ],
-  "cors": { "allowOrigins": ["https://app.paytm.com"], "allowMethods": ["GET", "HEAD"] },
+  "cors": { "allowOrigins": ["https://app.example.com"], "allowMethods": ["GET", "HEAD"] },
   "basicAuth": { "realm": "Staging", "users": { "team": "sha256:<hex-of-password>" } }
 }
 ```
@@ -156,8 +156,8 @@ Add to your MCP config (e.g. Claude Code `.mcp.json`):
   "mcpServers": {
     "drop": {
       "command": "npx",
-      "args": ["-y", "--package", "git+https://bitbucket.paytm.com/scm/<team>/drop.git", "drop-mcp"],
-      "env": { "DROP_API": "https://api.drop.company.com" }
+      "args": ["-y", "--package", "git+https://git.example.com/scm/<team>/drop.git", "drop-mcp"],
+      "env": { "DROP_API": "https://api.drop.example.com" }
     }
   }
 }
@@ -185,9 +185,9 @@ as the CLI, so `login` once and both work.)
 ### Option 1 — `npx` straight from git (no install, recommended)
 
 ```bash
-npx git+https://bitbucket.paytm.com/scm/<team>/drop.git publish ./dist myapp
+npx git+https://git.example.com/scm/<team>/drop.git publish ./dist myapp
 # pin a tag/branch:  npx git+https://…/drop.git#v0.1.0 ls
-# set the API once:  export DROP_API=https://api.drop.company.com
+# set the API once:  export DROP_API=https://api.drop.example.com
 ```
 
 `npx` clones the repo, runs the `prepare` step (esbuild bundles the CLI into a
@@ -198,7 +198,7 @@ with Node 18+. (`bunx` works too once it gains git-URL support; for now use `npx
 
 ```bash
 git clone <repo> && cd drop
-./install.sh --api https://api.drop.company.com    # idempotent, no sudo
+./install.sh --api https://api.drop.example.com    # idempotent, no sudo
 drop publish ./dist myapp
 ```
 
@@ -232,21 +232,21 @@ session tokens, so credentials live only on the server. Set on the **API**:
 - `DROP_DEV_AUTH=0`
 - `DROP_GOOGLE_CLIENT_ID` / `DROP_GOOGLE_CLIENT_SECRET` — a Google **"Web application"**
   client whose authorized redirect URI is `${DROP_PUBLIC_URL}/auth/callback`.
-- `DROP_PUBLIC_URL` — the API's externally-reachable base (e.g. `https://api.drop.company.com`).
+- `DROP_PUBLIC_URL` — the API's externally-reachable base (e.g. `https://api.drop.example.com`).
 - `DROP_SESSION_SECRET` — HS256 key signing Drop session tokens (rotate to revoke all sessions).
-- `DROP_ALLOWED_DOMAINS=paytm.com` — restrict to your Workspace domain.
+- `DROP_ALLOWED_DOMAINS=example.com` — restrict to your Workspace domain.
 - `DROP_ALLOWED_EMAILS=` *(optional)* — comma-separated allowlist of specific people,
   layered on top of the domain rule. Empty = no per-email limit. (Gates *login*; to
   revoke existing sessions immediately, rotate `DROP_SESSION_SECRET`.)
 - `DROP_ADMINS=` *(optional)* — comma-separated emails granted the admin **all sites**
   view (`GET /v1/admin/sites`). Does not bypass per-site ownership.
-- If the API egresses via a TLS-inspecting proxy (Zscaler), set `NODE_EXTRA_CA_CERTS`
+- If the API egresses via a TLS-inspecting proxy, set `NODE_EXTRA_CA_CERTS`
   to the corp CA so it can reach `accounts.google.com`.
 
 Storage + edge:
 - Point `DROP_S3_*` at real AWS S3 (leave `DROP_S3_ENDPOINT` empty) or any
   S3-compatible store with conditional-write support.
-- Point wildcard DNS `*.drop.company.com` + wildcard TLS at the edge; keep the edge
+- Point wildcard DNS `*.drop.example.com` + wildcard TLS at the edge; keep the edge
   reachable only on the internal network.
 - **Edge caching:** set `DROP_EDGE_DISK_CACHE=/var/cache/drop` (node-local / per-pod
   dir) so the edge caches asset bytes on disk — process memory only holds the small

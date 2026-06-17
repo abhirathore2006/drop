@@ -5,14 +5,14 @@ image:
   pullPolicy: IfNotPresent
 
 # DNS
-baseDomain: drop.company.com # sites served at *.baseDomain
-apiHost: api.drop.company.com # control plane + dashboard + OAuth callback
+baseDomain: drop.example.com # sites served at *.baseDomain
+apiHost: api.drop.example.com # control plane + dashboard + OAuth callback
 
 # Non-secret config (rendered into a ConfigMap / pod env).
 config:
   s3Bucket: drop-sites
   s3Region: us-east-1
-  allowedDomains: "paytm.com" # comma-separated; empty = any Google account
+  allowedDomains: "example.com" # comma-separated; empty = any Google account
   allowedEmails: "" # optional per-person allowlist, comma-separated
   admins: "" # comma-separated emails seeded as platform admins on API boot
   publicUrl: "" # default https://{apiHost}; its /auth/callback is the OAuth redirect

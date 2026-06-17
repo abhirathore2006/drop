@@ -8,64 +8,64 @@ import { makeTestDb } from "../db/testdb.ts";
 /** db + meta + blob with the owner user seeded (FK for claim). */
 async function base() {
   const db = await makeTestDb();
-  await new UserStore(db).upsertOnLogin("alice@paytm.com", null);
+  await new UserStore(db).upsertOnLogin("alice@example.com", null);
   return { db, meta: new MetaStore(db), blob: new FakeBlob() };
 }
 
 async function setup() {
   const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@paytm.com");
+  await meta.claimSite("myapp", "alice@example.com");
   const prefix = meta.filesPrefix("myapp", "v1");
   await blob.put(prefix + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
   await blob.put(prefix + "assets/app.js", Buffer.from("console.log(1)"), 14, "application/javascript");
   await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
-  return createEdge({ meta, blob, baseDomain: "drop.company.com" });
+  return createEdge({ meta, blob, baseDomain: "drop.example.com" });
 }
 
 const get = (app: any, host: string, path: string, accept = "") =>
   app.request(path, { headers: { host, ...(accept ? { accept } : {}) } });
 
 test("serves index at root", async () => {
-  const res = await get(await setup(), "myapp.drop.company.com", "/", "text/html");
+  const res = await get(await setup(), "myapp.drop.example.com", "/", "text/html");
   expect(res.status).toBe(200);
   expect(await res.text()).toBe("<html>app</html>");
 });
 
 test("serves a static asset", async () => {
-  const res = await get(await setup(), "myapp.drop.company.com", "/assets/app.js");
+  const res = await get(await setup(), "myapp.drop.example.com", "/assets/app.js");
   expect(res.status).toBe(200);
 });
 
 test("navigation route falls back to index", async () => {
-  const res = await get(await setup(), "myapp.drop.company.com", "/dashboard/settings", "text/html");
+  const res = await get(await setup(), "myapp.drop.example.com", "/dashboard/settings", "text/html");
   expect(res.status).toBe(200);
   expect(await res.text()).toBe("<html>app</html>");
 });
 
 test("missing asset returns 404, NOT html", async () => {
-  const res = await get(await setup(), "myapp.drop.company.com", "/assets/missing.js");
+  const res = await get(await setup(), "myapp.drop.example.com", "/assets/missing.js");
   expect(res.status).toBe(404);
   expect(await res.text()).not.toBe("<html>app</html>");
 });
 
 test("unknown site -> 404", async () => {
-  const res = await get(await setup(), "nope.drop.company.com", "/", "text/html");
+  const res = await get(await setup(), "nope.drop.example.com", "/", "text/html");
   expect(res.status).toBe(404);
 });
 
 async function setupCfg(config: any) {
   const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@paytm.com");
+  await meta.claimSite("myapp", "alice@example.com");
   const p = meta.filesPrefix("myapp", "v1");
   await blob.put(p + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
   await blob.put(p + "app.html", Buffer.from("<html>spa</html>"), 16, "text/html");
   await blob.put(p + "404.html", Buffer.from("<html>nope</html>"), 17, "text/html");
   await blob.put(p + "assets/app.js", Buffer.from("x"), 1, "application/javascript");
   await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1", config }));
-  return createEdge({ meta, blob, baseDomain: "drop.company.com" });
+  return createEdge({ meta, blob, baseDomain: "drop.example.com" });
 }
 const creq = (app: any, path: string, headers: Record<string, string> = {}) =>
-  app.request(path, { headers: { host: "myapp.drop.company.com", ...headers } });
+  app.request(path, { headers: { host: "myapp.drop.example.com", ...headers } });
 
 test("config: basic auth gates the site", async () => {
   const app = await setupCfg({ basicAuth: { users: { u: "p" } } });
@@ -78,12 +78,12 @@ test("config: basic auth gates the site", async () => {
 
 test("visibility: private fails closed with 403", async () => {
   const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@paytm.com");
+  await meta.claimSite("myapp", "alice@example.com");
   const p = meta.filesPrefix("myapp", "v1");
   await blob.put(p + "index.html", Buffer.from("<html>secret</html>"), 19, "text/html");
   await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
   await meta.setVisibility("myapp", "private", null);
-  const app = createEdge({ meta, blob, baseDomain: "drop.company.com" });
+  const app = createEdge({ meta, blob, baseDomain: "drop.example.com" });
   const r = await creq(app, "/");
   expect(r.status).toBe(403);
   expect(await r.text()).not.toContain("secret");
@@ -91,13 +91,13 @@ test("visibility: private fails closed with 403", async () => {
 
 test("visibility: password (API-set hash) requires basic auth", async () => {
   const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@paytm.com");
+  await meta.claimSite("myapp", "alice@example.com");
   const p = meta.filesPrefix("myapp", "v1");
   await blob.put(p + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
   await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
   const { hashPassword } = await import("../site-config.ts");
   await meta.setVisibility("myapp", "password", hashPassword("opensesame"));
-  const app = createEdge({ meta, blob, baseDomain: "drop.company.com" });
+  const app = createEdge({ meta, blob, baseDomain: "drop.example.com" });
 
   expect((await creq(app, "/")).status).toBe(401);
   const tok = "Basic " + Buffer.from("anyuser:opensesame").toString("base64");
@@ -144,7 +144,7 @@ test("disk cache: second request (even a fresh instance) skips S3", async () => 
   const dir = mkdtempSync(join(tmpdir(), "drop-edge-cache-"));
 
   const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@paytm.com");
+  await meta.claimSite("myapp", "alice@example.com");
   const prefix = meta.filesPrefix("myapp", "v1");
   await blob.put(prefix + "app.js", Buffer.from("console.log(1)"), 14, "application/javascript");
   await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
@@ -156,12 +156,12 @@ test("disk cache: second request (even a fresh instance) skips S3", async () => 
     return orig(k);
   };
 
-  const hit = (app: any) => app.request("/app.js", { headers: { host: "myapp.drop.company.com" } });
-  const a = createEdge({ meta, blob, baseDomain: "drop.company.com", diskCacheDir: dir });
+  const hit = (app: any) => app.request("/app.js", { headers: { host: "myapp.drop.example.com" } });
+  const a = createEdge({ meta, blob, baseDomain: "drop.example.com", diskCacheDir: dir });
   expect((await hit(a)).status).toBe(200); // S3 → disk
   await Bun.sleep(150); // let the async disk write settle
   // a brand-new edge instance (simulates restart / another replica on same volume)
-  const b = createEdge({ meta, blob, baseDomain: "drop.company.com", diskCacheDir: dir });
+  const b = createEdge({ meta, blob, baseDomain: "drop.example.com", diskCacheDir: dir });
   const r = await hit(b);
   expect(r.status).toBe(200);
   expect(await r.text()).toBe("console.log(1)");

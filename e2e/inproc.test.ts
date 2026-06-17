@@ -37,7 +37,7 @@ afterAll(async () => {
   await db.destroy();
 });
 
-const TOKEN = "alice:alice@paytm.com";
+const TOKEN = "alice:alice@example.com";
 
 test("publish over HTTP then serve through the edge", async () => {
   const dir = mkdtempSync(join(tmpdir(), "drop-e2e-"));

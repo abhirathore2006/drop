@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./install.sh                         # install, prompt for nothing
-#   ./install.sh --api https://api.drop.company.com   # bake a default control-plane URL
+#   ./install.sh --api https://api.drop.example.com   # bake a default control-plane URL
 #
 # What it does (idempotent, no sudo required):
 #   1. ensures Bun is installed (installs it if missing)
@@ -106,8 +106,8 @@ echo "Next steps:"
 if [ -n "$API_DEFAULT" ]; then
   echo "  drop login                       # sign in with Google"
 else
-  echo "  drop login --api https://api.drop.company.com    # sign in with Google"
-  echo "  (or set DROP_API once:  export DROP_API=https://api.drop.company.com)"
+  echo "  drop login --api https://api.drop.example.com    # sign in with Google"
+  echo "  (or set DROP_API once:  export DROP_API=https://api.drop.example.com)"
 fi
 echo "  drop publish ./dist myapp        # publish a built folder"
 echo "  drop ls                          # list your sites"

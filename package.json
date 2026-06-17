@@ -1,5 +1,5 @@
 {
-  "name": "@paytm/drop",
+  "name": "drop",
   "version": "0.1.0",
   "type": "module",
   "engines": {

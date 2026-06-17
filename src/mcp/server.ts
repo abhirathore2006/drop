@@ -8,7 +8,7 @@ import { devLoginToken, serverLogin } from "../cli/login.ts";
 import { resolveSiteName } from "../cli/resolve-name.ts";
 
 function apiBase(s?: Session): string {
-  return process.env.DROP_API ?? s?.apiBase ?? "https://api.drop.company.com";
+  return process.env.DROP_API ?? s?.apiBase ?? "https://api.drop.example.com";
 }
 
 async function getClient(): Promise<Client> {
@@ -56,7 +56,7 @@ export function buildMcp(): McpServer {
     "dev_login",
     {
       description: "Local-only login (requires DROP_DEV_AUTH=1 on the API).",
-      inputSchema: { email: z.string().describe("your email, e.g. alice@paytm.com") },
+      inputSchema: { email: z.string().describe("your email, e.g. alice@example.com") },
     },
     async ({ email }) => {
       const sub = email.split("@")[0] ?? email;
@@ -68,7 +68,7 @@ export function buildMcp(): McpServer {
   server.registerTool(
     "publish",
     {
-      description: "Publish a built static folder to <name>.drop.company.com. Returns the live URL.",
+      description: "Publish a built static folder to <name>.drop.example.com. Returns the live URL.",
       inputSchema: {
         directory: z.string().describe("path to the built folder, e.g. ./dist"),
         name: z.string().optional().describe("site name (optional — taken from _drop.json, else generated)"),

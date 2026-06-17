@@ -11,14 +11,14 @@ import { devLoginToken } from "./login.ts";
 
 test("session save/load round trip", async () => {
   const path = join(mkdtempSync(join(tmpdir(), "drop-")), "session.json");
-  await saveSession(path, { apiBase: "http://localhost:8080", token: "alice:alice@paytm.com" });
+  await saveSession(path, { apiBase: "http://localhost:8080", token: "alice:alice@example.com" });
   const s = await loadSession(path);
-  expect(s.token).toBe("alice:alice@paytm.com");
+  expect(s.token).toBe("alice:alice@example.com");
   expect(s.apiBase).toBe("http://localhost:8080");
 });
 
 test("devLoginToken builds sub:email", () => {
-  expect(devLoginToken("alice", "alice@paytm.com")).toBe("alice:alice@paytm.com");
+  expect(devLoginToken("alice", "alice@example.com")).toBe("alice:alice@example.com");
 });
 
 test("packDir produces relative slash paths", async () => {

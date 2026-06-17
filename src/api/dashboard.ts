@@ -279,7 +279,7 @@ async function openSite(name){
     cs.appendChild(it);
   });
   if(isOwner){
-    const f=el('div','field');const inp=el('input');inp.placeholder='teammate@paytm.com';inp.type='email';
+    const f=el('div','field');const inp=el('input');inp.placeholder='teammate@example.com';inp.type='email';
     const b=el('button','btn sm','share');
     b.onclick=()=>{if(!inp.value)return;act('shared with '+inp.value,()=>api('POST','/v1/sites/'+name+'/collaborators',{email:inp.value.trim()}),name)};
     f.appendChild(inp);f.appendChild(b);cs.appendChild(f);
@@ -289,7 +289,7 @@ async function openSite(name){
   // owner-only: transfer + delete
   if(isOwner){
     const ts=el('div','sec');ts.appendChild(el('h3',null,'transfer ownership'));
-    const f=el('div','field');const inp=el('input');inp.placeholder='new-owner@paytm.com';inp.type='email';
+    const f=el('div','field');const inp=el('input');inp.placeholder='new-owner@example.com';inp.type='email';
     const b=el('button','btn sm','transfer');
     b.onclick=()=>{if(!inp.value)return;if(!confirm('Transfer '+name+' to '+inp.value+'? You become a collaborator.'))return;act('transferred',()=>api('POST','/v1/sites/'+name+'/transfer',{email:inp.value.trim()}),name)};
     f.appendChild(inp);f.appendChild(b);ts.appendChild(f);d.appendChild(ts);

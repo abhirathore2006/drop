@@ -39,10 +39,10 @@ help:
 	@echo "  make stop-all                   also stop the podman machine"
 	@echo "  make reset                      wipe the Floci + Postgres volumes (all sites + metadata)"
 	@echo ""
-	@echo "  corp/Zscaler CA for podman pulls:  make setup CORP_CA=~/certs/Zscalerroot.cer"
+	@echo "  corporate CA for podman pulls:  make setup CORP_CA=~/certs/your-root-ca.cer"
 
 # One-time local setup: Node (via nvm + .nvmrc), deps, podman VM, Floci image.
-# Behind Zscaler, pass CORP_CA=<root.cer> so the podman VM can pull images.
+# Behind a TLS-inspecting proxy, pass CORP_CA=<root.cer> so the podman VM can pull images.
 setup:
 	@command -v podman >/dev/null 2>&1 || { echo "✗ podman not found — install Podman Desktop, then re-run"; exit 1; }
 	@echo "▸ ensuring node $(NODE_VERSION) (via nvm)…"
@@ -59,10 +59,10 @@ setup:
 	fi
 	@echo "▸ pulling Floci image…"; podman pull docker.io/floci/floci:latest >/dev/null 2>&1 \
 	  && echo "✓ floci image ready" \
-	  || echo "! could not pull floci — if behind Zscaler:  make setup CORP_CA=~/certs/Zscalerroot.cer"
+	  || echo "! could not pull floci — if behind a TLS-inspecting proxy:  make setup CORP_CA=~/certs/your-root-ca.cer"
 	@echo "▸ pulling Postgres image…"; podman pull $(PG_IMAGE) >/dev/null 2>&1 \
 	  && echo "✓ postgres image ready" \
-	  || echo "! could not pull postgres — if behind Zscaler:  make setup CORP_CA=~/certs/Zscalerroot.cer"
+	  || echo "! could not pull postgres — if behind a TLS-inspecting proxy:  make setup CORP_CA=~/certs/your-root-ca.cer"
 	@echo "✓ setup complete — run 'make start'"
 
 build:
@@ -129,6 +129,6 @@ DIR  ?= ./dist
 NAME ?=
 publish:
 	@test -f dist/drop.js || $(NODE) build.mjs cli >/dev/null
-	@$(LOADENV) if [ "$$DROP_DEV_AUTH" = "1" ]; then $(NODE) dist/drop.js dev-login alice alice@paytm.com --api http://localhost:$(API_PORT) >/dev/null; fi
+	@$(LOADENV) if [ "$$DROP_DEV_AUTH" = "1" ]; then $(NODE) dist/drop.js dev-login alice alice@example.com --api http://localhost:$(API_PORT) >/dev/null; fi
 	@$(NODE) dist/drop.js publish $(DIR) $(NAME) --api http://localhost:$(API_PORT)
 	@[ -n "$(NAME)" ] && echo "view:  http://$(NAME).$(BASE_DOMAIN):$(EDGE_PORT)/" || echo "(local URL is http://<name>.$(BASE_DOMAIN):$(EDGE_PORT)/ )"

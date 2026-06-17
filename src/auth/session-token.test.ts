@@ -3,10 +3,10 @@ import { signSession, SessionVerifier } from "./session-token.ts";
 
 test("session token round trip", async () => {
   const secret = "test-secret-please-rotate";
-  const tok = await signSession(secret, { sub: "alice@paytm.com", email: "alice@paytm.com" });
+  const tok = await signSession(secret, { sub: "alice@example.com", email: "alice@example.com" });
   const id = await new SessionVerifier(secret).verify(tok);
-  expect(id?.sub).toBe("alice@paytm.com");
-  expect(id?.email).toBe("alice@paytm.com");
+  expect(id?.sub).toBe("alice@example.com");
+  expect(id?.email).toBe("alice@example.com");
 });
 
 test("rejects wrong secret and garbage", async () => {

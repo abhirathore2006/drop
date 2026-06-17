@@ -7,7 +7,7 @@ import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName } from "./resolve-name.ts";
 
 function apiBase(opts: { api?: string }): string {
-  return opts.api ?? process.env.DROP_API ?? "https://api.drop.company.com";
+  return opts.api ?? process.env.DROP_API ?? "https://api.drop.example.com";
 }
 
 async function client(): Promise<Client> {
@@ -23,7 +23,7 @@ const show = (v: unknown) => console.log(JSON.stringify(v, null, 2));
 
 export function buildProgram(): Command {
   const program = new Command();
-  program.name("drop").description("Publish static sites to *.drop.company.com");
+  program.name("drop").description("Publish static sites to *.drop.example.com");
   program.option("--api <url>", "control plane base URL");
 
   program

@@ -29,7 +29,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (!databaseUrl) throw new Error("DROP_DATABASE_URL is required");
   return {
     httpPort: Number(env.DROP_HTTP_PORT ?? "8080"),
-    baseDomain: env.DROP_BASE_DOMAIN ?? "drop.company.com",
+    baseDomain: env.DROP_BASE_DOMAIN ?? "drop.example.com",
     s3Bucket,
     s3Endpoint: env.DROP_S3_ENDPOINT || undefined,
     s3Region: env.DROP_S3_REGION ?? "us-east-1",

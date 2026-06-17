@@ -24,9 +24,9 @@ helm upgrade --install drop infra/helm/drop \
   --namespace drop --create-namespace \
   --set image.repository=<acct>.dkr.ecr.<region>.amazonaws.com/drop \
   --set image.tag=0.1.0 \
-  --set baseDomain=drop.company.com --set apiHost=api.drop.company.com \
+  --set baseDomain=drop.example.com --set apiHost=api.drop.example.com \
   --set config.s3Bucket=drop-sites --set config.s3Region=<region> \
-  --set config.allowedDomains=paytm.com \
+  --set config.allowedDomains=example.com \
   --set googleClientId=<id>.apps.googleusercontent.com \
   --set secret.existingSecret=drop-secrets \
   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::<acct>:role/drop-s3 \

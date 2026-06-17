@@ -53,7 +53,7 @@ Spec: `docs/superpowers/specs/2026-06-17-drop-postgres-migration-design.md`.
 
 - [ ] **Step 1:** Install deps.
 ```bash
-cd /Users/abhimanyusinghrathore/work/know/drop
+cd /path/to/drop
 export PATH="$HOME/.nvm/versions/node/v24.12.0/bin:$PATH"
 npm install kysely pg
 npm install -D @types/pg @electric-sql/pglite kysely-pglite
@@ -1009,7 +1009,7 @@ git commit -m "docs: postgres metadata model, roles, visibility"
 ```bash
 make reset && make start
 ```
-- [ ] **Step 2:** Mint a session for `abhimanyu.rathore@paytm.com` (seeded admin) as before; confirm `/v1/me` → `admin:true`.
+- [ ] **Step 2:** Mint a session for `admin@example.com` (seeded admin) as before; confirm `/v1/me` → `admin:true`.
 - [ ] **Step 3:** Re-publish fixtures from `examples/` (multipage, report, viteapp). Confirm edge serves each (200), `/v1/sites` lists them, `/v1/admin/sites` paginates.
 - [ ] **Step 4:** Visibility: set a site to `password` (via `/v1/sites/:name/visibility`), confirm edge 401 then 200 with basic-auth; set `private`, confirm edge 403.
 - [ ] **Step 5:** Roles: add a collaborator as `editor`, confirm they can publish but not delete (403); `viewer` can read-mgmt only.

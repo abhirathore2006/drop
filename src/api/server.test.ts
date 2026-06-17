@@ -23,10 +23,10 @@ async function mk(opts: { admins?: string[] } = {}) {
   if (opts.admins) await users.seedAdmins(opts.admins);
   const blob = new FakeBlob();
   const meta = new MetaStore(db);
-  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.company.com" });
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
   const verifier = new FakeVerifier({
-    alice: { sub: "alice@paytm.com", email: "alice@paytm.com" },
-    bob: { sub: "bob@paytm.com", email: "bob@paytm.com" },
+    alice: { sub: "alice@example.com", email: "alice@example.com" },
+    bob: { sub: "bob@example.com", email: "bob@example.com" },
   });
   return { app: createApp({ cfg, meta, blob, db, users, verifier }), meta, blob, db, users };
 }
@@ -48,9 +48,9 @@ test("publish claims, sets pointer, returns url", async () => {
   const { app, meta, db } = await mk();
   const res = await pub(app, "alice", "myapp", await tgz({ "index.html": "<html>" }));
   expect(res.status).toBe(200);
-  expect((await res.json()).url).toBe("https://myapp.drop.company.com");
+  expect((await res.json()).url).toBe("https://myapp.drop.example.com");
   const site = (await meta.getSitePlain("myapp"))!;
-  expect(site.owner).toBe("alice@paytm.com");
+  expect(site.owner).toBe("alice@example.com");
   expect(site.currentVersion).not.toBeNull();
   expect(site.visibility).toBe("public");
   await db.destroy();
@@ -87,16 +87,16 @@ test("collaborator lifecycle: editor can publish, cannot share", async () => {
   const { app, db } = await mk();
   await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
   expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(403);
-  expect((await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@paytm.com" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@example.com" })).status).toBe(200);
   expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(200);
-  expect((await call(app, "POST", "/v1/sites/myapp/collaborators", "bob", { email: "carol@paytm.com" })).status).toBe(403);
+  expect((await call(app, "POST", "/v1/sites/myapp/collaborators", "bob", { email: "carol@example.com" })).status).toBe(403);
   await db.destroy();
 });
 
 test("viewer role can read but not publish", async () => {
   const { app, db } = await mk();
   await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
-  await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@paytm.com", role: "viewer" });
+  await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@example.com", role: "viewer" });
   expect((await call(app, "GET", "/v1/sites/myapp", "bob")).status).toBe(200); // read ok
   expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(403); // publish denied
   await db.destroy();
@@ -115,10 +115,10 @@ test("get site authz + owner-only delete", async () => {
 test("transfer ownership moves owner, keeps old as collaborator", async () => {
   const { app, meta, db } = await mk();
   await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
-  expect((await call(app, "POST", "/v1/sites/myapp/transfer", "alice", { email: "bob@paytm.com" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/sites/myapp/transfer", "alice", { email: "bob@example.com" })).status).toBe(200);
   const s = (await meta.getSitePlain("myapp"))!;
-  expect(s.owner).toBe("bob@paytm.com");
-  expect(s.collaborators).toContain("alice@paytm.com");
+  expect(s.owner).toBe("bob@example.com");
+  expect(s.collaborators).toContain("alice@example.com");
   // now bob (new owner) can publish, alice (now editor) can still publish but not delete
   expect((await pub(app, "bob", "myapp", await tgz({ "index.html": "y" }))).status).toBe(200);
   expect((await call(app, "DELETE", "/v1/sites/myapp", "alice")).status).toBe(403);
@@ -130,7 +130,7 @@ test("ls returns only the caller's own + shared sites", async () => {
   await pub(app, "alice", "a-one", await tgz({ "index.html": "x" }));
   await pub(app, "alice", "a-two", await tgz({ "index.html": "x" }));
   await pub(app, "bob", "b-one", await tgz({ "index.html": "x" }));
-  await call(app, "POST", "/v1/sites/a-one/collaborators", "alice", { email: "bob@paytm.com" });
+  await call(app, "POST", "/v1/sites/a-one/collaborators", "alice", { email: "bob@example.com" });
 
   const alice = await (await call(app, "GET", "/v1/sites", "alice")).json();
   expect(alice.sites.map((s: any) => s.name).sort()).toEqual(["a-one", "a-two"]);
@@ -169,7 +169,7 @@ test("publishing a bundle with basicAuth sets password visibility", async () => 
 });
 
 test("admin endpoint: non-admin 403, admin sees ALL sites", async () => {
-  const { app, db } = await mk({ admins: ["alice@paytm.com"] });
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
   await pub(app, "alice", "site-a", await tgz({ "index.html": "x" }));
   await pub(app, "bob", "site-b", await tgz({ "index.html": "x" }));
   expect((await call(app, "GET", "/v1/admin/sites", "bob")).status).toBe(403);
@@ -180,10 +180,10 @@ test("admin endpoint: non-admin 403, admin sees ALL sites", async () => {
 });
 
 test("admin cannot be spoofed via client-supplied flags/headers/body", async () => {
-  const { app, db } = await mk({ admins: ["alice@paytm.com"] });
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
   await pub(app, "alice", "site-a", await tgz({ "index.html": "x" }));
   // bob is authenticated but NOT an admin; every escalation trick must fail.
-  for (const _ of [{ admin: true }, { email: "alice@paytm.com" }, { isAdmin: true, role: "admin" }]) {
+  for (const _ of [{ admin: true }, { email: "alice@example.com" }, { isAdmin: true, role: "admin" }]) {
     const res = await app.request("/v1/admin/sites", {
       method: "GET",
       headers: { authorization: "Bearer bob", "x-admin": "true", "x-drop-admin": "1" },
@@ -197,7 +197,7 @@ test("admin cannot be spoofed via client-supplied flags/headers/body", async () 
 });
 
 test("/v1/me reports admin flag from the users table", async () => {
-  const { app, db } = await mk({ admins: ["alice@paytm.com"] });
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
   expect((await (await call(app, "GET", "/v1/me", "alice")).json()).admin).toBe(true);
   expect((await (await call(app, "GET", "/v1/me", "bob")).json()).admin).toBe(false);
   await db.destroy();

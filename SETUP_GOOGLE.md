@@ -7,7 +7,7 @@ redirect URIs for **Web application** OAuth clients. ~10 minutes.
 
 1. Go to <https://console.cloud.google.com> → pick (or create) a project.
 2. **APIs & Services → OAuth consent screen**
-   - User type: **Internal** (your `paytm.com` Workspace — limits sign-in to the org,
+   - User type: **Internal** (your `example.com` Workspace — limits sign-in to the org,
      no Google verification needed). App name: `Drop (local)`. Add your email. Save.
    - Scopes: add `openid` and `.../auth/userinfo.email` (both non-sensitive). Save.
 3. **APIs & Services → Credentials → Create credentials → OAuth client ID**
@@ -26,9 +26,9 @@ cp .env.example .env
 #   DROP_GOOGLE_CLIENT_ID=<client id>
 #   DROP_GOOGLE_CLIENT_SECRET=<client secret>
 #   DROP_PUBLIC_URL=http://localhost:8473
-#   DROP_ALLOWED_DOMAINS=paytm.com
+#   DROP_ALLOWED_DOMAINS=example.com
 #   DROP_SESSION_SECRET=<paste: openssl rand -hex 32>
-#   NODE_EXTRA_CA_CERTS=~/certs/ca-bundle-with-zscaler.pem   # if behind Zscaler
+#   NODE_EXTRA_CA_CERTS=~/certs/ca-bundle.pem   # if behind a TLS-inspecting proxy
 openssl rand -hex 32          # paste into DROP_SESSION_SECRET
 ```
 
@@ -45,7 +45,7 @@ The api log should print `OAuth callback: http://localhost:8473/auth/callback`.
 Then:
 
 ```bash
-make login        # opens your browser → choose your @paytm.com account → consent
+make login        # opens your browser → choose your @example.com account → consent
                   # browser shows "✓ Logged in to Drop. You can close this tab."
                   # terminal prints "✓ logged in"
 ```

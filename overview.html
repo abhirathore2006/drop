@@ -123,13 +123,13 @@ footer{padding:44px 0 70px;color:var(--dim);font-family:var(--mono);font-size:12
     <div><span class="p">$</span> drop publish ./dist myapp</div>
     <div class="c">&nbsp;&nbsp;▸ packing dist/ (42 files)</div>
     <div class="c">&nbsp;&nbsp;▸ dropping…</div>
-    <div><span class="ok">&nbsp;&nbsp;✓ live at https://myapp.drop.company.com</span> <span class="c">(internal-only)</span></div>
+    <div><span class="ok">&nbsp;&nbsp;✓ live at https://myapp.drop.example.com</span> <span class="c">(internal-only)</span></div>
   </div>
 
   <div class="cards" style="margin-top:34px">
     <div class="card"><div class="n">NO THIRD PARTY</div><h3>Self-hosted, full stop</h3><p>Unlike Surge / Netlify / Vercel, proprietary frontends never leave the company — they sit in your S3 bucket, served by your own services.</p></div>
     <div class="card"><div class="n">INTERNAL-ONLY</div><h3>Not on the public internet</h3><p>Sites resolve only on the corporate network / VPN. The bucket is private; the edge mediates every read — nothing is publicly exposed.</p></div>
-    <div class="card"><div class="n">WORKSPACE-GATED</div><h3>Verified employees only</h3><p>Publishing requires a verified <code class="inl">@paytm.com</code> Google account (domain + optional per-person allowlist). Per-site HTTP password too.</p></div>
+    <div class="card"><div class="n">WORKSPACE-GATED</div><h3>Verified employees only</h3><p>Publishing requires a verified <code class="inl">@example.com</code> Google account (domain + optional per-person allowlist). Per-site HTTP password too.</p></div>
     <div class="card"><div class="n">NO LOOSE SECRETS</div><h3>Credentials stay server-side</h3><p>Clients hold none. The API owns the OAuth client + token-signing key; S3 is reached via IAM roles — no static access keys anywhere.</p></div>
   </div>
 
@@ -155,7 +155,7 @@ footer{padding:44px 0 70px;color:var(--dim);font-family:var(--mono);font-size:12
   <b>Vercel</b>, <b>GitHub Pages</b>, or <b>Cloudflare Pages</b> — but <b>self-hosted</b>, so proprietary
   and agent-generated work never touches an external vendor.</p>
   <div class="cards">
-    <div class="card"><div class="n">PUBLISH</div><h3>Reports · decks · dashboards</h3><p>Any static bundle — an HTML report, a reveal.js deck, a Vite/React dashboard — becomes a live internal URL you can drop into Slack or a ticket.</p></div>
+    <div class="card"><div class="n">PUBLISH</div><h3>Reports · decks · dashboards</h3><p>Any static bundle — an HTML report, a reveal.js deck, a Vite/React dashboard — becomes a live internal URL you can drop into a chat message or a ticket.</p></div>
     <div class="card"><div class="n">AGENT-NATIVE</div><h3>The agent ships it itself</h3><p>Via the MCP server, Claude/Cursor calls <code class="inl">publish</code> directly — "host this report" → a shareable link, no human deploy step. Versioned, with instant rollback.</p></div>
     <div class="card"><div class="n">CONFIDENTIAL</div><h3>Stays inside the company</h3><p>Sensitive, agent-generated analysis never touches a third-party SaaS — it sits in your S3, served internal-only, gated by Workspace login (and optional per-site password).</p></div>
   </div>
@@ -235,7 +235,7 @@ sites/<span class="k">&lt;name&gt;</span>/files/<span class="s">&lt;id&gt;</span
   <span class="k">"notFound"</span>: <span class="s">"404.html"</span>,
   <span class="k">"redirects"</span>: [{ <span class="k">"from"</span>:<span class="s">"/docs/*"</span>, <span class="k">"to"</span>:<span class="s">"/help/:splat"</span>, <span class="k">"status"</span>:301 }],
   <span class="k">"headers"</span>:   [{ <span class="k">"source"</span>:<span class="s">"/assets/*"</span>, <span class="k">"headers"</span>:{ <span class="k">"cache-control"</span>:<span class="s">"public, max-age=31536000, immutable"</span> }}],
-  <span class="k">"cors"</span>: { <span class="k">"allowOrigins"</span>: [<span class="s">"https://app.paytm.com"</span>] },
+  <span class="k">"cors"</span>: { <span class="k">"allowOrigins"</span>: [<span class="s">"https://app.example.com"</span>] },
   <span class="k">"basicAuth"</span>: { <span class="k">"users"</span>: { <span class="s">"team"</span>: <span class="s">"sha256:&lt;hex&gt;"</span> } }
 }</pre>
   <div class="cards" style="margin-top:22px">
@@ -269,16 +269,16 @@ sites/<span class="k">&lt;name&gt;</span>/files/<span class="s">&lt;id&gt;</span
     <tr><td><b>Object storage</b> (only state)</td><td class="m">S3</td><td>One private bucket. Supports the conditional writes Drop relies on. Block public access.</td></tr>
     <tr><td><b>Run api + edge</b></td><td class="m">ECS Fargate / EKS / EC2</td><td>One image, command per role. Both stateless → scale by replicas.</td></tr>
     <tr><td><b>Image registry</b></td><td class="m">ECR</td><td>CI builds + pushes the unified image.</td></tr>
-    <tr><td><b>LB + TLS</b></td><td class="m">ALB + ACM</td><td>One wildcard <code class="inl">*.drop.company.com</code> cert; TLS terminates at the ALB.</td></tr>
-    <tr><td><b>DNS</b></td><td class="m">Route 53</td><td><code class="inl">api.drop.company.com</code> → api, <code class="inl">*.drop.company.com</code> → edge.</td></tr>
+    <tr><td><b>LB + TLS</b></td><td class="m">ALB + ACM</td><td>One wildcard <code class="inl">*.drop.example.com</code> cert; TLS terminates at the ALB.</td></tr>
+    <tr><td><b>DNS</b></td><td class="m">Route 53</td><td><code class="inl">api.drop.example.com</code> → api, <code class="inl">*.drop.example.com</code> → edge.</td></tr>
     <tr><td><b>Secrets</b></td><td class="m">Secrets Manager</td><td>Google client secret + session-signing secret.</td></tr>
     <tr><td><b>S3 auth</b></td><td class="m">IAM roles (IRSA)</td><td>No access keys — pods/tasks assume a role.</td></tr>
     <tr><td><b>Egress + S3</b></td><td class="m">NAT GW + S3 VPC endpoint</td><td>API reaches Google for OAuth; S3 traffic stays in-VPC.</td></tr>
   </table>
 
-  <div class="diagram" style="margin-top:26px"><pre>            Route 53                         ACM  *.drop.company.com
-  *.drop.company.com ─┐      ┌── cert on :443 ──┘
-  api.drop.company.com┴────▶ ALB ──┬── host api.*  ─────▶  api   ─┐
+  <div class="diagram" style="margin-top:26px"><pre>            Route 53                         ACM  *.drop.example.com
+  *.drop.example.com ─┐      ┌── cert on :443 ──┘
+  api.drop.example.com┴────▶ ALB ──┬── host api.*  ─────▶  api   ─┐
                                    └── host *      ─────▶  edge  ─┤  IAM role (IRSA)
                                                                   ▼
                                                        S3 bucket (drop-sites)
