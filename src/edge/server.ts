@@ -4,7 +4,8 @@ import type { BlobStore } from "../blob/types.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { DiskCache } from "./disk-cache.ts";
 import type { SiteConfig } from "../site-config.ts";
-import { basicAuthOk, corsHeaders, headersForPath, matchRedirect } from "../site-config.ts";
+import type { Visibility } from "../metastore/types.ts";
+import { basicAuthOk, corsHeaders, headersForPath, matchRedirect, passwordHashOk } from "../site-config.ts";
 
 export interface EdgeDeps {
   meta: MetaStore;
@@ -23,6 +24,8 @@ export interface EdgeDeps {
 interface CacheEntry {
   version: string | null;
   config?: SiteConfig;
+  visibility: Visibility;
+  passwordHash: string | null;
   exp: number;
 }
 
@@ -42,13 +45,19 @@ export function createEdge(d: EdgeDeps) {
   const maxObjectBytes = d.maxObjectBytes ?? 25 * 1024 * 1024;
   const disk = d.diskCacheDir ? new DiskCache(d.diskCacheDir, d.diskCacheBytes ?? 5 * 1024 * 1024 * 1024) : null;
 
-  async function current(name: string): Promise<{ version: string | null; config: SiteConfig }> {
+  async function current(name: string): Promise<CacheEntry> {
     const hit = cache.get(name);
-    if (hit && now() < hit.exp) return { version: hit.version, config: hit.config ?? {} };
-    const site = await d.meta.getSitePlain(name);
-    const entry: CacheEntry = { version: site?.currentVersion ?? null, config: site?.config, exp: now() + ttl };
+    if (hit && now() < hit.exp) return hit;
+    const ptr = await d.meta.getPointer(name);
+    const entry: CacheEntry = {
+      version: ptr?.currentVersion ?? null,
+      config: ptr?.config,
+      visibility: ptr?.visibility ?? "public",
+      passwordHash: ptr?.passwordHash ?? null,
+      exp: now() + ttl,
+    };
     cache.set(name, entry);
-    return { version: entry.version, config: entry.config ?? {} };
+    return entry;
   }
 
   function siteFromHost(host: string): string | null {
@@ -107,19 +116,33 @@ export function createEdge(d: EdgeDeps) {
     const name = siteFromHost(c.req.header("host") ?? "");
     if (!name) return notFound("site not found");
 
-    const { version, config } = await current(name);
+    const { version, config: cfg, visibility, passwordHash } = await current(name);
+    const config = cfg ?? {};
     if (!version) return notFound("site not found or nothing published");
     const prefix = d.meta.filesPrefix(name, version);
 
     const urlPath = "/" + posix.normalize("/" + c.req.path).replace(/^\/+/, "");
     const cors = corsHeaders(c.req.header("origin"), config.cors);
 
-    // 1. Basic-auth gate (whole site)
-    if (config.basicAuth && !basicAuthOk(c.req.header("authorization"), config.basicAuth.users)) {
-      return new Response("Authentication required", {
-        status: 401,
-        headers: { "www-authenticate": `Basic realm="${config.basicAuth.realm ?? "Drop"}"` },
+    // 0. Visibility: private fails closed (viewer auth lands in a later feature).
+    if (visibility === "private") {
+      return new Response("This site is private. Viewer authentication is coming soon.", {
+        status: 403,
+        headers: { "content-type": "text/plain; charset=utf-8" },
       });
+    }
+    // 1. Password gate — when the bundle carries basicAuth or a visibility password is set.
+    const needsAuth = !!config.basicAuth || (visibility === "password" && !!passwordHash);
+    if (needsAuth) {
+      const header = c.req.header("authorization");
+      const okCfg = config.basicAuth ? basicAuthOk(header, config.basicAuth.users) : false;
+      const okHash = passwordHash ? passwordHashOk(header, passwordHash) : false;
+      if (!okCfg && !okHash) {
+        return new Response("Authentication required", {
+          status: 401,
+          headers: { "www-authenticate": `Basic realm="${config.basicAuth?.realm ?? "Drop"}"` },
+        });
+      }
     }
     // 2. CORS preflight
     if (c.req.method === "OPTIONS" && config.cors) {

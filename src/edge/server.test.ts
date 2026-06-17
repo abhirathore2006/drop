@@ -2,10 +2,18 @@ import { test, expect } from "bun:test";
 import { createEdge } from "./server.ts";
 import { FakeBlob } from "../blob/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
+import { UserStore } from "../users/store.ts";
+import { makeTestDb } from "../db/testdb.ts";
+
+/** db + meta + blob with the owner user seeded (FK for claim). */
+async function base() {
+  const db = await makeTestDb();
+  await new UserStore(db).upsertOnLogin("alice@paytm.com", null);
+  return { db, meta: new MetaStore(db), blob: new FakeBlob() };
+}
 
 async function setup() {
-  const blob = new FakeBlob();
-  const meta = new MetaStore(blob);
+  const { meta, blob } = await base();
   await meta.claimSite("myapp", "alice@paytm.com");
   const prefix = meta.filesPrefix("myapp", "v1");
   await blob.put(prefix + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
@@ -46,8 +54,7 @@ test("unknown site -> 404", async () => {
 });
 
 async function setupCfg(config: any) {
-  const blob = new FakeBlob();
-  const meta = new MetaStore(blob);
+  const { meta, blob } = await base();
   await meta.claimSite("myapp", "alice@paytm.com");
   const p = meta.filesPrefix("myapp", "v1");
   await blob.put(p + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
@@ -67,6 +74,36 @@ test("config: basic auth gates the site", async () => {
   expect(no.headers.get("www-authenticate")).toContain("Basic");
   const tok = "Basic " + Buffer.from("u:p").toString("base64");
   expect((await creq(app, "/", { authorization: tok })).status).toBe(200);
+});
+
+test("visibility: private fails closed with 403", async () => {
+  const { meta, blob } = await base();
+  await meta.claimSite("myapp", "alice@paytm.com");
+  const p = meta.filesPrefix("myapp", "v1");
+  await blob.put(p + "index.html", Buffer.from("<html>secret</html>"), 19, "text/html");
+  await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
+  await meta.setVisibility("myapp", "private", null);
+  const app = createEdge({ meta, blob, baseDomain: "drop.company.com" });
+  const r = await creq(app, "/");
+  expect(r.status).toBe(403);
+  expect(await r.text()).not.toContain("secret");
+});
+
+test("visibility: password (API-set hash) requires basic auth", async () => {
+  const { meta, blob } = await base();
+  await meta.claimSite("myapp", "alice@paytm.com");
+  const p = meta.filesPrefix("myapp", "v1");
+  await blob.put(p + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
+  await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
+  const { hashPassword } = await import("../site-config.ts");
+  await meta.setVisibility("myapp", "password", hashPassword("opensesame"));
+  const app = createEdge({ meta, blob, baseDomain: "drop.company.com" });
+
+  expect((await creq(app, "/")).status).toBe(401);
+  const tok = "Basic " + Buffer.from("anyuser:opensesame").toString("base64");
+  expect((await creq(app, "/", { authorization: tok })).status).toBe(200);
+  const bad = "Basic " + Buffer.from("anyuser:wrong").toString("base64");
+  expect((await creq(app, "/", { authorization: bad })).status).toBe(401);
 });
 
 test("config: redirect", async () => {
@@ -106,8 +143,7 @@ test("disk cache: second request (even a fresh instance) skips S3", async () => 
   const { join } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "drop-edge-cache-"));
 
-  const blob = new FakeBlob();
-  const meta = new MetaStore(blob);
+  const { meta, blob } = await base();
   await meta.claimSite("myapp", "alice@paytm.com");
   const prefix = meta.filesPrefix("myapp", "v1");
   await blob.put(prefix + "app.js", Buffer.from("console.log(1)"), 14, "application/javascript");
