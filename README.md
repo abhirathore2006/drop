@@ -12,6 +12,15 @@ $ drop publish ./dist myapp
   ✓ live at https://myapp.drop.example.com
 ```
 
+## Documentation
+
+A full HTML documentation site lives in [`docs/`](docs/) — overview, getting-started,
+configuration, CLI/MCP/dashboard, roles &amp; visibility, architecture (with diagrams),
+and deployment. It's plain static HTML (no build step), ready for **GitHub Pages**:
+in the repo settings, set **Pages → Source: Deploy from a branch → `main` / `/docs`**.
+Locally, open `docs/index.html` in a browser. (Authoritative source-of-truth docs:
+this README and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).)
+
 ## How it works
 
 - **`bin/api.ts`** — control plane (Hono): server-mediated Google login, atomic name

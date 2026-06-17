@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Roles &amp; Visibility · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (_drop.json)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html" class="active">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Roles &amp; Visibility</h1>
+<p class="lead">Two orthogonal axes: <strong>roles</strong> decide who can <em>manage</em> a site; <strong>visibility</strong> decides who can <em>view</em> the served pages.</p>
+
+<p>These are independent. A site can be public (anyone with the URL sees it) but still have a tight set of owners and editors. A site can be private (no one can view it yet) while several people manage and publish it. Roles gate the API and dashboard; visibility gates the edge.</p>
+
+<h2>Roles &amp; permissions</h2>
+<p>There are two role axes. Permissions are defined in code in <code>src/authz/permissions.ts</code> — not scattered through handlers.</p>
+
+<h3>Platform role</h3>
+<p>Stored on <code>users.role</code> as <code>admin</code> or <code>member</code>. An <code>admin</code> can see and manage all sites and users; a <code>member</code> is a normal user. The <code>DROP_ADMINS</code> env var (comma-separated emails) seeds admins when the API boots; thereafter admin status is DB-managed. See <a href="deployment.html">Deployment</a> for the env var.</p>
+
+<h3>Per-site role</h3>
+<p>Stored on <code>site_members.role</code> as <code>owner</code>, <code>editor</code>, or <code>viewer</code>. There is exactly <strong>one owner per site</strong>. The map is:</p>
+<ul>
+  <li><strong>owner</strong> — everything: read, publish, rollback, configure, share, transfer, delete.</li>
+  <li><strong>editor</strong> — read, publish, rollback.</li>
+  <li><strong>viewer</strong> — read only.</li>
+</ul>
+<p>Here <em>read</em> means seeing the site in the dashboard, plus its versions and settings; <em>configure</em> means setting visibility / password.</p>
+
+<h3>Permission matrix</h3>
+<table class="tbl">
+  <thead>
+    <tr>
+      <th>Action</th>
+      <th>owner</th>
+      <th>editor</th>
+      <th>viewer</th>
+      <th>platform&nbsp;admin</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><code>read</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td></tr>
+    <tr><td><code>publish</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
+    <tr><td><code>rollback</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
+    <tr><td><code>configure</code></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
+    <tr><td><code>share</code></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
+    <tr><td><code>transfer</code></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
+    <tr><td><code>delete</code></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
+  </tbody>
+</table>
+
+<div class="note"><span class="lbl">Note</span><p><code>can(actor, action)</code> is the single authority check used everywhere. Platform admins are all-powerful on every site; a non-member can do nothing. <strong>transfer</strong> hands ownership to another member and demotes the old owner to <code>editor</code> — so there is still exactly one owner.</p></div>
+
+<h2>Visibility</h2>
+<p>Each site has a <code>visibility</code> of <code>public</code>, <code>password</code>, or <code>private</code>. Set it with <code>POST /v1/sites/:name/visibility</code> (the <code>configure</code> permission) or from the dashboard.</p>
+<ul>
+  <li><strong>public</strong> <span class="pill">default</span> — served openly to anyone with the URL.</li>
+  <li><strong>password</strong> — the edge requires HTTP basic-auth against the site's <code>password_hash</code>. Publishing a <a href="configuration.html"><code>_drop.json</code></a> with a <code>basicAuth</code> block also turns this on.</li>
+  <li><strong>private</strong> — only members (and platform admins) may view.</li>
+</ul>
+
+<div class="note warn"><span class="lbl">Warn</span><p>Edge enforcement of private viewing (viewer authentication) is the next feature. <strong>Until then a private site returns <code>403</code> at the edge — it fails closed</strong> and is never served openly. Owners and editors can still manage and publish; only the served page is gated.</p></div>
+
+<h2>Admin</h2>
+<p>Platform admins (seeded by <code>DROP_ADMINS</code>, then DB-managed) get an all-sites view.</p>
+<ul>
+  <li><code>GET /v1/me</code> returns <code>{ admin: true }</code> for platform admins.</li>
+  <li><code>GET /v1/admin/sites?cursor=&amp;limit=&amp;prefix=</code> pages through <strong>every</strong> site (keyset-paginated, name-prefix filterable) regardless of ownership.</li>
+  <li>The dashboard shows an <strong>all sites</strong> tab backed by the same endpoint.</li>
+</ul>
+<pre><code>GET /v1/me            → { "admin": true }
+GET /v1/admin/sites?limit=50&amp;prefix=team-&amp;cursor=&lt;name&gt;</code></pre>
+
+<div class="note"><span class="lbl">Note</span><p>Admin status never bypasses per-site ownership or <code>_drop.json</code> name-ownership. A publish still has to satisfy the name claim in the config; being an admin does not let you steal a name that another site already owns.</p></div>
+
+<div class="next">
+  <a href="architecture.html"><div class="d">Next →</div><div class="t">Architecture</div></a>
+  <a href="deployment.html"><div class="d">Next →</div><div class="t">Deployment</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

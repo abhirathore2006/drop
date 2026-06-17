@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Getting started · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html" class="active">Getting started</a>
+      <a href="configuration.html">Configuration (_drop.json)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Getting started</h1>
+<p class="lead">Bring up the full Drop stack locally, publish your first site, and learn the handful of <code>make</code> targets you'll use every day.</p>
+
+<p>Drop is self-hosted static-site publishing: push a built folder, get a URL. Everything runs on your own machine for development — a local S3 (Floci), Postgres, the control-plane <strong>api</strong>, and the serving <strong>edge</strong>. This page gets you from a clean checkout to a live local site.</p>
+
+<h2>Run it locally</h2>
+
+<h3>Prerequisites</h3>
+<ul>
+  <li><strong>Node 24</strong> — the exact version is pinned in <code>.nvmrc</code>. Run <code>nvm use</code> (or <code>nvm install</code>) in the repo first; <code>make setup</code> will also install it via nvm.</li>
+  <li><strong>podman</strong> — used to run Floci (S3) and Postgres as local containers. Install Podman Desktop if you don't have it.</li>
+</ul>
+<p>(Bun is only needed to run the test suite — not for local dev, which runs the servers as Node processes.)</p>
+
+<h3>One-time setup</h3>
+<pre><code>make setup</code></pre>
+<p>This ensures Node (via nvm + <code>.nvmrc</code>), installs npm dependencies, initializes and starts the podman VM, and pulls the <strong>Floci</strong> and <strong>Postgres</strong> images. Behind a TLS-inspecting proxy, point podman at your root CA so it can pull images:</p>
+<pre><code>make setup CORP_CA=~/certs/your-root-ca.cer</code></pre>
+
+<h3>Start the stack</h3>
+<pre><code>make start</code></pre>
+<p>This brings up everything and builds the bundles first:</p>
+<table class="tbl">
+  <thead><tr><th>Service</th><th>Port</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td>Floci (S3)</td><td>4566</td><td>Object storage for the served file bytes (persistent named volume)</td></tr>
+    <tr><td>Postgres</td><td>5432</td><td>All metadata: users, sites, members, versions (persistent named volume)</td></tr>
+    <tr><td>api</td><td>8473</td><td>Control plane + dashboard; runs schema migrations on boot</td></tr>
+    <tr><td>edge</td><td>8474</td><td>Stateless serving edge; routes by <code>Host</code> header</td></tr>
+  </tbody>
+</table>
+<div class="note"><span class="lbl">Note</span><p>With no <code>.env</code> file, <code>DROP_DEV_AUTH</code> defaults to <code>1</code> locally — so <strong>dev-auth</strong> is on and you don't need any Google credentials to develop. Published sites and metadata persist across restarts in named volumes. See <a href="configuration.html">Configuration</a> for the env knobs.</p></div>
+
+<h2>Publish your first site</h2>
+<p>Point Drop at a built folder and give it a name:</p>
+<pre><code>make publish DIR=./your/dist NAME=myapp</code></pre>
+<p>Under dev-auth, <code>make publish</code> first does a throwaway dev-login as <code>alice@example.com</code>, then publishes. View the result — by default the edge serves at:</p>
+<pre><code>http://myapp.drop.localhost:8474/</code></pre>
+<p>The <code>.localhost</code> TLD auto-resolves to <code>127.0.0.1</code> on macOS, so that URL just works in a browser. The edge routes purely by the <code>Host</code> header, so you can also curl it directly:</p>
+<pre><code>curl -H "Host: myapp.drop.localhost" http://localhost:8474/</code></pre>
+<div class="note tip"><span class="lbl">Tip</span><p>If you'd rather not rely on <code>.localhost</code> resolution, add <code>127.0.0.1 myapp.drop.localhost</code> to <code>/etc/hosts</code> and browse normally.</p></div>
+
+<h2>Seamless local HTTPS (optional, portless)</h2>
+<p>By default the edge lives at <code>http://&lt;name&gt;.drop.localhost:8474</code>. For a production-shaped experience — <strong>trusted HTTPS and no port numbers</strong> — front the running stack with <a href="https://portless.sh">portless</a>:</p>
+<pre><code>npm i -g portless        # one-time (Node 24+)
+make start               # api :8473 + edge :8474 as usual
+make portless            # registers a local-CA HTTPS proxy on :443</code></pre>
+<p>You then get, with a browser-trusted certificate and no ports:</p>
+<ul>
+  <li><code>https://api.drop.localhost</code> → the control plane + dashboard (api)</li>
+  <li><code>https://&lt;name&gt;.drop.localhost</code> → any published site (edge, wildcard)</li>
+</ul>
+<p>The edge honors <code>x-forwarded-host</code>, so the site name survives the proxy and the <code>https://&lt;name&gt;.drop.localhost</code> URL that <code>drop publish</code> prints resolves directly. Tear it down with <code>make portless-stop</code>.</p>
+<div class="note warn"><span class="lbl">Note</span><p>The <code>:443</code> proxy is a single shared portless daemon, and <code>--wildcard</code> only takes effect at start — so <code>make portless</code> <strong>restarts</strong> the proxy to guarantee the wildcard route (persisted aliases survive). Real Google login locally still uses the loopback URL: Google won't accept a <code>.localhost</code> OAuth redirect. portless shines for dev-auth, the dashboard, and viewing sites.</p></div>
+
+<h2>Publish from anywhere (CLI via npx)</h2>
+<p>You don't have to clone the repo to publish to a running Drop. Any machine with Node can run the CLI straight from git:</p>
+<pre><code>npx git+https://git.example.com/scm/&lt;team&gt;/drop.git publish ./dist myapp</code></pre>
+<p>The client needs <strong>only</strong> <code>DROP_API</code> — login is server-mediated, so no Google secrets live on your machine:</p>
+<pre><code>export DROP_API=https://api.drop.example.com</code></pre>
+<p>For a persistent <code>drop</code> command (instead of typing <code>npx …</code> each time), use the installer from a clone — it's idempotent and needs no sudo:</p>
+<pre><code>git clone &lt;repo&gt; &amp;&amp; cd drop
+./install.sh --api https://api.drop.example.com
+drop publish ./dist myapp</code></pre>
+<p>The installer ensures Bun, installs deps, and writes a <code>drop</code> wrapper onto a bin dir on your PATH (baking in the <code>--api</code> default if you pass one). See <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for the full command surface.</p>
+
+<h2>Other make targets</h2>
+<table class="tbl">
+  <thead><tr><th>Target</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><code>make status</code></td><td>Show whether api, edge, floci, and pg are up</td></tr>
+    <tr><td><code>make logs</code></td><td>Tail the api + edge logs</td></tr>
+    <tr><td><code>make restart</code></td><td>Stop, then start the whole stack</td></tr>
+    <tr><td><code>make login</code></td><td>Real Google sign-in (server-mediated); needs <code>.env</code> with the web-client config and <code>DROP_DEV_AUTH=0</code></td></tr>
+    <tr><td><code>make stop</code></td><td>Stop api + edge + Floci + Postgres (podman VM stays up)</td></tr>
+    <tr><td><code>make stop-all</code></td><td>Same as <code>stop</code>, and also stops the podman machine</td></tr>
+    <tr><td><code>make reset</code></td><td>Wipe the Floci + Postgres volumes — <strong>deletes all sites + metadata</strong></td></tr>
+  </tbody>
+</table>
+<div class="note danger"><span class="lbl">Danger</span><p><code>make reset</code> removes the persistent named volumes. Every published site and all metadata are gone. There's no undo.</p></div>
+
+<div class="next">
+  <a href="configuration.html"><div class="d">Next →</div><div class="t">Configuration (_drop.json)</div></a>
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

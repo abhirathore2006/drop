@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drop — self-hosted static-site publishing</title>
+<meta name="description" content="Drop is a self-hosted, Surge-style static-site publisher. Push a built folder, get an internal HTTPS URL. Metadata in Postgres, file bytes in S3, gated by Google login.">
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html" class="active">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (_drop.json)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+
+    <section class="hero">
+      <h1>Ship internal sites.<br><span class="g">Nothing ever leaves.</span></h1>
+      <p class="lead">Drop is a self-hosted, Surge/Netlify/Vercel-style static-site publisher for your own
+      network. Push a built folder — an HTML report, a slide deck, a Vite/React dashboard — and get a
+      confidential URL on <code>*.drop.example.com</code>. Everything lives in <strong>your own S3</strong>
+      and <strong>your own Postgres</strong>, behind <strong>your own Google Workspace</strong>.</p>
+      <div class="btnrow">
+        <a class="btn primary" href="getting-started.html">Get started →</a>
+        <a class="btn" href="architecture.html">Architecture</a>
+        <a class="btn" href="deployment.html">Deploy</a>
+      </div>
+    </section>
+
+    <pre><code><span class="tok-c">$</span> drop publish ./dist myapp
+  ▸ packing ./dist
+  ▸ dropping…
+  <span class="tok-s">✓ live at https://myapp.drop.example.com</span>  <span class="tok-c">(internal-only)</span></code></pre>
+
+    <h2>Why Drop</h2>
+    <div class="cards">
+      <div class="card">
+        <div class="n">CONFIDENTIAL</div>
+        <h3>Stays inside the company</h3>
+        <p>Sensitive, agent-generated analysis never touches a third-party SaaS — it sits in your S3,
+        served internal-only, gated by Workspace login (and optional per-site password).</p>
+      </div>
+      <div class="card">
+        <div class="n">PUBLISH</div>
+        <h3>Reports · decks · dashboards</h3>
+        <p>Any static bundle becomes a live internal URL in seconds — no deploy pipeline, no ports,
+        nothing leaving the network.</p>
+      </div>
+      <div class="card">
+        <div class="n">AGENT-NATIVE</div>
+        <h3>CLI &amp; MCP</h3>
+        <p>Publish from the terminal (<code>npx</code>, nothing to install) or let an AI client publish
+        directly through the built-in MCP server.</p>
+      </div>
+      <div class="card">
+        <div class="n">CONTROLLED</div>
+        <h3>Roles &amp; visibility</h3>
+        <p>Per-site owner / editor / viewer roles, platform admins, and public / private / password
+        visibility — all backed by Postgres for real reporting.</p>
+      </div>
+    </div>
+
+    <h2>How it fits together</h2>
+    <p>Two small, stateless services share a Postgres metadata store and an S3 byte store:</p>
+    <ul>
+      <li><strong>api</strong> — the control plane: Google login, publishing, rollback, sharing,
+        visibility, admin, and the dashboard. Owns schema migrations.</li>
+      <li><strong>edge</strong> — the data plane: serves published bytes by hostname, applies per-site
+        config and visibility. Read-only against Postgres.</li>
+    </ul>
+    <p>File <strong>bytes</strong> live in S3 (<code>sites/&lt;name&gt;/files/&lt;verId&gt;/…</code>);
+    everything else — sites, members, versions, users, auth handles — lives in Postgres. See the
+    <a href="architecture.html">architecture</a> for diagrams of the publish and serve flows.</p>
+
+    <h2>What you can publish</h2>
+    <p>Anything that builds to static files: multi-page HTML, single-file reports, reveal.js / slide
+    decks, and full client-rendered SPAs (Vite, React, Vue, Svelte, Astro). Route-aware SPA fallback,
+    clean URLs, redirects, custom headers, CORS, and HTTP password are all configured per-site with a
+    small <a href="configuration.html"><code>_drop.json</code></a>.</p>
+
+    <h2>30-second tour</h2>
+    <ol>
+      <li><a href="getting-started.html">Get started</a> — install, run locally, publish your first site.</li>
+      <li><a href="configuration.html">Configuration</a> — <code>_drop.json</code>: SPA fallback,
+        redirects, headers, password, custom site name.</li>
+      <li><a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> — the three ways to drive Drop.</li>
+      <li><a href="roles-visibility.html">Roles &amp; Visibility</a> — who can manage, who can view.</li>
+      <li><a href="deployment.html">Deployment</a> — EC2 or Kubernetes (Helm), Postgres, S3, OAuth.</li>
+    </ol>
+
+    <div class="next">
+      <a href="getting-started.html"><div class="d">Next →</div><div class="t">Getting started</div></a>
+      <a href="architecture.html"><div class="d">Reference →</div><div class="t">Architecture &amp; diagrams</div></a>
+    </div>
+
+    <footer class="docfoot">Drop — self-hosted static-site publishing. Built with TypeScript on Node, Hono, Kysely + Postgres, and S3.</footer>
+  </article></main>
+</div>
+</body>
+</html>

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html" class="active">Configuration (_drop.json)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Configuration — <code>_drop.json</code></h1>
+<p class="lead">A single optional file at your build root controls routing, headers, CORS, and password protection for the published site.</p>
+
+<h2>How it works</h2>
+<p>Put a <code>_drop.json</code> at the root of your build folder (the same directory you publish — e.g. <code>./dist</code>). At publish time the API parses and sanitizes it; it is <strong>not</strong> served as a file, so visitors can never fetch it back. The edge then applies the parsed config on every request — resolving clean URLs, running redirects, merging headers, answering CORS, and challenging for basic auth.</p>
+<p>The config is <strong>versioned with the deploy</strong>. Each publish can ship a different <code>_drop.json</code>, and a rollback restores the exact config that shipped with that version — routing rules and all.</p>
+
+<div class="note"><span class="lbl">Note</span><p>Parsing is lenient: invalid JSON is rejected outright, but unknown fields and malformed entries are silently ignored rather than failing the publish. List fields are capped at 500 entries.</p></div>
+
+<h2>A complete example</h2>
+<p>Every key is optional. This annotated example uses all of them at once.</p>
+<pre><code>{
+  <span class="tok-k">"name"</span>: <span class="tok-s">"my-site"</span>,                  <span class="tok-c">// target site — lets `drop publish ./dist` skip the name arg</span>
+  <span class="tok-k">"spaFallback"</span>: <span class="tok-s">"index.html"</span>,        <span class="tok-c">// doc served on navigation misses; false to disable</span>
+  <span class="tok-k">"cleanUrls"</span>: true,                  <span class="tok-c">// /about → try /about.html</span>
+  <span class="tok-k">"notFound"</span>: <span class="tok-s">"404.html"</span>,             <span class="tok-c">// custom 404 document (served with status 404)</span>
+  <span class="tok-k">"redirects"</span>: [
+    { <span class="tok-k">"from"</span>: <span class="tok-s">"/old"</span>, <span class="tok-k">"to"</span>: <span class="tok-s">"/new"</span>, <span class="tok-k">"status"</span>: 301 },
+    { <span class="tok-k">"from"</span>: <span class="tok-s">"/docs/*"</span>, <span class="tok-k">"to"</span>: <span class="tok-s">"/help/:splat"</span>, <span class="tok-k">"status"</span>: 302 }
+  ],
+  <span class="tok-k">"headers"</span>: [
+    { <span class="tok-k">"source"</span>: <span class="tok-s">"/assets/*"</span>, <span class="tok-k">"headers"</span>: { <span class="tok-k">"cache-control"</span>: <span class="tok-s">"public, max-age=31536000, immutable"</span> } },
+    { <span class="tok-k">"source"</span>: <span class="tok-s">"/*"</span>, <span class="tok-k">"headers"</span>: { <span class="tok-k">"x-frame-options"</span>: <span class="tok-s">"DENY"</span>, <span class="tok-k">"x-content-type-options"</span>: <span class="tok-s">"nosniff"</span> } }
+  ],
+  <span class="tok-k">"cors"</span>: { <span class="tok-k">"allowOrigins"</span>: [<span class="tok-s">"https://app.example.com"</span>], <span class="tok-k">"allowMethods"</span>: [<span class="tok-s">"GET"</span>, <span class="tok-s">"HEAD"</span>], <span class="tok-k">"maxAge"</span>: 600 },
+  <span class="tok-k">"basicAuth"</span>: {
+    <span class="tok-k">"realm"</span>: <span class="tok-s">"Staging"</span>,
+    <span class="tok-k">"users"</span>: { <span class="tok-k">"team"</span>: <span class="tok-s">"sha256:2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"</span> }
+  }
+}</code></pre>
+
+<h2>Key reference</h2>
+<table class="tbl">
+<thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>name</code></td><td>string</td><td>Self-identifying target site (≤ 63 chars, valid site name).</td></tr>
+<tr><td><code>spaFallback</code></td><td>string · <code>false</code></td><td>Doc served on navigation misses. Default <code>"index.html"</code>; <code>false</code> disables.</td></tr>
+<tr><td><code>cleanUrls</code></td><td>boolean</td><td>Resolve extensionless paths to their <code>.html</code> file.</td></tr>
+<tr><td><code>notFound</code></td><td>string</td><td>Custom document served with a 404 status.</td></tr>
+<tr><td><code>redirects</code></td><td>array</td><td>Ordered <code>{from, to, status}</code> rules with glob + <code>:splat</code>.</td></tr>
+<tr><td><code>headers</code></td><td>array</td><td><code>{source, headers}</code> rules matched by path glob.</td></tr>
+<tr><td><code>cors</code></td><td><code>true</code> · object</td><td>Cross-origin response/preflight headers.</td></tr>
+<tr><td><code>basicAuth</code></td><td>object</td><td>HTTP Basic auth gate with per-user passwords.</td></tr>
+</tbody>
+</table>
+
+<h3>name</h3>
+<p>Lets the bundle identify itself. <code>drop publish ./dist</code> (no name argument) uses <code>_drop.json</code>'s <code>name</code>; with neither, a friendly name is generated (e.g. <code>twilight-cherry-8f3a</code>). The server still validates that <strong>you own</strong> that name, and <strong>rejects</strong> a bundle whose <code>name</code> contradicts the explicit publish target. It must pass site-name validation (≤ 63 chars) or it is ignored.</p>
+<pre><code>{ <span class="tok-k">"name"</span>: <span class="tok-s">"my-site"</span> }</code></pre>
+
+<h3>spaFallback</h3>
+<p>For single-page apps: when a navigation request matches no file, serve this document so client-side routing can take over. Defaults to <code>"index.html"</code>. Set to <code>false</code> to disable it entirely (e.g. a multi-page site that wants real 404s).</p>
+<pre><code>{ <span class="tok-k">"spaFallback"</span>: false }</code></pre>
+
+<h3>cleanUrls</h3>
+<p>When <code>true</code>, a request for <code>/about</code> tries <code>/about.html</code>. Lets you link to extensionless paths.</p>
+<pre><code>{ <span class="tok-k">"cleanUrls"</span>: true }</code></pre>
+
+<h3>notFound</h3>
+<p>The document to serve (with an actual <code>404</code> status) when nothing else matches. Pairs naturally with <code>spaFallback: false</code> on multi-page sites.</p>
+<pre><code>{ <span class="tok-k">"notFound"</span>: <span class="tok-s">"404.html"</span> }</code></pre>
+
+<h3>redirects</h3>
+<p>An ordered list of <code>{ from, to, status? }</code> rules; the <strong>first</strong> match wins. A trailing <code>*</code> in <code>from</code> is a glob whose captured tail can be substituted into <code>to</code> via <code>:splat</code>. <code>status</code> must be a 3xx code (300–399); anything else falls back to <code>301</code>.</p>
+<pre><code>{
+  <span class="tok-k">"redirects"</span>: [
+    { <span class="tok-k">"from"</span>: <span class="tok-s">"/old"</span>, <span class="tok-k">"to"</span>: <span class="tok-s">"/new"</span>, <span class="tok-k">"status"</span>: 301 },
+    { <span class="tok-k">"from"</span>: <span class="tok-s">"/docs/*"</span>, <span class="tok-k">"to"</span>: <span class="tok-s">"/help/:splat"</span>, <span class="tok-k">"status"</span>: 302 }
+  ]
+}</code></pre>
+
+<h3>headers</h3>
+<p>A list of <code>{ source, headers }</code> rules. <code>source</code> is a path glob (a trailing <code>*</code> matches any tail); <code>headers</code> is a map of header name → value. Every rule whose glob matches the request path is applied, in order — so a broad <code>/*</code> rule and a specific <code>/assets/*</code> rule can both contribute. Header names are lower-cased. This is also how you set <code>cache-control</code>.</p>
+<pre><code>{
+  <span class="tok-k">"headers"</span>: [
+    { <span class="tok-k">"source"</span>: <span class="tok-s">"/assets/*"</span>, <span class="tok-k">"headers"</span>: { <span class="tok-k">"cache-control"</span>: <span class="tok-s">"public, max-age=31536000, immutable"</span> } }
+  ]
+}</code></pre>
+
+<h3>cors</h3>
+<p>Set to <code>true</code> for permissive defaults (allow any origin, methods <code>GET, HEAD, OPTIONS</code>), or pass an object to tune it:</p>
+<table class="tbl">
+<thead><tr><th>Field</th><th>Type</th><th>Default / notes</th></tr></thead>
+<tbody>
+<tr><td><code>allowOrigins</code></td><td>string[]</td><td><code>["*"]</code>. Use explicit origins to restrict.</td></tr>
+<tr><td><code>allowMethods</code></td><td>string[]</td><td><code>["GET","HEAD","OPTIONS"]</code></td></tr>
+<tr><td><code>allowHeaders</code></td><td>string[]</td><td>Sent as <code>access-control-allow-headers</code> when set.</td></tr>
+<tr><td><code>exposeHeaders</code></td><td>string[]</td><td>Sent as <code>access-control-expose-headers</code> when set.</td></tr>
+<tr><td><code>maxAge</code></td><td>number</td><td>Preflight cache seconds.</td></tr>
+<tr><td><code>credentials</code></td><td>boolean</td><td>When <code>true</code> with a <code>*</code> origin, the request origin is echoed back.</td></tr>
+</tbody>
+</table>
+<pre><code>{
+  <span class="tok-k">"cors"</span>: {
+    <span class="tok-k">"allowOrigins"</span>: [<span class="tok-s">"https://app.example.com"</span>],
+    <span class="tok-k">"allowMethods"</span>: [<span class="tok-s">"GET"</span>, <span class="tok-s">"HEAD"</span>],
+    <span class="tok-k">"maxAge"</span>: 600
+  }
+}</code></pre>
+<div class="note tip"><span class="lbl">Tip</span><p>With explicit origins, a <code>Vary: Origin</code> header is added automatically so caches don't leak the wrong allow-origin between callers.</p></div>
+
+<h3>basicAuth</h3>
+<p>Gate the whole site behind HTTP Basic auth. <code>users</code> maps a username to a password, stored either as plaintext (<code>"plain"</code>) or hashed as <code>"sha256:&lt;hex&gt;"</code>. An optional <code>realm</code> is shown in the browser prompt. Comparisons are constant-time.</p>
+<pre><code>{
+  <span class="tok-k">"basicAuth"</span>: {
+    <span class="tok-k">"realm"</span>: <span class="tok-s">"Staging"</span>,
+    <span class="tok-k">"users"</span>: {
+      <span class="tok-k">"team"</span>: <span class="tok-s">"sha256:2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"</span>,
+      <span class="tok-k">"guest"</span>: <span class="tok-s">"plain"</span>
+    }
+  }
+}</code></pre>
+<div class="note warn"><span class="lbl">Note</span><p>Publishing a <code>_drop.json</code> with <code>basicAuth</code> — like setting <code>visibility=password</code> — makes the edge require an <code>Authorization: Basic</code> header before serving anything. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for how this interacts with org-level visibility modes.</p></div>
+
+<div class="next">
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+  <a href="roles-visibility.html"><div class="d">Next →</div><div class="t">Roles &amp; Visibility</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

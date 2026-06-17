@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLI, MCP &amp; Dashboard · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (_drop.json)</a>
+      <a href="cli-mcp.html" class="active">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>CLI, MCP &amp; Dashboard</h1>
+<p class="lead">Three ways to drive Drop: the <code>drop</code> command line, an MCP server for AI clients, and a browser dashboard. All three share one identity and the same <code>/v1/*</code> endpoints.</p>
+
+<div class="cards">
+  <div class="card"><div class="n">TERMINAL</div><h3>CLI</h3><p>Run <code>drop</code> via <code>npx</code> from git, or install a persistent command. Best for scripts and CI.</p></div>
+  <div class="card"><div class="n">AI CLIENT</div><h3>MCP server</h3><p>Publish and manage in natural language from any MCP client — <em>"publish ./dist as myapp"</em>.</p></div>
+  <div class="card"><div class="n">BROWSER</div><h3>Dashboard</h3><p>Sign in with Google to list sites, roll back, manage collaborators, transfer, and delete.</p></div>
+</div>
+
+<div class="note tip"><span class="lbl">Note</span><p>Publishing happens in the CLI or MCP. The dashboard manages existing sites but does not upload new ones.</p></div>
+
+<h2>CLI</h2>
+<p>The CLI is <code>bin/drop.ts</code>, bundled to <code>dist/drop.js</code>. It targets <code>*.drop.example.com</code> and stores its session in <code>~/.config/drop/session.json</code> — the same file the MCP server uses.</p>
+
+<h3>Install options</h3>
+<p><strong>Option 1 — <code>npx</code> straight from git (no install, recommended).</strong> <code>npx</code> clones the repo, runs the <code>prepare</code> step (esbuild bundles both <code>dist/drop.js</code> and <code>dist/mcp.js</code>), and runs it. Works on any machine with Node 18+.</p>
+<pre><code>npx git+https://git.example.com/scm/&lt;team&gt;/drop.git publish ./dist myapp
+# pin a tag/branch:  npx git+https://…/drop.git#v0.1.0 ls
+# set the API once:  export DROP_API=https://api.drop.example.com</code></pre>
+<p><strong>Option 2 — <code>install.sh</code> (persistent <code>drop</code> command).</strong> Idempotent, no sudo; it puts a <code>drop</code> command on your PATH.</p>
+<pre><code>git clone &lt;repo&gt; &amp;&amp; cd drop
+./install.sh --api https://api.drop.example.com
+drop publish ./dist myapp</code></pre>
+
+<h3>Auth</h3>
+<p><code>drop login</code> signs in with Google <strong>through the Drop server</strong> — the API owns the Google credentials and hands back a session token, so no Google client id/secret lives on your machine. Clients need <strong>only <code>DROP_API</code></strong> (or pass <code>--api &lt;url&gt;</code>); it defaults to <code>https://api.drop.example.com</code>. For local work against <code>make start</code>, <code>drop dev-login &lt;sub&gt; &lt;email&gt;</code> saves a session without Google, and requires <code>DROP_DEV_AUTH=1</code> on the API.</p>
+
+<h3>Command reference</h3>
+<table class="tbl">
+<thead><tr><th>Command</th><th>What it does</th><th>Example</th></tr></thead>
+<tbody>
+<tr><td><code>login</code></td><td>Sign in with Google via the Drop server; saves the session</td><td><code>drop login</code></td></tr>
+<tr><td><code>dev-login &lt;sub&gt; &lt;email&gt;</code></td><td>Local-only login (requires <code>DROP_DEV_AUTH=1</code> on the API)</td><td><code>drop dev-login alice alice@example.com</code></td></tr>
+<tr><td><code>logout</code></td><td>Clear the saved session</td><td><code>drop logout</code></td></tr>
+<tr><td><code>publish &lt;dir&gt; [name]</code></td><td>Publish a built folder; name optional — taken from <code>_drop.json</code>, else generated</td><td><code>drop publish ./dist myapp</code></td></tr>
+<tr><td><code>rollback &lt;name&gt;</code></td><td>Roll back to the previous version, or <code>--to &lt;version&gt;</code> for a specific one</td><td><code>drop rollback myapp --to v3</code></td></tr>
+<tr><td><code>info &lt;name&gt;</code></td><td>Show site metadata</td><td><code>drop info myapp</code></td></tr>
+<tr><td><code>members &lt;name&gt;</code></td><td>Show owner + collaborators</td><td><code>drop members myapp</code></td></tr>
+<tr><td><code>ls</code></td><td>List your sites</td><td><code>drop ls</code></td></tr>
+<tr><td><code>rm &lt;name&gt;</code></td><td>Unpublish a site</td><td><code>drop rm myapp</code></td></tr>
+<tr><td><code>share &lt;name&gt; &lt;email&gt;</code></td><td>Add a collaborator</td><td><code>drop share myapp bob@example.com</code></td></tr>
+<tr><td><code>unshare &lt;name&gt; &lt;email&gt;</code></td><td>Remove a collaborator</td><td><code>drop unshare myapp bob@example.com</code></td></tr>
+<tr><td><code>transfer &lt;name&gt; &lt;email&gt;</code></td><td>Transfer ownership</td><td><code>drop transfer myapp bob@example.com</code></td></tr>
+</tbody>
+</table>
+<p>A global <code>--api &lt;url&gt;</code> flag sets the control-plane base URL for any command. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for who may run what, and <a href="configuration.html">Configuration</a> for how <code>_drop.json</code> picks the publish target.</p>
+
+<h2>MCP server</h2>
+<p>Drop ships an <strong>MCP server</strong>, so any MCP client (Claude Code/Desktop, Cursor, …) can publish and manage sites in natural language. The client launches the server on demand via <code>npx</code> — nothing to install. The <code>prepare</code> step that runs on clone builds the server bundle at <code>dist/mcp.js</code>, which is what makes <code>npx … drop-mcp</code> work without a separate build.</p>
+
+<p>Add to your MCP config (e.g. Claude Code <code>.mcp.json</code>):</p>
+<pre><code>{
+  <span class="tok-k">"mcpServers"</span>: {
+    <span class="tok-k">"drop"</span>: {
+      <span class="tok-k">"command"</span>: <span class="tok-s">"npx"</span>,
+      <span class="tok-k">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"--package"</span>, <span class="tok-s">"git+https://git.example.com/scm/&lt;team&gt;/drop.git"</span>, <span class="tok-s">"drop-mcp"</span>],
+      <span class="tok-k">"env"</span>: { <span class="tok-k">"DROP_API"</span>: <span class="tok-s">"https://api.drop.example.com"</span> }
+    }
+  }
+}</code></pre>
+
+<div class="note"><span class="lbl">Note</span><p>The client needs <strong>only <code>DROP_API</code></strong> — login is server-mediated, so no Google client id/secret lives on anyone's machine. The server reads/writes the same <code>~/.config/drop/session.json</code> as the CLI, so <code>login</code> once and both work.</p></div>
+
+<h3>Tools exposed</h3>
+<table class="tbl">
+<thead><tr><th>Tool</th><th>Inputs</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><code>login</code></td><td><span class="cx">—</span></td><td>Sign in to Drop with Google (opens a browser via the Drop server)</td></tr>
+<tr><td><code>dev_login</code></td><td><code>email</code></td><td>Local-only login (requires <code>DROP_DEV_AUTH=1</code> on the API)</td></tr>
+<tr><td><code>publish</code></td><td><code>directory</code>, <code>name?</code></td><td>Publish a built static folder; returns the live URL</td></tr>
+<tr><td><code>list_sites</code></td><td><span class="cx">—</span></td><td>List sites you own or collaborate on</td></tr>
+<tr><td><code>site_info</code></td><td><code>name</code></td><td>Show owner, collaborators, current version, and history</td></tr>
+<tr><td><code>rollback</code></td><td><code>name</code>, <code>version?</code></td><td>Roll a site back to its previous (or a specific) version</td></tr>
+<tr><td><code>delete_site</code></td><td><code>name</code></td><td>Unpublish a site (owner only)</td></tr>
+<tr><td><code>add_collaborator</code></td><td><code>name</code>, <code>email</code></td><td>Grant another user publish access (owner only)</td></tr>
+<tr><td><code>remove_collaborator</code></td><td><code>name</code>, <code>email</code></td><td>Revoke a collaborator (owner only)</td></tr>
+<tr><td><code>transfer_site</code></td><td><code>name</code>, <code>email</code></td><td>Transfer ownership to another user (owner only)</td></tr>
+</tbody>
+</table>
+
+<p>For local dev against <code>make start</code>, point the server at the built bundle and dev-auth:</p>
+<pre><code>{ "mcpServers": { "drop": {
+  "command": "node", "args": ["/abs/path/to/drop/dist/mcp.js"],
+  "env": { "DROP_API": "http://localhost:8473", "DROP_DEV_AUTH": "1" } } } }</code></pre>
+
+<h2>Dashboard</h2>
+<p>The control-plane API serves a dashboard at its root — open the API URL in a browser (locally <code>http://localhost:8473/</code>). Click <strong>Sign in with Google</strong> (server-mediated, sets an HttpOnly cookie), then you get a list of your sites and a per-site drawer to:</p>
+<ul>
+<li>roll back versions,</li>
+<li>add and remove collaborators,</li>
+<li>transfer ownership, and</li>
+<li>delete the site.</li>
+</ul>
+<p>It uses the same <code>/v1/*</code> endpoints and identity as the CLI and MCP. Platform admins get an extra <span class="pill">all sites</span> tab that pages through every site regardless of ownership.</p>
+
+<div class="note warn"><span class="lbl">Reminder</span><p>Publishing stays in the CLI and MCP — the dashboard does not upload sites.</p></div>
+
+<div class="next">
+  <a href="roles-visibility.html"><div class="d">Next →</div><div class="t">Roles &amp; Visibility</div></a>
+  <a href="architecture.html"><div class="d">Next →</div><div class="t">Architecture</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

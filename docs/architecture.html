@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Architecture · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (_drop.json)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html" class="active">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+
+    <p class="crumbs">Reference</p>
+    <h1>Architecture</h1>
+    <p class="lead">Two stateless Hono services share a Postgres metadata store and an S3 byte store.
+    The <strong>api</strong> is the control plane (auth, publish, admin, dashboard; owns migrations); the
+    <strong>edge</strong> is the data plane (serves bytes by hostname, read-only against Postgres).</p>
+
+    <p>File <strong>bytes</strong> live in S3 (<code>sites/&lt;name&gt;/files/&lt;verId&gt;/…</code>).
+    Everything else — sites, members, versions, users, auth handles — lives in Postgres. Ports: api
+    <code>8473</code>, edge <code>8474</code>, Postgres <code>5432</code>, S3/Floci <code>4566</code>
+    (local), portless <code>443</code> (local, optional).</p>
+
+    <h2>1. System overview</h2>
+    <p>The api and edge are the only moving parts; both scale horizontally because all shared state is in
+    Postgres + S3. The edge never writes and never migrates.</p>
+    <div class="mermaid" id="m1"></div>
+
+    <h2>2. Publish flow</h2>
+    <p><code>drop publish ./dist myapp</code> streams a tarball to the api, which writes the bytes to S3 and
+    flips the live pointer in Postgres. The atomic name claim is <code>INSERT … ON CONFLICT DO NOTHING</code>
+    (first writer wins); the pointer flip is a row-locked transaction (it replaced the old S3 ETag CAS).</p>
+    <div class="mermaid" id="m2"></div>
+
+    <h2>3. Serve flow</h2>
+    <p>A browser requests <code>https://&lt;name&gt;.drop.example.com/path</code>; the edge resolves the site,
+    enforces visibility, and serves bytes. The long-lived in-memory cache holds only the small per-site
+    pointer (10&nbsp;s TTL) — asset bytes are never <em>retained</em> in memory: they're served from the
+    node-local disk cache (OS page cache keeps hot files at RAM speed) or fetched per-request from S3 and
+    freed after the response, so memory use is bounded by concurrency, not by site count.</p>
+    <div class="mermaid" id="m3"></div>
+
+    <h2>4. Data model</h2>
+    <p>Exactly one <code>owner</code> per site is enforced by a partial unique index
+    (<code>unique(site_name) where role='owner'</code>). Deleting a site cascades to its members and versions.
+    Authorization is two-axis — platform role (<code>users.role</code>) + per-site role
+    (<code>site_members.role</code>), resolved by <code>can(actor, action)</code> in
+    <code>src/authz/permissions.ts</code>. <a href="roles-visibility.html">Visibility</a> is an independent
+    axis (who may <em>view</em> the served pages) from roles (who may <em>manage</em> the site).</p>
+    <div class="mermaid" id="m4"></div>
+
+    <h2>5. Local development topology</h2>
+    <p><code>make start</code> runs api/edge as Node processes against Floci (S3) and Postgres in podman.
+    <code>make portless</code> (optional) fronts them with trusted HTTPS on <code>:443</code>. Without
+    portless, reach the edge at <code>http://&lt;name&gt;.drop.localhost:8474</code> and the api at
+    <code>http://localhost:8473</code>. The edge reads <code>x-forwarded-host</code> so the site name
+    survives the proxy. See <a href="getting-started.html">Getting started</a>.</p>
+    <div class="mermaid" id="m5"></div>
+
+    <h2>6. Production topology (Kubernetes)</h2>
+    <p>Helm (<code>infra/helm/drop</code>) deploys api + edge behind one ingress. Postgres is an
+    <strong>external managed</strong> database (RDS / CloudSQL); S3 is the real bucket via IRSA. Migrations
+    run on api-pod boot under a <code>pg_advisory_lock</code>, so a multi-replica rollout is safe — one pod
+    migrates, the rest wait then serve. <code>DROP_DATABASE_URL</code> is injected from a Secret into both
+    deployments. See <a href="deployment.html">Deployment</a>.</p>
+    <div class="mermaid" id="m6"></div>
+
+    <div class="next">
+      <a href="deployment.html"><div class="d">Next →</div><div class="t">Deployment</div></a>
+      <a href="roles-visibility.html"><div class="d">Related →</div><div class="t">Roles &amp; Visibility</div></a>
+    </div>
+    <footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+
+  </article></main>
+</div>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  // Mermaid sources are fed via textContent so the browser never HTML-parses them.
+  const diagrams = {
+m1: `flowchart TB
+    subgraph clients["Clients"]
+        cli["drop CLI<br/>(npx git-URL)"]
+        mcp["MCP server<br/>(AI clients)"]
+        dash["Dashboard<br/>(browser)"]
+        viewer["Site viewers<br/>(browser)"]
+    end
+    subgraph drop["Drop services (stateless Hono)"]
+        api["api · control plane<br/>:8473<br/>auth · publish · rollback<br/>share · visibility · admin · dashboard"]
+        edge["edge · data plane<br/>:8474<br/>host routing · visibility gate<br/>SPA fallback · disk cache"]
+    end
+    subgraph stores["State"]
+        pg[("Postgres<br/>users · sites · site_members<br/>versions · auth_handles")]
+        s3[("S3 / Floci<br/>sites/&lt;name&gt;/files/&lt;verId&gt;/…")]
+    end
+    google["Google OAuth<br/>(API is the client)"]
+    cli -->|"POST /v1/* (Bearer)"| api
+    mcp -->|"POST /v1/* (Bearer)"| api
+    dash -->|"/v1/* (cookie)"| api
+    viewer -->|"GET https://&lt;name&gt;.drop.…"| edge
+    api -->|"login / token mint"| google
+    api -->|"metadata R/W<br/>(claim, CAS, members)"| pg
+    api -->|"write file bytes<br/>prune old versions"| s3
+    api -.->|"migrate on boot<br/>(pg_advisory_lock)"| pg
+    edge -->|"pointer + visibility<br/>(10s mem cache)"| pg
+    edge -->|"read bytes<br/>(disk cache → S3)"| s3`,
+m2: `sequenceDiagram
+    autonumber
+    participant C as CLI / MCP
+    participant A as api
+    participant PG as Postgres
+    participant S3 as S3
+    C->>A: POST /v1/sites/myapp/versions (tar.gz, Bearer)
+    A->>A: verify token → identity (SessionVerifier)
+    A->>PG: getSite(myapp)
+    alt site does not exist
+        A->>PG: upsert user (FK prerequisite for owner membership)
+        A->>PG: claimSite — INSERT … ON CONFLICT DO NOTHING + owner member [tx]
+    end
+    A->>A: can(actor, "publish")?  (else 403)
+    loop each file in tarball
+        A->>S3: put sites/myapp/files/verId/path
+    end
+    note over A: capture _drop.json (config, not served)
+    A->>PG: putVersion(verId, fileCount, bytes, config)
+    A->>PG: updateSite → current_version, config,<br/>visibility=password if basicAuth [SELECT … FOR UPDATE tx]
+    A-->>C: url, version, files, bytes
+    A--)A: prune (best-effort): each version beyond keepVersions,<br/>skip the live one, else delete its S3 prefix + PG row`,
+m3: `sequenceDiagram
+    autonumber
+    participant B as Browser
+    participant E as edge
+    participant PG as Postgres
+    participant S3 as S3
+    B->>E: GET /path  (Host / X-Forwarded-Host = name.drop.…)
+    E->>E: siteFromHost(x-forwarded-host ?? host) → name
+    alt pointer cache miss (>10s)
+        E->>PG: getPointer(name) → version, config, visibility, passwordHash
+    end
+    alt no current version
+        E-->>B: 404
+    else visibility = private
+        E-->>B: 403 (fail closed — viewer auth is a later feature)
+    end
+    opt config.basicAuth present OR visibility = password
+        E->>E: basic-auth vs config.basicAuth users / passwordHash
+        opt missing/bad credentials
+            E-->>B: 401 WWW-Authenticate
+        end
+    end
+    E->>E: CORS · redirects · exact / cleanUrls / SPA fallback / 404
+    alt disk cache hit
+        E-->>B: 200 bytes (from disk / OS page cache)
+    else
+        E->>S3: get sites/name/files/version/key
+        E--)E: write-through to disk cache
+        E-->>B: 200 bytes
+    end`,
+m4: `erDiagram
+    users ||--o{ site_members : "is"
+    sites ||--o{ site_members : "has"
+    sites ||--o{ versions : "has"
+    users {
+        text email PK
+        text name
+        text role "admin | member"
+        text status "active | suspended"
+        timestamptz last_login_at
+    }
+    sites {
+        text name PK
+        text current_version "nullable"
+        text visibility "public|private|password"
+        text password_hash "nullable"
+        jsonb config "current _drop.json"
+    }
+    site_members {
+        text site_name PK "FK sites; PK (site_name,email)"
+        text email PK "FK users"
+        text role "owner | editor | viewer"
+    }
+    versions {
+        text site_name PK "FK sites; PK (site_name,id)"
+        text id PK "sortable verId"
+        text published_by
+        timestamptz created_at
+        int file_count
+        bigint bytes
+        jsonb config
+    }
+    auth_handles {
+        text id PK "OAuth state"
+        text poll_token
+        text code_verifier
+        text status "pending|done|denied"
+        text mode "cli | browser"
+        text token "nullable"
+    }`,
+m5: `flowchart LR
+    b["Browser / CLI"]
+    subgraph pl["portless (optional) :443<br/>local CA · ~/.portless/ca.pem"]
+        direction TB
+        r{{"host router<br/>--wildcard"}}
+    end
+    subgraph host["host (Node processes)"]
+        api["api :8473"]
+        edge["edge :8474"]
+    end
+    subgraph podman["podman containers"]
+        floci[("Floci S3 :4566<br/>vol: drop-floci-data")]
+        pg[("Postgres :5432<br/>vol: drop-pg-data")]
+    end
+    b -->|"https://api.drop.localhost"| r
+    b -->|"https://&lt;name&gt;.drop.localhost"| r
+    r -->|"alias api.drop"| api
+    r -->|"alias drop + wildcard"| edge
+    api --> floci
+    api --> pg
+    edge --> floci
+    edge --> pg`,
+m6: `flowchart TB
+    dns["DNS<br/>api.drop.example.com<br/>*.drop.example.com"]
+    lb["Load balancer + TLS<br/>(ALB + ACM wildcard)"]
+    subgraph k8s["Kubernetes"]
+        ing["Ingress"]
+        apiD["api Deployment<br/>(replicas, HPA)<br/>migrates on boot"]
+        edgeD["edge Deployment<br/>(replicas, HPA)<br/>emptyDir disk cache"]
+    end
+    s3[("S3 bucket<br/>(IRSA, no keys)")]
+    rds[("Managed Postgres<br/>(RDS / CloudSQL)")]
+    dns --> lb --> ing
+    ing -->|"host api.*"| apiD
+    ing -->|"host *.*"| edgeD
+    apiD --> s3
+    apiD --> rds
+    edgeD --> s3
+    edgeD --> rds`,
+  };
+  for (const [id, src] of Object.entries(diagrams)) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = src;
+  }
+  mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict", flowchart: { useMaxWidth: true } });
+  try { await mermaid.run({ querySelector: ".mermaid" }); } catch (e) { console.error(e); }
+</script>
+</body>
+</html>

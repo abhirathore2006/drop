@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deployment · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (_drop.json)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html" class="active">Deployment</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Reference</p>
+<h1>Deployment</h1>
+<p class="lead">Run Drop on EC2 or Kubernetes — the <strong>api</strong> and <strong>edge</strong> behind one ingress, with external managed Postgres (RDS / CloudSQL) and S3.</p>
+
+<p>Drop is two processes from one image: a control-plane <strong>api</strong> and a read-only serving <strong>edge</strong>. Both sit behind a single ingress. All metadata lives in an external managed Postgres; the served file bytes live in S3 (the chart bundles neither — backups and HA are the platform's responsibility). The api runs schema migrations on boot under a Postgres <code>pg_advisory_lock</code>, so a multi-replica rollout is safe: one pod migrates while the rest wait, then serve. The edge connects read-only and never migrates.</p>
+
+<div class="note tip"><span class="lbl">Note</span><p>The Helm chart deploys api + edge as Deployments behind one Ingress. For a plain EC2 / VM install, run the same image with the command overridden per process (<code>node dist/api.js</code> / <code>node dist/edge.js</code>) and set the same <code>DROP_*</code> environment variables shown below.</p></div>
+
+<h2>Prerequisites</h2>
+<div class="cards">
+  <div class="card"><div class="n">IMAGE</div><h3>Image in a registry</h3><p>Build and push one image (both bundles): <code>podman build -f infra/Dockerfile -t &lt;repo&gt;/drop:&lt;tag&gt; .</code> then <code>podman push</code> to ECR.</p></div>
+  <div class="card"><div class="n">TLS</div><h3>Wildcard TLS</h3><p>A wildcard certificate for <code>*.&lt;baseDomain&gt;</code> — via ACM (ingress annotations) or a TLS Secret.</p></div>
+  <div class="card"><div class="n">IAM</div><h3>S3 role (IRSA)</h3><p>An IAM role with read/write on the S3 bucket, referenced from <code>serviceAccount.annotations</code>. No access keys — auth is via the pod's role.</p></div>
+  <div class="card"><div class="n">DB</div><h3>Managed Postgres</h3><p>RDS / CloudSQL / company DB reachable from the cluster. The chart does not bundle one.</p></div>
+  <div class="card"><div class="n">SECRET</div><h3>Secret with credentials</h3><p>A Secret holding <code>DROP_GOOGLE_CLIENT_SECRET</code>, <code>DROP_SESSION_SECRET</code>, and <code>DROP_DATABASE_URL</code> (e.g. via External Secrets), or set <code>secret.create=true</code>.</p></div>
+  <div class="card"><div class="n">OAUTH</div><h3>Google Web client</h3><p>A Google <strong>Web application</strong> OAuth client whose redirect URI is <code>https://&lt;apiHost&gt;/auth/callback</code>.</p></div>
+</div>
+
+<h2>Helm install</h2>
+<p>Install (or upgrade) the chart into its own namespace, pointing it at your registry, domains, bucket, and Secret:</p>
+<pre><code>helm upgrade --install drop infra/helm/drop \
+  --namespace drop --create-namespace \
+  --set image.repository=&lt;acct&gt;.dkr.ecr.&lt;region&gt;.amazonaws.com/drop \
+  --set image.tag=0.1.0 \
+  --set baseDomain=drop.example.com --set apiHost=api.drop.example.com \
+  --set config.s3Bucket=drop-sites --set config.s3Region=&lt;region&gt; \
+  --set config.allowedDomains=example.com \
+  --set googleClientId=&lt;id&gt;.apps.googleusercontent.com \
+  --set secret.existingSecret=drop-secrets \
+  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::&lt;acct&gt;:role/drop-s3 \
+  --set ingress.className=alb \
+  --set ingress.annotations."alb\.ingress\.kubernetes\.io/certificate-arn"=&lt;acm-arn&gt;</code></pre>
+<p>Then point DNS at the ingress / ALB:</p>
+<table class="tbl">
+<thead><tr><th>Record</th><th>Resolves to</th><th>Serves</th></tr></thead>
+<tbody>
+<tr><td><code>api.&lt;baseDomain&gt;</code></td><td>ingress / ALB</td><td>Control plane, dashboard, OAuth callback (api)</td></tr>
+<tr><td><code>*.&lt;baseDomain&gt;</code></td><td>ingress / ALB</td><td>Every published site (edge, wildcard)</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="lbl">Note</span><p>Run <code>helm lint</code> / <code>helm template</code> to preview the rendered manifests, and see <code>values.yaml</code> for every knob. Keep the edge reachable only on the internal network.</p></div>
+
+<h2>Environment variables</h2>
+<p>Non-secret values render into a ConfigMap (pod env); secrets are read from the referenced Secret. The key <code>DROP_*</code> variables:</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>Set in</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>DROP_DATABASE_URL</code></td><td>Secret</td><td>Managed Postgres DSN, e.g. <code>postgres://user:pass@host:5432/drop</code>. Required; the api migrates on boot under an advisory lock.</td></tr>
+<tr><td><code>DROP_S3_*</code></td><td>ConfigMap</td><td>Bucket / region (<code>config.s3Bucket</code>, <code>config.s3Region</code>). Leave <code>DROP_S3_ENDPOINT</code> empty for real AWS S3; set it for any S3-compatible store.</td></tr>
+<tr><td><code>DROP_BASE_DOMAIN</code></td><td>ConfigMap</td><td>Sites are served at <code>*.&lt;baseDomain&gt;</code> (<code>baseDomain</code> value).</td></tr>
+<tr><td><code>DROP_PUBLIC_URL</code></td><td>ConfigMap</td><td>The api's externally-reachable base (defaults to <code>https://&lt;apiHost&gt;</code>). Its <code>/auth/callback</code> is the OAuth redirect.</td></tr>
+<tr><td><code>DROP_GOOGLE_CLIENT_ID</code></td><td>ConfigMap</td><td>Google Web OAuth client id (not secret).</td></tr>
+<tr><td><code>DROP_GOOGLE_CLIENT_SECRET</code></td><td>Secret</td><td>Google OAuth client secret — held only on the server.</td></tr>
+<tr><td><code>DROP_SESSION_SECRET</code></td><td>Secret</td><td>HS256 key signing Drop session tokens. Rotate to revoke all sessions. Generate with <code>openssl rand -hex 32</code>.</td></tr>
+<tr><td><code>DROP_ALLOWED_DOMAINS</code></td><td>ConfigMap</td><td>Comma-separated Workspace domains allowed to sign in (e.g. <code>example.com</code>). Empty = any Google account.</td></tr>
+<tr><td><code>DROP_ALLOWED_EMAILS</code></td><td>ConfigMap</td><td>Optional per-person allowlist layered on top of the domain rule. Empty = no per-email limit.</td></tr>
+<tr><td><code>DROP_ADMINS</code></td><td>ConfigMap</td><td>Comma-separated emails seeded as platform admins on api boot (the "all sites" view). Does not bypass per-site ownership.</td></tr>
+<tr><td><code>DROP_EDGE_DISK_CACHE</code></td><td>ConfigMap (edge)</td><td>Node-local / per-pod directory where the edge caches asset bytes on disk, e.g. <code>/var/cache/drop</code> (chart mounts <code>/cache</code>).</td></tr>
+</tbody>
+</table>
+<div class="note warn"><span class="lbl">Set on the API</span><p>For real login set <code>DROP_DEV_AUTH=0</code>. If the api egresses through a TLS-inspecting proxy, set <code>NODE_EXTRA_CA_CERTS</code> to the corp CA so it can reach <code>accounts.google.com</code>. See <a href="configuration.html">Configuration</a> for the full surface.</p></div>
+
+<h2>Google OAuth setup</h2>
+<p>Login is <strong>server-mediated</strong>: the api <em>is</em> the Google OAuth client and issues its own session tokens, so the client secret lives only on the server — never on a developer's machine. Clients (CLI + MCP) need only <code>DROP_API</code>.</p>
+<ol>
+<li>In <a href="https://console.cloud.google.com">console.cloud.google.com</a>, pick or create a project.</li>
+<li><strong>APIs &amp; Services → OAuth consent screen</strong> — set user type to <strong>Internal</strong> (your <code>example.com</code> Workspace; limits sign-in to the org, no Google verification needed).</li>
+<li>Add scopes <code>openid</code>, <code>email</code>, and <code>profile</code> (all non-sensitive).</li>
+<li><strong>Credentials → Create credentials → OAuth client ID</strong> — application type <strong>Web application</strong>.</li>
+<li>Set the <strong>Authorized redirect URI</strong> to <code>${DROP_PUBLIC_URL}/auth/callback</code> exactly (scheme, host, and path must match — e.g. <code>https://api.drop.example.com/auth/callback</code>).</li>
+<li>Copy the <strong>Client ID</strong> into <code>DROP_GOOGLE_CLIENT_ID</code> and the <strong>Client secret</strong> into the Secret as <code>DROP_GOOGLE_CLIENT_SECRET</code>.</li>
+<li>Set <code>DROP_ALLOWED_DOMAINS=example.com</code> to restrict login to your Workspace.</li>
+</ol>
+<div class="note danger"><span class="lbl">redirect_uri_mismatch</span><p>The URI registered in the Google client must match <code>DROP_PUBLIC_URL</code> + <code>/auth/callback</code> character-for-character. If you change <code>DROP_PUBLIC_URL</code>, update the Google client too.</p></div>
+
+<h2>Edge caching &amp; scaling</h2>
+<p>The edge is a stateless cache in front of S3 (the source of truth). It caches asset bytes on a per-pod directory set by <code>DROP_EDGE_DISK_CACHE</code> — in the chart an <strong>emptyDir</strong> (ephemeral node-local disk) mounted at <code>/cache</code>. Because it is just a cache, it needs no persistence and no sharing: per-pod + ephemeral is exactly right and scales to any replica count. A new or restarted pod re-warms from S3. The long-lived in-memory cache holds only the small per-site version pointer (10s TTL); asset bytes come from the disk cache (the OS page cache keeps hot files at RAM speed) or are fetched per-request from S3 and freed after the response.</p>
+<table class="tbl">
+<thead><tr><th>Knob</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>edge.diskCache.sizeBytes</code></td><td>5 GiB</td><td>App LRU cap → <code>DROP_EDGE_DISK_CACHE_BYTES</code>.</td></tr>
+<tr><td><code>edge.diskCache.sizeLimit</code></td><td>6Gi</td><td>emptyDir node-disk cap (a little above <code>sizeBytes</code>).</td></tr>
+</tbody>
+</table>
+<p>For autoscaling, set <code>api.autoscaling.enabled</code> / <code>edge.autoscaling.enabled</code> to turn on an HPA on CPU (api 2–6 replicas, edge 2–10 by default). CloudFront in front of the edge is optional.</p>
+<table class="tbl">
+<thead><tr><th>Process</th><th>Stateful?</th><th>Migrates DB</th><th>HPA default</th></tr></thead>
+<tbody>
+<tr><td><code>api</code></td><td><span class="cx">—</span> (DB + S3 external)</td><td><span class="ck">✓</span> on boot, advisory lock</td><td>2–6</td></tr>
+<tr><td><code>edge</code></td><td><span class="cx">—</span> (disk = cache only)</td><td><span class="cx">—</span> read-only</td><td>2–10</td></tr>
+</tbody>
+</table>
+
+<div class="next">
+  <a href="architecture.html"><div class="d">Next →</div><div class="t">Architecture</div></a>
+  <a href="index.html"><div class="d">Next →</div><div class="t">Overview</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>
