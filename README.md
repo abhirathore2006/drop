@@ -2,7 +2,7 @@
 
 Self-hosted, Surge.sh-style static-site publishing for `*.drop.example.com`.
 Push a built folder, get a URL. **TypeScript on Node (v24, see `.nvmrc`);
-S3-compatible storage only — no database**; gated by Google login.
+metadata in Postgres, file bytes in S3**; gated by Google login.
 (Bun is used only to run the test suite.)
 
 ```
@@ -14,12 +14,17 @@ $ drop publish ./dist myapp
 
 ## How it works
 
-- **`bin/api.ts`** — control plane (Hono): Google-ID-token auth, atomic name claim
-  (`If-None-Match`), unpack upload into a versioned `files/` prefix, CAS-flip the
-  live pointer in `site.json` (`If-Match`).
-- **`bin/edge.ts`** — stateless serving edge (Hono): reads `site.json` (cached) →
-  streams `files/<currentVersion>/...` with route-aware SPA fallback. Talks to S3 only.
-- **`bin/drop.ts`** — the CLI, compiled to a single binary via `bun build --compile`.
+- **`bin/api.ts`** — control plane (Hono): server-mediated Google login, atomic name
+  claim (Postgres `INSERT … ON CONFLICT`), unpack the upload into a versioned `files/`
+  prefix in S3, flip the live pointer in Postgres (row-locked transaction). Runs schema
+  migrations on boot.
+- **`bin/edge.ts`** — stateless serving edge (Hono): reads the site pointer from
+  Postgres (cached) → streams `files/<currentVersion>/...` from S3 with route-aware SPA
+  fallback and visibility enforcement.
+- **`bin/drop.ts`** — the CLI (run via `npx` / a Node bundle).
+
+> 📐 **Diagrams:** see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the system
+> overview, publish/serve request flows, the data model, and local-vs-prod topology.
 
 **Metadata lives in Postgres; file bytes live in S3.** The served assets are the
 only thing in object storage:
@@ -96,6 +101,36 @@ Other targets: `make status`, `make logs`, `make restart`, `make stop`
 volumes). Published sites + metadata persist across restarts in named volumes. The edge routes by `Host` header, so
 either curl with `-H "Host: <name>.drop.localhost"` or add
 `127.0.0.1 <name>.drop.localhost` to `/etc/hosts` to view in a browser.
+
+### Seamless local URLs (optional, via portless)
+
+By default the edge is at `http://<name>.drop.localhost:8474`. For a
+production-shaped experience — **trusted HTTPS, no port numbers** — front the
+running stack with [portless](https://portless.sh):
+
+```bash
+npm i -g portless        # one-time (Node 24+)
+make start               # api :8473 + edge :8474 as usual
+make portless            # registers a local-CA HTTPS proxy on :443
+```
+
+You then get, with a browser-trusted certificate and no ports:
+
+- `https://api.drop.localhost` → the control plane + dashboard (api)
+- `https://<name>.drop.localhost` → any published site (edge, wildcard)
+
+portless runs a reverse proxy on `:443` and forwards by hostname:
+`alias api.drop → :8473`, `alias drop → :8474`, plus `--wildcard` so every
+`*.drop.localhost` falls through to the edge (which routes by `Host`). The edge
+honors `x-forwarded-host`, so the site name survives the proxy — and the
+`https://<name>.drop.localhost` URL that `drop publish` prints now resolves
+directly. `make portless-stop` tears the proxy down.
+
+> The `:443` proxy is a single shared portless daemon and `--wildcard` only takes
+> effect at start, so `make portless` **restarts** it to guarantee the wildcard
+> route (persisted aliases survive). Real Google login locally still uses the
+> loopback URL — Google won't accept a `.localhost` OAuth redirect; portless shines
+> for dev-auth, the dashboard, and viewing sites.
 
 > Prefer everything in containers? `make -C infra up` builds + runs api/edge in
 > podman too (closer to prod, slower). The root `Makefile` runs the servers as Bun
@@ -190,9 +225,11 @@ npx git+https://git.example.com/scm/<team>/drop.git publish ./dist myapp
 # set the API once:  export DROP_API=https://api.drop.example.com
 ```
 
-`npx` clones the repo, runs the `prepare` step (esbuild bundles the CLI into a
-node-runnable `dist/drop.js` — no Bun needed), and runs it. Works on any machine
-with Node 18+. (`bunx` works too once it gains git-URL support; for now use `npx`.)
+`npx` clones the repo, runs the `prepare` step (`node build.mjs cli mcp` — esbuild
+bundles both the CLI into `dist/drop.js` and the MCP server into `dist/mcp.js`, which
+is what makes `npx … drop-mcp` work without a separate build; no Bun needed), and runs
+it. Works on any machine with Node 18+. (`bunx` works too once it gains git-URL
+support; for now use `npx`.)
 
 ### Option 2 — `install.sh` (persistent `drop` command)
 
@@ -206,7 +243,7 @@ Installs Bun if missing, installs deps, and puts a `drop` command on your PATH.
 
 ### Why not a single compiled binary?
 
-`bun run build:cli` *can* produce one (`dist/drop`), but standalone binaries are
+`bun run build:binary` *can* produce one (`dist/drop`), but standalone binaries are
 unsigned and **managed/corporate macOS kills unsigned ad-hoc binaries** (kernel +
 endpoint security). Both options above run via the trusted node/bun runtime
 instead, so they work everywhere. To ship an actual binary, build it in CI and
@@ -215,14 +252,17 @@ instead, so they work everywhere. To ship an actual binary, build it in CI and
 ## Tests
 
 ```bash
-bun test                              # unit + in-process e2e (no infra needed)
-cd infra && make test-integration    # live S3 (Floci) — conditional writes, claim/CAS
+bun test                              # unit + in-process e2e (Postgres via PGlite; no infra needed)
+cd infra && make test-integration    # live S3 (Floci) — blob store conditional writes
 ```
 
-Unit tests use an in-memory blob fake that faithfully simulates ETags + conditional
-writes, so the claim/CAS logic is fully covered without a running backend. The
-integration tests (`src/blob/s3.integration.test.ts`) verify the same against real
-Floci, including that `If-None-Match` is honored.
+Unit + integration tests run against **PGlite** (in-process Postgres), so the real
+SQL and migrations are exercised with no running backend — atomic name claim
+(`INSERT … ON CONFLICT DO NOTHING`), the row-locked pointer flip, roles, and
+visibility are all covered. The S3 integration tests
+(`src/blob/s3.integration.test.ts`) validate the blob store against real Floci
+(including its `If-None-Match` primitive — now used only for blob safety, not the
+name claim, which is a Postgres unique constraint).
 
 ## Production
 
@@ -244,14 +284,17 @@ session tokens, so credentials live only on the server. Set on the **API**:
   to the corp CA so it can reach `accounts.google.com`.
 
 Storage + edge:
-- Point `DROP_S3_*` at real AWS S3 (leave `DROP_S3_ENDPOINT` empty) or any
-  S3-compatible store with conditional-write support.
+- Set `DROP_DATABASE_URL` to a managed Postgres (RDS / CloudSQL); the API migrates
+  it on boot under an advisory lock. Point `DROP_S3_*` at real AWS S3 (leave
+  `DROP_S3_ENDPOINT` empty) or any S3-compatible store for the file bytes.
 - Point wildcard DNS `*.drop.example.com` + wildcard TLS at the edge; keep the edge
   reachable only on the internal network.
 - **Edge caching:** set `DROP_EDGE_DISK_CACHE=/var/cache/drop` (node-local / per-pod
-  dir) so the edge caches asset bytes on disk — process memory only holds the small
-  version pointer, never asset bytes, so it scales to many sites without OOM. The OS
-  page cache keeps hot files at RAM speed. (CloudFront optional in front.)
+  dir) so the edge caches asset bytes on disk. The long-lived in-memory cache holds
+  only the small per-site pointer (10s TTL) — asset bytes are served from the disk
+  cache (OS page cache keeps hot files at RAM speed) or fetched per-request from S3
+  and freed after the response, so it scales to many sites without retaining bytes.
+  (CloudFront optional in front.)
 
 **Clients (CLI + MCP) need only `DROP_API`** — `drop login` / the MCP `login` tool drive
 the server flow and store the returned session token.

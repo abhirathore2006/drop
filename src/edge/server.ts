@@ -113,7 +113,9 @@ export function createEdge(d: EdgeDeps) {
   // Health endpoint for k8s probes (obscure path → won't shadow real site assets).
   app.get("/_drop_health", (c) => c.text("ok"));
   app.all("*", async (c) => {
-    const name = siteFromHost(c.req.header("host") ?? "");
+    // Prefer the proxy-forwarded host (portless locally, ALB/ingress in prod) so
+    // the site name survives a reverse proxy; fall back to the direct Host header.
+    const name = siteFromHost(c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "");
     if (!name) return notFound("site not found");
 
     const { version, config: cfg, visibility, passwordHash } = await current(name);

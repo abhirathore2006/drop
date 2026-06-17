@@ -24,7 +24,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset
+.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset portless portless-stop
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -36,6 +36,7 @@ help:
 	@echo "  make logs                       tail api + edge logs"
 	@echo "  make publish DIR=./dist NAME=x  publish a folder and print its URL"
 	@echo "  make login                      sign in with Google (server-mediated, real auth)"
+	@echo "  make portless                   front the stack with trusted HTTPS, no ports (needs portless)"
 	@echo "  make stop-all                   also stop the podman machine"
 	@echo "  make reset                      wipe the Floci + Postgres volumes (all sites + metadata)"
 	@echo ""
@@ -79,6 +80,32 @@ postgres:
 	@podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' || podman run -d --rm --name drop-postgres -p $(PG_PORT):5432 -e POSTGRES_USER=drop -e POSTGRES_PASSWORD=drop -e POSTGRES_DB=drop -v $(PG_VOLUME):/var/lib/postgresql/data $(PG_IMAGE) >/dev/null
 	@for i in $$(seq 1 40); do podman exec drop-postgres pg_isready -U drop -d drop >/dev/null 2>&1 && break; sleep 1; done
 	@echo "✓ postgres  :$(PG_PORT)  (persistent volume: $(PG_VOLUME))"
+
+# Seamless local URLs: trusted HTTPS, no port numbers — mirrors prod routing.
+# Fronts the ALREADY-RUNNING api/edge via portless (https://portless.sh):
+#   https://api.drop.localhost      → api  (:$(API_PORT))   control plane + dashboard
+#   https://<name>.drop.localhost   → edge (:$(EDGE_PORT))  published sites (wildcard)
+# portless runs a local CA + reverse proxy on :443 (auto-elevates with sudo).
+# Install once:  npm i -g portless   (Node 24+).  Run `make start` first.
+# NOTE: portless's :443 proxy is a single shared daemon, and `--wildcard` is only
+# applied at start — so we stop any running proxy first to guarantee the wildcard
+# route (else *.drop.localhost would silently 'no-route'). This restarts the shared
+# portless proxy; persisted aliases survive the restart.
+portless:
+	@command -v portless >/dev/null 2>&1 || { echo "✗ portless not found — install:  npm i -g portless  (Node 24+)"; exit 1; }
+	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 || { echo "✗ api not up — run 'make start' first"; exit 1; }
+	@curl -sf http://localhost:$(EDGE_PORT)/_drop_health >/dev/null 2>&1 || { echo "✗ edge not up — run 'make start' first"; exit 1; }
+	@portless proxy stop >/dev/null 2>&1 || true
+	@portless proxy start --wildcard >/dev/null 2>&1 || true
+	@portless alias api.drop $(API_PORT) --force >/dev/null 2>&1 || true
+	@portless alias drop $(EDGE_PORT) --force >/dev/null 2>&1 || true
+	@echo "✓ portless up — trusted HTTPS, no ports:"
+	@echo "    control plane:  https://api.drop.localhost"
+	@echo "    your sites:     https://<name>.drop.localhost   (e.g. https://multipage.drop.localhost)"
+	@echo "  (the URL Drop prints on publish now resolves directly)"
+
+portless-stop:
+	@portless proxy stop >/dev/null 2>&1 && echo "✓ portless proxy stopped" || echo "(portless not running)"
 
 # Wipe the persistent volumes (all published sites + all metadata). Stops both first.
 reset:

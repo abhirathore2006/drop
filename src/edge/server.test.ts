@@ -36,6 +36,16 @@ test("serves a static asset", async () => {
   expect(res.status).toBe(200);
 });
 
+test("routes by x-forwarded-host when behind a proxy (portless/ALB)", async () => {
+  const app = await setup();
+  // The direct Host is the proxy's own host; the real site is in x-forwarded-host.
+  const res = await app.request("/", {
+    headers: { host: "localhost:8474", "x-forwarded-host": "myapp.drop.example.com", accept: "text/html" },
+  });
+  expect(res.status).toBe(200);
+  expect(await res.text()).toBe("<html>app</html>");
+});
+
 test("navigation route falls back to index", async () => {
   const res = await get(await setup(), "myapp.drop.example.com", "/dashboard/settings", "text/html");
   expect(res.status).toBe(200);
