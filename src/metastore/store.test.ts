@@ -1,83 +1,128 @@
 import { test, expect } from "bun:test";
-import { FakeBlob } from "../blob/fake.ts";
+import { makeTestDb } from "../db/testdb.ts";
+import { UserStore } from "../users/store.ts";
 import { MetaStore } from "./store.ts";
 import { SiteNotFoundError } from "./types.ts";
 
-function store() {
-  return new MetaStore(new FakeBlob());
+async function fix() {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  for (const e of ["alice@x.com", "bob@x.com", "carol@x.com"]) await users.upsertOnLogin(e, null);
+  return { db, meta: new MetaStore(db) };
 }
 
-test("claim is first-writer-wins", async () => {
-  const m = store();
-  const a = await m.claimSite("myapp", "alice@paytm.com");
-  expect(a?.owner).toBe("alice@paytm.com");
+test("claim is first-writer-wins and sets owner membership + defaults", async () => {
+  const { db, meta } = await fix();
+  const a = await meta.claimSite("app", "alice@x.com");
+  expect(a?.owner).toBe("alice@x.com");
   expect(a?.currentVersion).toBeNull();
-  // second claimer loses
-  const b = await m.claimSite("myapp", "bob@paytm.com");
-  expect(b).toBeNull();
-  expect((await m.getSitePlain("myapp"))!.owner).toBe("alice@paytm.com");
+  expect(a?.visibility).toBe("public");
+  expect(a?.members).toEqual([{ email: "alice@x.com", role: "owner" }]);
+  expect(await meta.claimSite("app", "bob@x.com")).toBeNull();
+  expect((await meta.getSitePlain("app"))!.owner).toBe("alice@x.com");
+  await db.destroy();
 });
 
-test("updateSite CAS flips the version pointer", async () => {
-  const m = store();
-  await m.claimSite("myapp", "alice@paytm.com");
-  const updated = await m.updateSite("myapp", (s) => ({ ...s, currentVersion: "v_1" }));
-  expect(updated.currentVersion).toBe("v_1");
-  expect((await m.getSitePlain("myapp"))!.currentVersion).toBe("v_1");
+test("updateSite flips pointer + denormalizes config under a row lock", async () => {
+  const { db, meta } = await fix();
+  await meta.claimSite("app", "alice@x.com");
+  const up = await meta.updateSite("app", (s) => ({ ...s, currentVersion: "v_1", config: { name: "app" } }));
+  expect(up.currentVersion).toBe("v_1");
+  const p = (await meta.getPointer("app"))!;
+  expect(p.currentVersion).toBe("v_1");
+  expect(p.config).toEqual({ name: "app" });
+  await db.destroy();
 });
 
-test("updateSite throws when site is missing", async () => {
-  const m = store();
-  await expect(m.updateSite("ghost", (s) => s)).rejects.toBeInstanceOf(SiteNotFoundError);
+test("updateSite throws on missing site", async () => {
+  const { db, meta } = await fix();
+  await expect(meta.updateSite("ghost", (s) => s)).rejects.toBeInstanceOf(SiteNotFoundError);
+  await db.destroy();
 });
 
-test("versions are listed newest-first", async () => {
-  const m = store();
-  await m.claimSite("myapp", "alice@paytm.com");
-  await m.putVersion("myapp", { id: "v_001", publishedBy: "a", createdAt: "t", fileCount: 1, bytes: 1 });
-  await m.putVersion("myapp", { id: "v_002", publishedBy: "a", createdAt: "t", fileCount: 1, bytes: 1 });
-  const vs = await m.listVersions("myapp");
+test("versions listed newest-first", async () => {
+  const { db, meta } = await fix();
+  await meta.claimSite("app", "alice@x.com");
+  await meta.putVersion("app", { id: "v_001", publishedBy: "alice@x.com", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 1, bytes: 10 });
+  await meta.putVersion("app", { id: "v_002", publishedBy: "alice@x.com", createdAt: "2026-01-02T00:00:00.000Z", fileCount: 2, bytes: 20 });
+  const vs = await meta.listVersions("app");
   expect(vs.map((v) => v.id)).toEqual(["v_002", "v_001"]);
+  expect(vs[0].bytes).toBe(20);
+  expect(vs[0].fileCount).toBe(2);
+  await db.destroy();
 });
 
-test("per-user marker index: add / list / remove", async () => {
-  const m = store();
-  await m.addUserSite("alice@paytm.com", "a");
-  await m.addUserSite("alice@paytm.com", "b");
-  await m.addUserSite("bob@paytm.com", "c");
-  expect((await m.listUserSites("alice@paytm.com")).sort()).toEqual(["a", "b"]);
-  expect(await m.listUserSites("bob@paytm.com")).toEqual(["c"]);
-  await m.removeUserSite("alice@paytm.com", "a");
-  expect(await m.listUserSites("alice@paytm.com")).toEqual(["b"]);
+test("members: add/remove + listUserSites includes owned & shared", async () => {
+  const { db, meta } = await fix();
+  await meta.claimSite("app", "alice@x.com");
+  await meta.addMember("app", "bob@x.com", "editor");
+  expect((await meta.getSitePlain("app"))!.collaborators).toEqual(["bob@x.com"]);
+  expect((await meta.listUserSites("alice@x.com")).sort()).toEqual(["app"]);
+  expect((await meta.listUserSites("bob@x.com")).sort()).toEqual(["app"]);
+  await meta.removeMember("app", "bob@x.com");
+  expect(await meta.listUserSites("bob@x.com")).toEqual([]);
+  await db.destroy();
 });
 
-test("removing one marker doesn't clobber a name-prefix sibling", async () => {
-  const m = store();
-  await m.addUserSite("a@x.com", "app");
-  await m.addUserSite("a@x.com", "app2");
-  await m.removeUserSite("a@x.com", "app");
-  expect(await m.listUserSites("a@x.com")).toEqual(["app2"]); // app2 survived
+test("removeMember never removes the owner", async () => {
+  const { db, meta } = await fix();
+  await meta.claimSite("app", "alice@x.com");
+  await meta.removeMember("app", "alice@x.com"); // no-op: owner protected
+  expect((await meta.getSitePlain("app"))!.owner).toBe("alice@x.com");
+  await db.destroy();
 });
 
-test("listSitesPage paginates with a cursor", async () => {
-  const m = store();
-  for (const n of ["s1", "s2", "s3", "s4", "s5"]) await m.claimSite(n, "o@x.com");
-  const p1 = await m.listSitesPage({ limit: 2 });
-  expect(p1.names.length).toBe(2);
-  expect(p1.nextCursor).toBeDefined();
-  const p2 = await m.listSitesPage({ limit: 2, cursor: p1.nextCursor });
-  const p3 = await m.listSitesPage({ limit: 2, cursor: p2.nextCursor });
-  expect(p3.names.length).toBe(1);
-  expect(p3.nextCursor).toBeUndefined();
-  expect([...p1.names, ...p2.names, ...p3.names].sort()).toEqual(["s1", "s2", "s3", "s4", "s5"]);
+test("transferOwner demotes old owner to editor, promotes new", async () => {
+  const { db, meta } = await fix();
+  await meta.claimSite("app", "alice@x.com");
+  await meta.transferOwner("app", "carol@x.com");
+  const s = (await meta.getSitePlain("app"))!;
+  expect(s.owner).toBe("carol@x.com");
+  expect(s.collaborators).toContain("alice@x.com");
+  await db.destroy();
 });
 
-test("listSiteNames + deleteSite", async () => {
-  const m = store();
-  await m.claimSite("alpha", "a@paytm.com");
-  await m.claimSite("beta", "a@paytm.com");
-  expect((await m.listSiteNames()).sort()).toEqual(["alpha", "beta"]);
-  await m.deleteSite("alpha");
-  expect(await m.getSitePlain("alpha")).toBeNull();
-  expect(await m.listSiteNames()).toEqual(["beta"]);
+test("setVisibility password sets hash; reflected in pointer", async () => {
+  const { db, meta } = await fix();
+  await meta.claimSite("app", "alice@x.com");
+  await meta.setVisibility("app", "password", "sha256:abc");
+  let p = (await meta.getPointer("app"))!;
+  expect(p.visibility).toBe("password");
+  expect(p.passwordHash).toBe("sha256:abc");
+  await meta.setVisibility("app", "public", null);
+  p = (await meta.getPointer("app"))!;
+  expect(p.visibility).toBe("public");
+  expect(p.passwordHash).toBeNull();
+  await db.destroy();
+});
+
+test("setVisibility throws on missing site", async () => {
+  const { db, meta } = await fix();
+  await expect(meta.setVisibility("ghost", "private", null)).rejects.toBeInstanceOf(SiteNotFoundError);
+  await db.destroy();
+});
+
+test("listSitesPage keyset paginates + name prefix", async () => {
+  const { db, meta } = await fix();
+  for (const n of ["s1", "s2", "s3"]) await meta.claimSite(n, "alice@x.com");
+  const p1 = await meta.listSitesPage({ limit: 2 });
+  expect(p1.names).toEqual(["s1", "s2"]);
+  expect(p1.nextCursor).toBe("s2");
+  const p2 = await meta.listSitesPage({ limit: 2, cursor: p1.nextCursor });
+  expect(p2.names).toEqual(["s3"]);
+  expect(p2.nextCursor).toBeUndefined();
+  expect((await meta.listSitesPage({ prefix: "s1" })).names).toEqual(["s1"]);
+  await db.destroy();
+});
+
+test("deleteSite cascades members + versions", async () => {
+  const { db, meta } = await fix();
+  await meta.claimSite("app", "alice@x.com");
+  await meta.addMember("app", "bob@x.com", "viewer");
+  await meta.putVersion("app", { id: "v_1", publishedBy: "alice@x.com", createdAt: "2026-01-01T00:00:00.000Z", fileCount: 1, bytes: 1 });
+  await meta.deleteSite("app");
+  expect(await meta.getSitePlain("app")).toBeNull();
+  expect(await meta.listUserSites("bob@x.com")).toEqual([]);
+  expect(await meta.listVersions("app")).toEqual([]);
+  await db.destroy();
 });
