@@ -1,0 +1,11 @@
+# Keep the build context lean and safe. Crucially excludes host node_modules
+# (macOS binaries would break esbuild in the Linux build) and .env (secrets).
+**/node_modules
+dist
+.git
+.gitignore
+.env
+*.log
+.run
+infra/nginx/certs
+docs/superpowers
