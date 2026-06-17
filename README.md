@@ -21,52 +21,79 @@ $ drop publish ./dist myapp
   streams `files/<currentVersion>/...` with route-aware SPA fallback. Talks to S3 only.
 - **`bin/drop.ts`** — the CLI, compiled to a single binary via `bun build --compile`.
 
-All state is S3 objects — there is **no database**:
+**Metadata lives in Postgres; file bytes live in S3.** The served assets are the
+only thing in object storage:
 
 ```
-sites/<name>/site.json            owner, collaborators, currentVersion  (claim/CAS)
-sites/<name>/versions/<id>.json   per-publish audit
-sites/<name>/files/<id>/...       the served files
-users/<email>/<name>              per-user marker index (empty object)
-auth/<handle>.json                pending server-mediated login handles
+sites/<name>/files/<verId>/...    the served files (S3)
 ```
 
-`users/<email>/<name>` is a zero-byte **marker** written whenever a user gains access
-to a site (claim, share, transfer) and deleted when they lose it (unshare, delete).
-It lets `GET /v1/sites` list a user's sites with a single `LIST users/<email>/` —
-O(your sites), not O(all sites) — so `ls` stays fast at 50k–1M sites. Removal deletes
-the exact key (never a prefix) so `app` and `app2` can't collide.
+Everything else is Postgres (via Kysely; migrations run on API boot under a
+`pg_advisory_lock`, so multi-replica rollouts are safe — the edge connects
+read-only and never migrates):
 
-Serving and lookup-by-name are O(1) on the key regardless of site count; only
-*enumeration* is affected by scale. The admin browse (below) therefore uses a
-cursor-paginated `LIST sites/` rather than loading everything. (A rich global search
-across all sites would need a separate read-model index — e.g. DynamoDB/OpenSearch —
-which is deliberately out of scope here.)
+```
+users         email PK · name · role(admin|member) · status · last_login_at
+sites         name PK · current_version · visibility · password_hash · config(jsonb)
+site_members  (site_name, email) · role(owner|editor|viewer)   -- one owner per site
+versions      (site_name, id) · published_by · file_count · bytes · config(jsonb)
+auth_handles  id PK · poll_token · code_verifier · status · mode · token   -- ephemeral OAuth
+```
+
+Atomic name claim is `INSERT … ON CONFLICT DO NOTHING`; pointer flips and member
+edits are `SELECT … FOR UPDATE` transactions. `GET /v1/sites` (your sites) is a
+single `site_members` query; admin browse is keyset-paginated over `sites`. Moving
+to a real database is what makes reporting and control practical — ad-hoc SQL over
+ownership, versions, bytes, and publish activity.
+
+Set `DROP_DATABASE_URL` (required), e.g. `postgres://drop:drop@localhost:5432/drop`.
+
+### Roles & permissions
+
+Two role axes, with permissions defined in code (`src/authz/permissions.ts`):
+
+- **Platform role** (`users.role`): `admin` can see/manage all sites and users;
+  `member` is a normal user. `DROP_ADMINS` (comma-separated) seeds admins on API
+  boot — thereafter they're DB-managed.
+- **Per-site role** (`site_members.role`): `owner` (all), `editor`
+  (publish/rollback/read), `viewer` (read). `can(actor, action)` is the single
+  authority check; admins are all-powerful, non-members can do nothing.
+
+### Visibility
+
+Each site has a `visibility` (set via `POST /v1/sites/:name/visibility`):
+
+- **public** (default) — served openly.
+- **password** — the edge requires HTTP basic-auth against `password_hash`
+  (publishing a `_drop.json` with `basicAuth` also turns this on).
+- **private** — only members (+ platform admins) may view. Edge enforcement
+  (viewer authentication) is the next feature; **until then a private site
+  returns `403` at the edge — fail closed**, never served openly. Owners can still
+  manage/publish; only the served page is gated.
 
 ### Admin
 
-Emails in `DROP_ADMINS` (comma-separated) are platform admins. `GET /v1/me` returns
-`{ admin: true }` for them, and `GET /v1/admin/sites?cursor=&limit=&prefix=` lets them
-page through **every** site (name-prefix filterable) regardless of ownership. The
-dashboard shows an **all sites** tab for admins backed by the same endpoint. Everything
-else (publish/rollback/share/transfer/delete) is still gated by per-site ownership on
-the verified Google email — admin status does not bypass `_drop.json` name-ownership.
+`GET /v1/me` returns `{ admin: true }` for platform admins, and
+`GET /v1/admin/sites?cursor=&limit=&prefix=` pages through **every** site
+(name-prefix filterable) regardless of ownership. The dashboard shows an **all
+sites** tab backed by the same endpoint. Admin status never bypasses per-site
+ownership or `_drop.json` name-ownership.
 
 ## Local development
 
 Uses Node (version in `.nvmrc`): `nvm use` (or `nvm install`) first.
 
 ```bash
-make setup        # one-time: node (via nvm) + deps + podman VM + Floci image
+make setup        # one-time: node (via nvm) + deps + podman VM + Floci & Postgres images
                   # behind Zscaler:  make setup CORP_CA=~/certs/Zscalerroot.cer
-make start        # Floci (S3) + api(:8473) + edge(:8474), dev-auth on
+make start        # Floci (S3) + Postgres + api(:8473) + edge(:8474), dev-auth on
 make publish DIR=./your/dist NAME=myapp
 curl -H "Host: myapp.drop.localhost" http://localhost:8474/
 ```
 
 Other targets: `make status`, `make logs`, `make restart`, `make stop`
-(`make stop-all` also stops the podman VM), `make reset` (wipe the persistent Floci
-volume). Published sites persist across restarts in a named volume. The edge routes by `Host` header, so
+(`make stop-all` also stops the podman VM), `make reset` (wipe the Floci + Postgres
+volumes). Published sites + metadata persist across restarts in named volumes. The edge routes by `Host` header, so
 either curl with `-H "Host: <name>.drop.localhost"` or add
 `127.0.0.1 <name>.drop.localhost` to `/etc/hosts` to view in a browser.
 
