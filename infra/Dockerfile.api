@@ -7,9 +7,11 @@ FROM docker.io/library/node:24-slim
 WORKDIR /app
 
 # Trust any organization root CA(s) placed in infra/ca/ (generic; empty by default).
-COPY infra/ca/ /usr/local/share/ca-certificates/
-RUN if ls /usr/local/share/ca-certificates/*.crt >/dev/null 2>&1; then update-ca-certificates; fi
-ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+# Concatenate them into a bundle Node trusts via NODE_EXTRA_CA_CERTS — no apt /
+# update-ca-certificates needed (node:slim doesn't ship it), so the build stays offline.
+COPY infra/ca/ /usr/local/share/drop-ca/
+RUN cat /usr/local/share/drop-ca/*.crt > /usr/local/share/drop-ca-bundle.pem 2>/dev/null || true; touch /usr/local/share/drop-ca-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/drop-ca-bundle.pem
 
 COPY dist/api.js ./dist/api.js
 COPY docs ./docs

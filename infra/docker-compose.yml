@@ -43,6 +43,11 @@ services:
         condition: service_healthy
       floci:
         condition: service_started
+    # Optionally load the repo .env (Google OAuth creds, etc.) when present — lets the
+    # dev-auth stack do real Google login. Safe to miss on a fresh clone.
+    env_file:
+      - path: ../.env
+        required: false
     environment:
       DROP_HTTP_PORT: "8080"
       DROP_BASE_DOMAIN: "drop.localhost"
@@ -53,6 +58,9 @@ services:
       DROP_S3_KEY_ID: "test"
       DROP_S3_SECRET: "test"
       DROP_DEV_AUTH: "1"
+      # Use the image's baked CA bundle (any infra/ca/*.crt) — override any
+      # host-specific NODE_EXTRA_CA_CERTS path that .env might carry.
+      NODE_EXTRA_CA_CERTS: "/usr/local/share/drop-ca-bundle.pem"
     ports:
       - "8473:8080"
 
