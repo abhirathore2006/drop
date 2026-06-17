@@ -1,8 +1,10 @@
 # Full local stack in containers, behind nginx for trusted HTTPS on :443.
-#   1. ./infra/nginx/gen-certs.sh                         # once: TLS cert for *.drop.localhost
-#   2. docker compose -f infra/docker-compose.yml up --build
+#   1. node build.mjs                                     # build the bundles the images copy
+#   2. ./infra/nginx/gen-certs.sh                         # once: TLS cert for *.drop.localhost
+#   3. docker compose -f infra/docker-compose.yml up --build
 #   -> https://api.drop.localhost/        control plane + dashboard + /docs
 #   -> https://<name>.drop.localhost/     published sites (wildcard -> edge)
+# Rootless host (can't bind :443)?  DROP_HTTPS_PORT=8443 docker compose ... up --build
 # Metadata lives in Postgres; file bytes in Floci (S3-compatible). The api migrates
 # Postgres on boot; the edge connects read-only. nginx mirrors the prod ingress.
 services:
@@ -89,7 +91,9 @@ services:
       - ./nginx/drop.conf:/etc/nginx/conf.d/default.conf:ro
       - ./nginx/certs:/etc/nginx/certs:ro
     ports:
-      - "443:443"
+      # Defaults to 443; set DROP_HTTPS_PORT (e.g. 8443) when the host can't bind
+      # privileged ports (rootless Docker/Podman) or 443 is taken.
+      - "${DROP_HTTPS_PORT:-443}:443"
 
 volumes:
   pg-data:

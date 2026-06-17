@@ -128,8 +128,10 @@ containers behind **nginx** (works on macOS, Linux, and Windows via Docker/Podma
 Desktop or WSL2):
 
 ```bash
-./infra/nginx/gen-certs.sh                              # once: cert for *.drop.localhost
-docker compose -f infra/docker-compose.yml up --build   # postgres + floci + api + edge + nginx
+make stop                                              # free the shared host ports first
+node build.mjs                                         # build the self-contained bundles
+./infra/nginx/gen-certs.sh                             # local TLS cert for *.drop.localhost
+docker compose -f infra/docker-compose.yml up --build  # postgres + floci + api + edge + nginx
 ```
 
 You then get, behind nginx on `:443`:
@@ -143,12 +145,19 @@ site name survives the proxy. This is the same shape as the production ingress
 (ALB/Ingress), just local. `gen-certs.sh` uses [mkcert](https://github.com/FiloSottile/mkcert)
 for a browser-trusted cert if installed, else a self-signed one (browser warning).
 
-> This containerized stack uses the same host ports as `make start` (8473/8474/5432/4566)
-> plus `443` — run **`make stop` first** so they don't collide. Binding host `:443`
-> works out of the box on Docker/Podman Desktop; rootless Podman on Linux may need
-> `net.ipv4.ip_unprivileged_port_start=443`. Real Google login locally still uses the
-> loopback URL (Google won't accept a `.localhost` OAuth redirect) — HTTPS here shines
-> for dev-auth, the dashboard, and viewing sites.
+The images **copy the prebuilt esbuild bundles** (hence `node build.mjs` first) — there's
+no in-image `npm install`, so they build offline / behind a TLS-inspecting proxy.
+
+> - **Ports:** this stack reuses the `make start` host ports (8473/8474/5432/4566) plus
+>   `443` — run `make stop` first. If the host can't bind `443` (rootless Docker/Podman)
+>   or it's taken, set a high port: `DROP_HTTPS_PORT=8443 docker compose … up --build`
+>   → `https://api.drop.localhost:8443/`.
+> - **Corp proxy:** to trust your organization's root CA at *runtime* (e.g. Google login
+>   egress through a TLS-inspecting proxy), drop it in [`infra/ca/`](infra/ca/)`*.crt`. If
+>   the BuildKit builder can't pull the base image through the proxy, build with the daemon
+>   builder: `DOCKER_BUILDKIT=0 docker compose … build`.
+> - Real Google login locally still uses the loopback URL (Google won't accept a
+>   `.localhost` OAuth redirect) — HTTPS here shines for dev-auth, the dashboard, and sites.
 
 > Prefer everything in containers? `make -C infra up` builds + runs api/edge in
 > podman too (closer to prod, slower). The root `Makefile` runs the servers as Bun

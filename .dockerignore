@@ -1,11 +1,12 @@
-# Keep the build context lean and safe. Crucially excludes host node_modules
-# (macOS binaries would break esbuild in the Linux build) and .env (secrets).
+# Keep the build context lean and safe. Excludes host node_modules and .env
+# (secrets). dist/ IS included — the images copy the prebuilt esbuild bundles
+# (run `node build.mjs` before building the images).
 **/node_modules
-dist
 .git
 .gitignore
 .env
 *.log
 .run
 infra/nginx/certs
+infra/nginx/.verify.conf
 docs/superpowers
