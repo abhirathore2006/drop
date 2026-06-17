@@ -122,27 +122,37 @@ either curl with `-H "Host: <name>.drop.localhost"` or add
 
 ### Seamless local URLs (optional, via portless)
 
-By default the edge is at `http://<name>.drop.localhost:8474`. For a
-production-shaped experience — **trusted HTTPS, no port numbers** — front the
-running stack with [portless](https://portless.sh):
+By default the edge is at `http://<name>.drop.localhost:8474`. For
+**trusted HTTPS with stable names**, front the running stack with
+[portless](https://portless.sh):
 
 ```bash
 npm i -g portless        # one-time (Node 24+)
 make start               # api :8473 + edge :8474 as usual
-make portless            # registers a local-CA HTTPS proxy on :443
+make portless            # local-CA HTTPS proxy + routes; prints the live URLs
 ```
 
-You then get, with a browser-trusted certificate and no ports:
+`make portless` registers `alias api.drop → :8473`, `alias drop → :8474`, and a
+`--wildcard` so every `*.drop.localhost` falls through to the edge (which routes by
+`Host`). The edge honors `x-forwarded-host`, so the site name survives the proxy.
+It then prints the actual URLs, e.g.:
 
-- `https://api.drop.localhost` → the control plane + dashboard (api)
-- `https://<name>.drop.localhost` → any published site (edge, wildcard)
+- `https://api.drop.localhost/` → control plane + dashboard (and `/docs/`)
+- `https://<name>.drop.localhost/` → any published site (edge, wildcard)
 
-portless runs a reverse proxy on `:443` and forwards by hostname:
-`alias api.drop → :8473`, `alias drop → :8474`, plus `--wildcard` so every
-`*.drop.localhost` falls through to the edge (which routes by `Host`). The edge
-honors `x-forwarded-host`, so the site name survives the proxy — and the
-`https://<name>.drop.localhost` URL that `drop publish` prints now resolves
-directly. `make portless-stop` tears the proxy down.
+**Ports & `:443`:** the bare `https://…` (no port) requires portless to bind
+**port 443, which needs root**. Run plain (no sudo) and portless falls back to a
+high port (e.g. `:1355`) — fully working, just with a port:
+`https://api.drop.localhost:1355/docs/`. `make portless` detects and prints whichever
+port it bound. For bare `:443`, run it privileged:
+
+```bash
+sudo $(command -v portless) proxy stop && sudo $(command -v portless) proxy start --wildcard
+# or persist across reboots:
+sudo $(command -v portless) service install --wildcard
+```
+
+`make portless-stop` tears the proxy down.
 
 > The `:443` proxy is a single shared portless daemon and `--wildcard` only takes
 > effect at start, so `make portless` **restarts** it to guarantee the wildcard

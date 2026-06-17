@@ -102,10 +102,17 @@ portless:
 	@$(PORTLESS) proxy start --wildcard >/dev/null 2>&1 || true
 	@$(PORTLESS) alias api.drop $(API_PORT) --force >/dev/null 2>&1 || true
 	@$(PORTLESS) alias drop $(EDGE_PORT) --force >/dev/null 2>&1 || true
-	@echo "✓ portless up — trusted HTTPS, no ports:"
-	@echo "    control plane:  https://api.drop.localhost"
-	@echo "    your sites:     https://<name>.drop.localhost   (e.g. https://multipage.drop.localhost)"
-	@echo "  (the URL Drop prints on publish now resolves directly)"
+	@PORT=$$($(PORTLESS) list 2>/dev/null | grep -oE 'https://[A-Za-z0-9.-]+:[0-9]+' | sed -E 's/.*:([0-9]+)$$/\1/' | sort -u | head -1); \
+	  SFX=""; [ -n "$$PORT" ] && [ "$$PORT" != "443" ] && SFX=":$$PORT"; \
+	  echo "✓ portless up — trusted HTTPS:"; \
+	  echo "    control plane:  https://api.drop.localhost$$SFX"; \
+	  echo "    docs:           https://api.drop.localhost$$SFX/docs/"; \
+	  echo "    your sites:     https://<name>.drop.localhost$$SFX   (e.g. https://viteapp.drop.localhost$$SFX)"; \
+	  if [ -n "$$SFX" ]; then \
+	    echo "  note: bound port $$PORT — binding :443 needs root, so portless fell back."; \
+	    echo "        for bare https (no port): sudo $(NODE_BIN)/portless proxy stop && sudo $(NODE_BIN)/portless proxy start --wildcard"; \
+	    echo "        (or persist it: sudo $(NODE_BIN)/portless service install --wildcard)"; \
+	  fi
 
 portless-stop:
 	@$(PORTLESS) proxy stop >/dev/null 2>&1 && echo "✓ portless proxy stopped" || echo "(portless not running)"
