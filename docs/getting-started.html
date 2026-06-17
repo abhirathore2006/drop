@@ -63,7 +63,7 @@
     <tr><td>edge</td><td>8474</td><td>Stateless serving edge; routes by <code>Host</code> header</td></tr>
   </tbody>
 </table>
-<div class="note"><span class="lbl">Note</span><p>With no <code>.env</code> file, <code>DROP_DEV_AUTH</code> defaults to <code>1</code> locally — so <strong>dev-auth</strong> is on and you don't need any Google credentials to develop. Published sites and metadata persist across restarts in named volumes. See <a href="configuration.html">Configuration</a> for the env knobs.</p></div>
+<div class="note"><span class="lbl">Note</span><p>With no <code>.env</code> file, <code>DROP_DEV_AUTH</code> defaults to <code>1</code> locally — so <strong>dev-auth</strong> is on and you don't need any Google credentials to develop. If you <em>do</em> set the Google env vars (<code>DROP_GOOGLE_CLIENT_ID</code>, <code>DROP_GOOGLE_CLIENT_SECRET</code>, <code>DROP_SESSION_SECRET</code>) in <code>.env</code>, browser Google login is enabled even in dev-auth — and the dev <code>sub:email</code> tokens keep working too. Published sites and metadata persist across restarts in named volumes. See <a href="configuration.html">Configuration</a> for the env knobs.</p></div>
 
 <h2>Publish your first site</h2>
 <p>Point Drop at a built folder and give it a name:</p>

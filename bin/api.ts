@@ -5,7 +5,7 @@ import { makeDb } from "../src/db/db.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { MetaStore } from "../src/metastore/store.ts";
 import { UserStore } from "../src/users/store.ts";
-import { DevHeaderVerifier } from "../src/auth/oidc.ts";
+import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
 import { createApp } from "../src/api/server.ts";
 import type { Verifier } from "../src/auth/types.ts";
@@ -30,7 +30,15 @@ const meta = new MetaStore(db);
 let verifier: Verifier;
 if (cfg.devAuth) {
   console.warn("WARNING: DROP_DEV_AUTH=1 — trusting sub:email tokens. Dev only.");
-  verifier = new DevHeaderVerifier();
+  // Also accept real Google-login session cookies when Google is configured, so the
+  // browser dashboard works in dev mode too (dev sub:email tokens still work).
+  const chain: Verifier[] = [];
+  if (cfg.sessionSecret) chain.push(new SessionVerifier(cfg.sessionSecret));
+  chain.push(new DevHeaderVerifier());
+  verifier = chain.length === 1 ? chain[0]! : new ChainVerifier(chain);
+  if (cfg.googleClientId && cfg.googleClientSecret && cfg.sessionSecret) {
+    console.log(`Google login also enabled in dev mode — OAuth callback: ${cfg.publicUrl}/auth/callback`);
+  }
 } else {
   // Server-mediated login: the API owns the Google OAuth client and issues its own
   // session tokens, which it verifies here. Clients only need DROP_API.

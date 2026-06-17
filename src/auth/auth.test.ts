@@ -1,6 +1,8 @@
 import { test, expect } from "bun:test";
 import { Hono } from "hono";
-import { FakeVerifier, DevHeaderVerifier, checkDomain } from "./oidc.ts";
+import { FakeVerifier, DevHeaderVerifier, ChainVerifier, checkDomain } from "./oidc.ts";
+import { SessionVerifier, signSession } from "./session-token.ts";
+import { loginConfigured } from "../api/auth-routes.ts";
 import { authMiddleware, type AuthEnv } from "./middleware.ts";
 
 function appWith(v: any) {
@@ -26,6 +28,22 @@ test("dev header verifier parses sub:email", async () => {
   const v = new DevHeaderVerifier();
   expect(await v.verify("alice:alice@example.com")).toEqual({ sub: "alice", email: "alice@example.com" });
   expect(await v.verify("nosep")).toBeNull();
+});
+
+test("ChainVerifier: session token wins, dev token falls through, garbage is null", async () => {
+  const secret = "test-secret-please-rotate-1234567890";
+  const session = await signSession(secret, { sub: "a@example.com", email: "a@example.com" });
+  const chain = new ChainVerifier([new SessionVerifier(secret), new DevHeaderVerifier()]);
+  expect((await chain.verify(session))?.email).toBe("a@example.com"); // real session JWT
+  expect((await chain.verify("bob:bob@example.com"))?.email).toBe("bob@example.com"); // dev fallback
+  expect(await chain.verify("no-colon-not-a-jwt")).toBeNull();
+});
+
+test("loginConfigured: true iff google id+secret+session set (independent of dev-auth)", () => {
+  expect(loginConfigured({ googleClientId: "", googleClientSecret: "", sessionSecret: "" })).toBe(false);
+  expect(loginConfigured({ googleClientId: "id", googleClientSecret: "sec", sessionSecret: "s" })).toBe(true);
+  expect(loginConfigured({ googleClientId: "id", googleClientSecret: "", sessionSecret: "s" })).toBe(false);
+  expect(loginConfigured({ googleClientId: "id", googleClientSecret: "sec", sessionSecret: "" })).toBe(false);
 });
 
 test("checkDomain enforces the allowlist", () => {

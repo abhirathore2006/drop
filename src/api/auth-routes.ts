@@ -18,6 +18,17 @@ interface Handle {
   error: string | null;
 }
 
+/**
+ * Server-mediated Google login is available whenever the Google client + session
+ * secret are configured — including in dev-auth mode (DROP_DEV_AUTH=1), where dev
+ * `sub:email` tokens also keep working. Login is independent of the dev flag.
+ */
+export function loginConfigured(
+  cfg: Pick<Config, "googleClientId" | "googleClientSecret" | "sessionSecret">,
+): boolean {
+  return !!cfg.googleClientId && !!cfg.googleClientSecret && !!cfg.sessionSecret;
+}
+
 const page = (msg: string) =>
   `<!doctype html><meta charset=utf-8><title>Drop</title><body style="font-family:system-ui;padding:3rem;text-align:center"><h2>${msg}</h2></body>`;
 
@@ -34,7 +45,7 @@ export function registerAuthRoutes(app: Hono<AuthEnv>, cfg: Config, db: Db, user
   let configPromise: ReturnType<typeof oidc.discovery> | null = null;
   const getOAuth = () =>
     (configPromise ??= oidc.discovery(new URL("https://accounts.google.com"), cfg.googleClientId!, cfg.googleClientSecret));
-  const configured = () => !cfg.devAuth && !!cfg.googleClientId && !!cfg.sessionSecret;
+  const configured = () => loginConfigured(cfg);
 
   const saveHandle = (h: Handle) =>
     db
@@ -85,7 +96,7 @@ export function registerAuthRoutes(app: Hono<AuthEnv>, cfg: Config, db: Db, user
 
   app.post("/auth/start", async (c) => {
     if (!configured()) {
-      return c.json({ error: "server-mediated login is not configured (dev-auth mode or missing Google config)" }, 400);
+      return c.json({ error: "Google login not configured — set DROP_GOOGLE_CLIENT_ID, DROP_GOOGLE_CLIENT_SECRET, DROP_SESSION_SECRET" }, 400);
     }
     const { url, handle, pollToken } = await startFlow("cli");
     return c.json({ authUrl: url, handle, pollToken });
@@ -93,7 +104,7 @@ export function registerAuthRoutes(app: Hono<AuthEnv>, cfg: Config, db: Db, user
 
   // Browser login for the dashboard: redirect to Google; the callback sets a cookie.
   app.get("/login", async (c) => {
-    if (!configured()) return c.text("login is not configured (dev-auth mode or missing Google config)", 400);
+    if (!configured()) return c.text("Google login not configured — set DROP_GOOGLE_CLIENT_ID, DROP_GOOGLE_CLIENT_SECRET, DROP_SESSION_SECRET", 400);
     const { url } = await startFlow("browser");
     return c.redirect(url);
   });

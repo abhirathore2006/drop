@@ -9,6 +9,18 @@ export class FakeVerifier implements Verifier {
   }
 }
 
+/** Tries verifiers in order; returns the first identity, or null. */
+export class ChainVerifier implements Verifier {
+  constructor(private verifiers: Verifier[]) {}
+  async verify(token: string): Promise<Identity | null> {
+    for (const v of this.verifiers) {
+      const id = await v.verify(token);
+      if (id) return id;
+    }
+    return null;
+  }
+}
+
 /** Trusts a "sub:email" token. LOCAL DEV ONLY (DROP_DEV_AUTH=1). */
 export class DevHeaderVerifier implements Verifier {
   async verify(token: string): Promise<Identity | null> {
