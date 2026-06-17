@@ -113,7 +113,7 @@ floci:
 
 postgres:
 	@podman machine start >/dev/null 2>&1 || true
-	@podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' || podman run -d --rm --name drop-postgres -p $(PG_PORT):5432 -e POSTGRES_USER=drop -e POSTGRES_PASSWORD=drop -e POSTGRES_DB=drop -v $(PG_VOLUME):/var/lib/postgresql/data $(PG_IMAGE) >/dev/null
+	@podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' || podman run -d --rm --name drop-postgres -p $(PG_PORT):5432 -e POSTGRES_USER=drop -e POSTGRES_PASSWORD=drop -e POSTGRES_DB=drop -v $(PG_VOLUME):/var/lib/postgresql $(PG_IMAGE) >/dev/null
 	@for i in $$(seq 1 40); do podman exec drop-postgres pg_isready -U drop -d drop >/dev/null 2>&1 && break; sleep 1; done
 	@echo "✓ postgres  :$(PG_PORT)  (persistent volume: $(PG_VOLUME))"
 

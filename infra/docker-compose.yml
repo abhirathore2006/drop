@@ -15,7 +15,7 @@ services:
       POSTGRES_PASSWORD: drop
       POSTGRES_DB: drop
     volumes:
-      - pg-data:/var/lib/postgresql/data
+      - pg-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U drop -d drop"]
       interval: 3s
