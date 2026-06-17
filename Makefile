@@ -91,21 +91,24 @@ postgres:
 # applied at start — so we stop any running proxy first to guarantee the wildcard
 # route (else *.drop.localhost would silently 'no-route'). This restarts the shared
 # portless proxy; persisted aliases survive the restart.
+# Resolve portless from the nvm bin (where `npm i -g` puts it) so it works even
+# when that bin isn't on the interactive shell's PATH.
+PORTLESS := PATH="$(NODE_BIN):$$PATH" portless
 portless:
-	@command -v portless >/dev/null 2>&1 || { echo "✗ portless not found — install:  npm i -g portless  (Node 24+)"; exit 1; }
+	@$(PORTLESS) --version >/dev/null 2>&1 || { echo "✗ portless not found — install:  npm i -g portless  (Node 24+)"; exit 1; }
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 || { echo "✗ api not up — run 'make start' first"; exit 1; }
 	@curl -sf http://localhost:$(EDGE_PORT)/_drop_health >/dev/null 2>&1 || { echo "✗ edge not up — run 'make start' first"; exit 1; }
-	@portless proxy stop >/dev/null 2>&1 || true
-	@portless proxy start --wildcard >/dev/null 2>&1 || true
-	@portless alias api.drop $(API_PORT) --force >/dev/null 2>&1 || true
-	@portless alias drop $(EDGE_PORT) --force >/dev/null 2>&1 || true
+	@$(PORTLESS) proxy stop >/dev/null 2>&1 || true
+	@$(PORTLESS) proxy start --wildcard >/dev/null 2>&1 || true
+	@$(PORTLESS) alias api.drop $(API_PORT) --force >/dev/null 2>&1 || true
+	@$(PORTLESS) alias drop $(EDGE_PORT) --force >/dev/null 2>&1 || true
 	@echo "✓ portless up — trusted HTTPS, no ports:"
 	@echo "    control plane:  https://api.drop.localhost"
 	@echo "    your sites:     https://<name>.drop.localhost   (e.g. https://multipage.drop.localhost)"
 	@echo "  (the URL Drop prints on publish now resolves directly)"
 
 portless-stop:
-	@portless proxy stop >/dev/null 2>&1 && echo "✓ portless proxy stopped" || echo "(portless not running)"
+	@$(PORTLESS) proxy stop >/dev/null 2>&1 && echo "✓ portless proxy stopped" || echo "(portless not running)"
 
 # Wipe the persistent volumes (all published sites + all metadata). Stops both first.
 reset:
