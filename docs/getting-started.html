@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Getting started · Drop docs</title>
 <link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
 <script defer src="assets/site.js"></script>
 </head>
 <body>
@@ -28,6 +29,7 @@
       <a href="architecture.html">Architecture</a>
       <a href="deployment.html">Deployment</a>
       <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
     </nav>
   </aside>
   <main class="content"><article>
@@ -88,16 +90,15 @@ docker compose -f infra/docker-compose.yml up --build  # postgres + floci + api 
 <p>nginx terminates TLS on <code>:443</code> and routes by hostname (<code>api.drop.localhost</code> → api, <code>*.drop.localhost</code> → edge), setting <code>X-Forwarded-Host</code> which the edge honors — the same shape as the production ingress. The images <strong>copy the prebuilt bundles</strong> (hence <code>node build.mjs</code> first), so there's no in-image <code>npm install</code> — they build offline / behind a TLS-inspecting proxy. <code>gen-certs.sh</code> uses <a href="https://github.com/FiloSottile/mkcert">mkcert</a> for a browser-trusted cert if installed, else a self-signed one — in which case run <code>make trust-cert</code> to add it to your OS trust store (macOS/Linux/Windows; <code>make untrust-cert</code> reverses it) and clear the browser warning.</p>
 <div class="note warn"><span class="lbl">Note</span><p>This stack reuses the <code>make start</code> host ports (8473/8474/5432/4566) plus <code>443</code> — run <code>make stop</code> first. If the host can't bind <code>443</code> (rootless Docker/Podman) or it's taken, set a high one: <code>DROP_HTTPS_PORT=8443 docker compose … up --build</code> → <code>https://api.drop.localhost:8443/</code>. To trust your org's root CA for runtime egress (e.g. Google login through a corporate proxy), drop it in <code>infra/ca/*.crt</code>. Real Google login locally still uses the loopback URL (Google won't accept a <code>.localhost</code> OAuth redirect).</p></div>
 
-<h2>Publish from anywhere (CLI via npx)</h2>
-<p>You don't have to clone the repo to publish to a running Drop. Any machine with Node can run the CLI straight from git:</p>
-<pre><code>npx git+https://git.example.com/scm/&lt;team&gt;/drop.git publish ./dist myapp</code></pre>
-<p>The client needs <strong>only</strong> <code>DROP_API</code> — login is server-mediated, so no Google secrets live on your machine:</p>
-<pre><code>export DROP_API=https://api.drop.example.com</code></pre>
-<p>For a persistent <code>drop</code> command (instead of typing <code>npx …</code> each time), use the installer from a clone — it's idempotent and needs no sudo:</p>
-<pre><code>git clone &lt;repo&gt; &amp;&amp; cd drop
-./install.sh --api https://api.drop.example.com
+<h2>Publish from anywhere (one-line install)</h2>
+<p>You don't have to clone the repo to publish to a running Drop. The deployed API serves its own installer at <code>/install.sh</code>, templated with that instance's URL. It puts a persistent <code>drop</code> command on your PATH and <strong>auto-configures the API URL</strong> — no clone, no npm, no Google secrets on your machine (login is server-mediated). Needs only Node 18+:</p>
+<pre><code>curl -fsSL https://api.drop.example.com/install.sh | sh
+drop login
 drop publish ./dist myapp</code></pre>
-<p>The installer ensures Bun, installs deps, and writes a <code>drop</code> wrapper onto a bin dir on your PATH (baking in the <code>--api</code> default if you pass one). See <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for the full command surface.</p>
+<p>Your instance's dashboard shows this command with the real API URL already filled in — copy it from there. The installer is idempotent; re-run it any time to update the CLI.</p>
+<p>Prefer no install at all? Any machine with Node can run the CLI straight from git via <code>npx</code> (set <code>DROP_API</code> first). See <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for the full command surface.</p>
+<pre><code>export DROP_API=https://api.drop.example.com
+npx git+https://git.example.com/scm/&lt;team&gt;/drop.git publish ./dist myapp</code></pre>
 
 <h2>Other make targets</h2>
 <table class="tbl">

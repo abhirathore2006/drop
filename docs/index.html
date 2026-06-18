@@ -6,6 +6,7 @@
 <title>Drop — self-hosted static-site publishing</title>
 <meta name="description" content="Drop is a self-hosted, Surge-style static-site publisher. Push a built folder, get an internal HTTPS URL. Metadata in Postgres, file bytes in S3, gated by Google login.">
 <link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
 <script defer src="assets/site.js"></script>
 </head>
 <body>
@@ -29,6 +30,7 @@
       <a href="architecture.html">Architecture</a>
       <a href="deployment.html">Deployment</a>
       <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
     </nav>
   </aside>
   <main class="content"><article>
@@ -51,6 +53,35 @@
   ▸ dropping…
   <span class="tok-s">✓ live at https://myapp.drop.example.com</span>  <span class="tok-c">(internal-only)</span></code></pre>
 
+    <h2 id="quickstart">Quickstart</h2>
+    <p>Install the CLI straight from your Drop server. The installer is served by the API itself, so it
+    <strong>auto-configures this instance's URL</strong> — the commands below then just work. Needs only Node 18+.</p>
+    <pre><code><span class="tok-c"># 1 · install the CLI (downloads from this Drop, writes config for you)</span>
+curl -fsSL https://api.drop.example.com/install.sh | sh
+
+<span class="tok-c"># 2 · sign in — Google, brokered by the Drop server (no secrets on your machine)</span>
+drop login
+
+<span class="tok-c"># 3 · publish a built folder → a live, internal-only URL</span>
+drop publish ./dist myapp</code></pre>
+    <div class="note tip"><span class="lbl">Served live</span><p>When you read these docs on a deployed Drop, the URL above
+    is filled in with <strong>this instance's real address</strong> — copy it and run it as-is. Prefer not to install?
+    Run the CLI via <code>npx</code> instead — see <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>.</p></div>
+
+    <h3>Drive it from an AI client (MCP)</h3>
+    <p>Any MCP client — Claude Code/Desktop, Cursor, … — can publish and manage sites in natural language.
+    After installing, point it at the bundled <code>drop-mcp</code> server (installed alongside <code>drop</code>):</p>
+    <pre><code>{
+  <span class="tok-k">"mcpServers"</span>: {
+    <span class="tok-k">"drop"</span>: {
+      <span class="tok-k">"command"</span>: <span class="tok-s">"drop-mcp"</span>,
+      <span class="tok-k">"env"</span>: { <span class="tok-k">"DROP_API"</span>: <span class="tok-s">"https://api.drop.example.com"</span> }
+    }
+  }
+}</code></pre>
+    <p>Full command list, tool reference, and the no-install <code>npx</code> variants:
+    <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>.</p>
+
     <h2>Why Drop</h2>
     <div class="cards">
       <div class="card">
@@ -68,7 +99,7 @@
       <div class="card">
         <div class="n">AGENT-NATIVE</div>
         <h3>CLI &amp; MCP</h3>
-        <p>Publish from the terminal (<code>npx</code>, nothing to install) or let an AI client publish
+        <p>Install the CLI with one line (or run it via <code>npx</code>), and let any AI client publish
         directly through the built-in MCP server.</p>
       </div>
       <div class="card">

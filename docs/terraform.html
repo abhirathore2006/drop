@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terraform (IaC) · Drop docs</title>
+<meta name="description" content="Deploy Drop to AWS with Terraform/OpenTofu: a shared foundation config plus EKS or ECS root configs that read it via S3 remote state with S3-native locking (no DynamoDB).">
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (_drop.json)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html" class="active">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Reference</p>
+<h1>Terraform (IaC)</h1>
+<p class="lead">The same AWS components from the <a href="aws-deployment.html">AWS deployment</a> guide, as
+infrastructure-as-code under <code>infra/terraform/</code>. One <strong>shared <code>foundation</code></strong>
+config owns the long-lived resources (ECR, S3, ACM, RDS, Secrets); then <strong>either</strong> an
+<strong><code>eks</code></strong> root (Variant A — Kubernetes) <strong>or</strong> an <strong><code>ecs</code></strong>
+root (Variant B — Fargate) reads it via remote state and runs Drop behind one internal ALB. Works with
+Terraform <strong>&ge; 1.10</strong> or OpenTofu <strong>&ge; 1.10</strong>.</p>
+
+<div class="note tip"><span class="lbl">Two ways, same result</span><p>This page is the IaC equivalent of the
+<a href="aws-deployment.html">AWS deployment</a> guide — that one is the click-by-click <code>aws</code> CLI walkthrough,
+this one declares the same infrastructure as code. Pick one. Substitute <code>tofu</code> for <code>terraform</code>
+throughout if you use OpenTofu.</p></div>
+
+<h2>Layout</h2>
+<p>The configuration is split into independent <strong>configs</strong>, each with its own state file:</p>
+<table class="tbl">
+<thead><tr><th>Config</th><th>What it manages</th></tr></thead>
+<tbody>
+<tr><td><code>foundation/</code></td><td>Shared, long-lived resources both runtimes need: ECR repo, private S3 bucket, the S3-access IAM policy, the <code>*.&lt;base_domain&gt;</code> ACM cert, RDS PostgreSQL, the RDS security group, and three Secrets Manager secrets.</td></tr>
+<tr><td><code>eks/</code></td><td><strong>Variant A.</strong> Runs Drop on Amazon EKS (Kubernetes) via the Helm chart. Reads <code>foundation</code> through a <code>terraform_remote_state</code> data source.</td></tr>
+<tr><td><code>ecs/</code></td><td><strong>Variant B.</strong> Runs Drop on Amazon ECS/Fargate (no Kubernetes). Also reads <code>foundation</code> via remote state.</td></tr>
+</tbody>
+</table>
+<p>You apply <code>foundation</code> once, then <strong>either</strong> <code>eks</code> <strong>or</strong> <code>ecs</code>
+(or both, side by side). Each keeps its own state, so they never collide:</p>
+<pre><code><span class="tok-c"># apply order (teardown is the reverse)</span>
+foundation        <span class="tok-c"># must exist first — exports outputs the others read</span>
+   └── eks  OR  ecs   <span class="tok-c"># reads foundation's remote state, then deploys Drop</span></code></pre>
+<div class="note warn"><span class="lbl">Order matters</span><p>Never apply <code>eks</code>/<code>ecs</code> before
+<code>foundation</code> has been applied at least once — their remote-state lookup finds nothing and the plan fails.</p></div>
+
+<h2>Prerequisites</h2>
+<p>Terraform here <strong>consumes</strong> these; it does not create them. Have them ready first:</p>
+<table class="tbl">
+<thead><tr><th>You provide</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td><strong>An S3 state bucket</strong> (with versioning on)</td><td>Holds the remote state for every config. Named in each <code>backend.tf</code>; intentionally not managed by Terraform (bootstrap chicken-and-egg).</td></tr>
+<tr><td><strong>An existing VPC + private subnets</strong></td><td>Passed as <code>vpc_id</code> / <code>private_subnet_ids</code> to <code>foundation</code>. Workloads run in the private subnets; no VPC is provisioned.</td></tr>
+<tr><td><strong>A Route53 hosted zone</strong> for <code>base_domain</code></td><td><code>foundation</code> looks it up (<code>route53_zone_id</code>) for ACM DNS validation and the <code>api</code> / wildcard records.</td></tr>
+<tr><td><strong>The Drop image in ECR</strong></td><td>Build the bundles, then the image, then push (see below). The single image carries both <code>api</code> and <code>edge</code> roles.</td></tr>
+<tr><td><strong>Terraform / OpenTofu &ge; 1.10</strong> + AWS CLI</td><td>The version floor is required for S3-native state locking.</td></tr>
+</tbody>
+</table>
+<p>Create the state bucket once, up front:</p>
+<pre><code>aws s3api create-bucket --bucket drop-tfstate --region us-east-1
+aws s3api put-bucket-versioning --bucket drop-tfstate \
+  --versioning-configuration Status=Enabled</code></pre>
+<p>Build and push the image (the Dockerfile copies the prebuilt esbuild bundles, so build those first):</p>
+<pre><code><span class="tok-c"># from the repo root</span>
+node build.mjs
+docker build -f infra/Dockerfile -t &lt;account&gt;.dkr.ecr.&lt;region&gt;.amazonaws.com/drop:&lt;tag&gt; .
+
+aws ecr get-login-password --region &lt;region&gt; \
+  | docker login --username AWS --password-stdin &lt;account&gt;.dkr.ecr.&lt;region&gt;.amazonaws.com
+docker push &lt;account&gt;.dkr.ecr.&lt;region&gt;.amazonaws.com/drop:&lt;tag&gt;</code></pre>
+<p>The ECR repo is created by <code>foundation</code> — so apply <code>foundation</code> first, then build &amp; push to it,
+then apply <code>eks</code>/<code>ecs</code> referencing that <code>&lt;tag&gt;</code>.</p>
+
+<h2>State &amp; locking — S3-native, no DynamoDB</h2>
+<p>Every <code>backend.tf</code> sets <code>use_lockfile = true</code>. On Terraform &ge; 1.10 / OpenTofu &ge; 1.10 this
+<strong>replaces the old DynamoDB lock table</strong> — there is no table to create, reference, or pay for.</p>
+<pre><code>terraform {
+  backend <span class="tok-s">"s3"</span> {
+    bucket       = <span class="tok-s">"drop-tfstate"</span>
+    key          = <span class="tok-s">"drop/foundation.tfstate"</span>
+    region       = <span class="tok-s">"us-east-1"</span>
+    encrypt      = <span class="tok-k">true</span>
+    use_lockfile = <span class="tok-k">true</span>   <span class="tok-c"># S3-native lock; no DynamoDB</span>
+  }
+}</code></pre>
+<p>When a run starts, Terraform writes a small <code>&lt;key&gt;.tflock</code> object next to the state via an S3
+conditional write; if it already exists, the run refuses to start. It is deleted when the run finishes. Clear a
+stale lock (after a killed run) with <code>terraform force-unlock &lt;LOCK_ID&gt;</code>.</p>
+
+<h3>One AWS account, many states</h3>
+<p>A single account holds <code>foundation</code> + <code>eks</code> + <code>ecs</code> at once without conflict, because
+each writes to a <strong>different key</strong> in the same bucket:</p>
+<pre><code>s3://drop-tfstate/
+  drop/foundation.tfstate   (+ .tflock while locked)
+  drop/eks.tfstate          (+ .tflock while locked)
+  drop/ecs.tfstate          (+ .tflock while locked)</code></pre>
+<p>For multiple isolated environments in one account, keep the configs and vary the key prefix per environment
+(<code>staging/foundation.tfstate</code>, <code>prod/foundation.tfstate</code>) with matching <code>*.tfvars</code>.</p>
+
+<h2>foundation</h2>
+<p>The shared layer. Providers: <code>aws ~&gt; 5.0</code> and <code>random ~&gt; 3.6</code> (the latter generates
+<code>DROP_SESSION_SECRET</code> in-state). It creates:</p>
+<ul>
+  <li><strong>ECR</strong> — the Drop image repository + a lifecycle policy.</li>
+  <li><strong>S3</strong> — the private sites bucket (versioned, encrypted, public access blocked) and an IAM policy granting Drop's S3 access.</li>
+  <li><strong>ACM</strong> — a <code>*.&lt;base_domain&gt;</code> wildcard certificate, DNS-validated via Route53.</li>
+  <li><strong>RDS</strong> — a PostgreSQL instance (via <code>terraform-aws-modules/rds/aws</code>) and its security group.</li>
+  <li><strong>Secrets Manager</strong> — three secrets: <code>DROP_SESSION_SECRET</code> (generated), <code>DROP_GOOGLE_CLIENT_SECRET</code>, and <code>DROP_DATABASE_URL</code>.</li>
+</ul>
+<p>Key inputs (full list in <code>foundation/variables.tf</code>; <strong>bold</strong> = required, no default):</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><strong><code>route53_zone_id</code></strong></td><td>—</td><td>Hosted zone for <code>base_domain</code> (ACM validation + records).</td></tr>
+<tr><td><strong><code>vpc_id</code></strong></td><td>—</td><td>Existing VPC to place resources in.</td></tr>
+<tr><td><strong><code>private_subnet_ids</code></strong></td><td>—</td><td>Private subnets (RDS subnet group; reused by the compute variants).</td></tr>
+<tr><td><strong><code>db_password</code></strong></td><td>— <span class="cx">(sensitive)</span></td><td>RDS master password. Prefer <code>TF_VAR_db_password</code>.</td></tr>
+<tr><td><strong><code>google_client_secret</code></strong></td><td>— <span class="cx">(sensitive)</span></td><td>Google OAuth client secret. Prefer <code>TF_VAR_google_client_secret</code>.</td></tr>
+<tr><td><code>region</code></td><td><code>us-east-1</code></td><td>AWS region for all foundation resources.</td></tr>
+<tr><td><code>name_prefix</code></td><td><code>drop</code></td><td>Prefix on every resource name and tag.</td></tr>
+<tr><td><code>base_domain</code></td><td><code>drop.example.com</code></td><td><code>api.&lt;base_domain&gt;</code> = control plane; <code>*.&lt;base_domain&gt;</code> = sites.</td></tr>
+<tr><td><code>db_instance_class</code></td><td><code>db.t4g.micro</code></td><td>RDS instance size.</td></tr>
+<tr><td><code>db_allocated_storage</code></td><td><code>20</code></td><td>RDS storage (GiB).</td></tr>
+<tr><td><code>corp_cidr</code></td><td><code>10.0.0.0/8</code></td><td>CIDR allowed to reach RDS on 5432.</td></tr>
+</tbody>
+</table>
+<p>It exports outputs the variants consume via remote state: <code>ecr_repository_url</code>, <code>s3_bucket</code>,
+<code>s3_access_policy_arn</code>, <code>acm_certificate_arn</code>, <code>rds_endpoint</code>,
+<code>rds_security_group_id</code>, the three <code>secret_*_arn</code>s, plus pass-throughs
+(<code>vpc_id</code>, <code>private_subnet_ids</code>, <code>route53_zone_id</code>, <code>base_domain</code>, <code>region</code>).</p>
+
+<h2>Variant A — EKS (Kubernetes)</h2>
+<p>Providers: <code>aws</code>, <code>helm ~&gt; 2.0</code>, <code>kubernetes ~&gt; 2.0</code>, <code>http ~&gt; 3.0</code>.
+It provisions an EKS cluster (<code>terraform-aws-modules/eks/aws</code>) in the foundation's VPC, wires
+<strong>IRSA</strong> so Drop's ServiceAccount assumes the S3 IAM role, installs the <strong>AWS Load Balancer
+Controller</strong>, syncs the three Secrets Manager values into a Kubernetes <code>Secret</code>, and installs the
+<strong>Drop Helm chart</strong> (api + edge) behind one internal ALB Ingress — then points the <code>api</code> and
+wildcard Route53 records at that ALB.</p>
+<div class="note"><span class="lbl">Note</span><p>The Drop API runs Postgres schema migrations on boot under a
+<code>pg_advisory_lock</code>, so a multi-replica rollout is safe — one pod migrates, the rest wait then serve. The
+edge connects read-only and never migrates.</p></div>
+<p>Key inputs (full list in <code>eks/variables.tf</code>):</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><strong><code>tfstate_bucket</code></strong></td><td>—</td><td>State bucket, used to read <code>foundation.tfstate</code>.</td></tr>
+<tr><td><strong><code>google_client_id</code></strong></td><td>—</td><td>Google OAuth Web client ID (not secret).</td></tr>
+<tr><td><code>allowed_domains</code></td><td><code>""</code></td><td>Comma-separated Workspace domains (empty = any Google account).</td></tr>
+<tr><td><code>admins</code></td><td><code>""</code></td><td>Comma-separated emails seeded as platform admins.</td></tr>
+<tr><td><code>cluster_version</code></td><td><code>1.31</code></td><td>EKS control-plane version.</td></tr>
+<tr><td><code>node_instance_types</code></td><td><code>["t3.large"]</code></td><td>Managed node group instance types.</td></tr>
+<tr><td><code>node_desired_size</code> / <code>min</code> / <code>max</code></td><td><code>2</code> / <code>2</code> / <code>4</code></td><td>Worker node group sizing.</td></tr>
+<tr><td><code>namespace</code> / <code>service_account_name</code></td><td><code>drop</code> / <code>drop</code></td><td>Where Drop runs; the SA is the IRSA target.</td></tr>
+</tbody>
+</table>
+<p>Outputs include <code>cluster_name</code>, <code>api_url</code>, <code>drop_irsa_role_arn</code>,
+<code>ingress_alb_hostname</code>, and a ready-to-run <code>kubeconfig_command</code>.</p>
+
+<h2>Variant B — ECS (Fargate)</h2>
+<p>Provider: <code>aws</code> only — no Kubernetes. It builds the runtime directly: ALB + app security groups (and an
+RDS ingress rule from the app SG), an <strong>internal ALB</strong> with <code>api</code> and <code>edge</code> target
+groups and an HTTPS listener (host rule routes <code>api.&lt;base_domain&gt;</code> → api, everything else → edge), an
+ECS cluster, execution + task IAM roles (the task role gets the foundation's S3 policy; the execution role reads the
+three secrets), CloudWatch log groups, <code>api</code> and <code>edge</code> task definitions and services, and the
+<code>api</code> + wildcard Route53 records.</p>
+<p>Key inputs (full list in <code>ecs/variables.tf</code>):</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><strong><code>tfstate_bucket</code></strong></td><td>—</td><td>State bucket, used to read <code>foundation.tfstate</code>.</td></tr>
+<tr><td><code>image_tag</code></td><td><code>latest</code></td><td>Image tag to deploy from the foundation ECR repo.</td></tr>
+<tr><td><code>base_domain</code></td><td><code>""</code></td><td>Empty inherits <code>base_domain</code> from the foundation remote state.</td></tr>
+<tr><td><code>google_client_id</code></td><td><code>""</code></td><td><code>DROP_GOOGLE_CLIENT_ID</code> (not secret).</td></tr>
+<tr><td><code>allowed_domains</code> / <code>admins</code></td><td><code>""</code></td><td><code>DROP_ALLOWED_DOMAINS</code> / <code>DROP_ADMINS</code>.</td></tr>
+<tr><td><code>corp_cidr</code></td><td><code>10.0.0.0/8</code></td><td>CIDR allowed to reach the internal ALB on :443.</td></tr>
+<tr><td><code>api_desired_count</code> / <code>edge_desired_count</code></td><td><code>2</code> / <code>2</code></td><td>Task counts per service.</td></tr>
+<tr><td><code>task_cpu</code> / <code>task_memory</code></td><td><code>256</code> / <code>512</code></td><td>Fargate sizing (256 = 0.25 vCPU).</td></tr>
+<tr><td><code>log_retention_days</code></td><td><code>30</code></td><td>CloudWatch Logs retention.</td></tr>
+</tbody>
+</table>
+<p>Outputs include <code>alb_dns_name</code>, <code>ecs_cluster_name</code>, the service and target-group names/ARNs,
+<code>api_url</code>, and <code>sites_url_pattern</code>.</p>
+
+<h2>Apply workflow</h2>
+<p>Each config is initialized and applied on its own, from inside its directory. <code>backend.tf</code> ships a
+placeholder bucket, so pass the real values at <code>init</code> time with <code>-backend-config</code> (the
+<code>key</code> is already set per config); supply environment inputs with a <code>*.tfvars</code> file.</p>
+<pre><code><span class="tok-c"># 1 · foundation</span>
+cd infra/terraform/foundation
+cp terraform.tfvars.example terraform.tfvars   <span class="tok-c"># then edit (or use TF_VAR_ for secrets)</span>
+export TF_VAR_db_password=… TF_VAR_google_client_secret=…
+terraform init \
+  -backend-config="bucket=drop-tfstate" \
+  -backend-config="key=drop/foundation.tfstate" \
+  -backend-config="region=us-east-1"
+terraform apply -var-file=terraform.tfvars
+
+<span class="tok-c"># 2 · build &amp; push the image now that the ECR repo exists (see Prerequisites)</span>
+
+<span class="tok-c"># 3 · pick ONE runtime — eks here; swap 'eks' for 'ecs' for Fargate</span>
+cd ../eks
+terraform init -backend-config="bucket=drop-tfstate" -backend-config="key=drop/eks.tfstate" -backend-config="region=us-east-1"
+terraform apply -var-file=terraform.tfvars</code></pre>
+<p>To tear down, reverse the order: destroy <code>eks</code>/<code>ecs</code> first, then <code>foundation</code>.</p>
+<div class="note tip"><span class="lbl">Secrets</span><p>Never put real secrets in <code>*.tfvars</code>. The sensitive
+foundation inputs (<code>db_password</code>, <code>google_client_secret</code>) are best supplied via
+<code>TF_VAR_…</code> environment variables; the running app reads <code>DROP_SESSION_SECRET</code>,
+<code>DROP_GOOGLE_CLIENT_SECRET</code>, and <code>DROP_DATABASE_URL</code> from Secrets Manager (owned by
+<code>foundation</code>), so the variants never handle them directly.</p></div>
+
+<div class="next">
+  <a href="aws-deployment.html"><div class="d">Compare →</div><div class="t">AWS deployment (CLI walkthrough)</div></a>
+  <a href="deployment.html"><div class="d">Reference →</div><div class="t">Deployment overview</div></a>
+</div>
+
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Deployment · Drop docs</title>
 <link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
 <script defer src="assets/site.js"></script>
 </head>
 <body>
@@ -28,6 +29,7 @@
       <a href="architecture.html">Architecture</a>
       <a href="deployment.html" class="active">Deployment</a>
       <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
     </nav>
   </aside>
   <main class="content"><article>
@@ -35,7 +37,7 @@
 <h1>Deployment</h1>
 <p class="lead">Run Drop on EC2 or Kubernetes — the <strong>api</strong> and <strong>edge</strong> behind one ingress, with external managed Postgres (RDS / CloudSQL) and S3.</p>
 
-<div class="note tip"><span class="lbl">AWS</span><p>Want copy-pasteable AWS CLI commands for every component (ECR, S3, RDS, ACM, Secrets, security groups, ALB, Route 53) with two variants — <strong>EKS</strong> and <strong>ECS Fargate (no Kubernetes)</strong>? See <a href="aws-deployment.html">AWS deployment</a>.</p></div>
+<div class="note tip"><span class="lbl">AWS</span><p>Want copy-pasteable AWS CLI commands for every component (ECR, S3, RDS, ACM, Secrets, security groups, ALB, Route 53) with two variants — <strong>EKS</strong> and <strong>ECS Fargate (no Kubernetes)</strong>? See <a href="aws-deployment.html">AWS deployment</a>, or the <a href="terraform.html">Terraform</a> page for the same components as code.</p></div>
 
 <p>Drop is two processes from one image: a control-plane <strong>api</strong> and a read-only serving <strong>edge</strong>. Both sit behind a single ingress. All metadata lives in an external managed Postgres; the served file bytes live in S3 (the chart bundles neither — backups and HA are the platform's responsibility). The api runs schema migrations on boot under a Postgres <code>pg_advisory_lock</code>, so a multi-replica rollout is safe: one pod migrates while the rest wait, then serve. The edge connects read-only and never migrates.</p>
 

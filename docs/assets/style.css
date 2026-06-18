@@ -84,6 +84,11 @@ hr { border: none; border-top: 1px solid var(--line); margin: 34px 0; }
 pre { background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 15px 17px; overflow-x: auto; font-size: 13px; line-height: 1.6; margin: 14px 0; }
 pre code { font-size: 13px; color: #d8e6df; }
 :not(pre) > code { background: var(--surface2); border: 1px solid var(--line); border-radius: 6px; padding: 1.5px 6px; color: var(--g2); white-space: nowrap; }
+/* copy-to-clipboard button on code blocks (injected by site.js) */
+pre.has-copy { position: relative; }
+.copy-btn { position: absolute; top: 8px; right: 9px; font-family: var(--mono); font-size: 11px; color: var(--mut); background: var(--surface2); border: 1px solid var(--line2); border-radius: 6px; padding: 4px 9px; cursor: pointer; opacity: 0; transition: opacity .15s ease, color .15s ease, border-color .15s ease; }
+pre.has-copy:hover .copy-btn, .copy-btn:focus { opacity: 1; }
+.copy-btn:hover { color: var(--g2); border-color: var(--g); }
 .tok-c { color: var(--dim); }      /* comment */
 .tok-k { color: var(--blue); }     /* key/keyword */
 .tok-s { color: var(--g2); }       /* string */

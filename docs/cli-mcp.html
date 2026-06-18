@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CLI, MCP &amp; Dashboard · Drop docs</title>
 <link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
 <script defer src="assets/site.js"></script>
 </head>
 <body>
@@ -28,6 +29,7 @@
       <a href="architecture.html">Architecture</a>
       <a href="deployment.html">Deployment</a>
       <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
     </nav>
   </aside>
   <main class="content"><article>
@@ -47,14 +49,15 @@
 <p>The CLI is <code>bin/drop.ts</code>, bundled to <code>dist/drop.js</code>. It targets <code>*.drop.example.com</code> and stores its session in <code>~/.config/drop/session.json</code> — the same file the MCP server uses.</p>
 
 <h3>Install options</h3>
-<p><strong>Option 1 — <code>npx</code> straight from git (no install, recommended).</strong> <code>npx</code> clones the repo, runs the <code>prepare</code> step (esbuild bundles both <code>dist/drop.js</code> and <code>dist/mcp.js</code>), and runs it. Works on any machine with Node 18+.</p>
+<p><strong>Option 1 — one-line install from your Drop server (recommended).</strong> The deployed API serves its own installer at <code>/install.sh</code>, already templated with that instance's URL. It downloads the CLI bundles the same API serves, drops a <code>drop</code> command on your PATH (no sudo, no git, no npm), and <strong>auto-configures the API URL</strong> — so <code>drop login</code> and <code>drop publish</code> work immediately. Idempotent; re-run any time to update. Needs only Node 18+.</p>
+<pre><code>curl -fsSL https://api.drop.example.com/install.sh | sh
+drop login
+drop publish ./dist myapp</code></pre>
+<p>The dashboard for your instance shows this exact command with your real API URL filled in — copy it from there.</p>
+<p><strong>Option 2 — <code>npx</code> straight from git (no install).</strong> <code>npx</code> clones the repo, runs the <code>prepare</code> step (esbuild bundles both <code>dist/drop.js</code> and <code>dist/mcp.js</code>), and runs it. Good for one-off CI invocations.</p>
 <pre><code>npx git+https://git.example.com/scm/&lt;team&gt;/drop.git publish ./dist myapp
 # pin a tag/branch:  npx git+https://…/drop.git#v0.1.0 ls
 # set the API once:  export DROP_API=https://api.drop.example.com</code></pre>
-<p><strong>Option 2 — <code>install.sh</code> (persistent <code>drop</code> command).</strong> Idempotent, no sudo; it puts a <code>drop</code> command on your PATH.</p>
-<pre><code>git clone &lt;repo&gt; &amp;&amp; cd drop
-./install.sh --api https://api.drop.example.com
-drop publish ./dist myapp</code></pre>
 
 <h3>Auth</h3>
 <p><code>drop login</code> signs in with Google <strong>through the Drop server</strong> — the API owns the Google credentials and hands back a session token, so no Google client id/secret lives on your machine. Clients need <strong>only <code>DROP_API</code></strong> (or pass <code>--api &lt;url&gt;</code>); it defaults to <code>https://api.drop.example.com</code>. For local work against <code>make start</code>, <code>drop dev-login &lt;sub&gt; &lt;email&gt;</code> saves a session without Google, and requires <code>DROP_DEV_AUTH=1</code> on the API.</p>
@@ -63,11 +66,13 @@ drop publish ./dist myapp</code></pre>
 <table class="tbl">
 <thead><tr><th>Command</th><th>What it does</th><th>Example</th></tr></thead>
 <tbody>
+<tr><td><code>config set-api &lt;url&gt;</code></td><td>Save the control-plane URL once (the served installer does this for you)</td><td><code>drop config set-api https://api.drop.example.com</code></td></tr>
+<tr><td><code>config show</code></td><td>Print the saved config and the resolved API base</td><td><code>drop config show</code></td></tr>
 <tr><td><code>login</code></td><td>Sign in with Google via the Drop server; saves the session</td><td><code>drop login</code></td></tr>
 <tr><td><code>dev-login &lt;sub&gt; &lt;email&gt;</code></td><td>Local-only login (requires <code>DROP_DEV_AUTH=1</code> on the API)</td><td><code>drop dev-login alice alice@example.com</code></td></tr>
 <tr><td><code>logout</code></td><td>Clear the saved session</td><td><code>drop logout</code></td></tr>
 <tr><td><code>publish &lt;dir&gt; [name]</code></td><td>Publish a built folder; name optional — taken from <code>_drop.json</code>, else generated</td><td><code>drop publish ./dist myapp</code></td></tr>
-<tr><td><code>rollback &lt;name&gt;</code></td><td>Roll back to the previous version, or <code>--to &lt;version&gt;</code> for a specific one</td><td><code>drop rollback myapp --to v3</code></td></tr>
+<tr><td><code>rollback &lt;name&gt;</code></td><td>Roll back to the previous version, or <code>--to &lt;version&gt;</code> for a specific one (version ids look like <code>v_…</code>; see <code>drop info</code>)</td><td><code>drop rollback myapp</code></td></tr>
 <tr><td><code>info &lt;name&gt;</code></td><td>Show site metadata</td><td><code>drop info myapp</code></td></tr>
 <tr><td><code>members &lt;name&gt;</code></td><td>Show owner + collaborators</td><td><code>drop members myapp</code></td></tr>
 <tr><td><code>ls</code></td><td>List your sites</td><td><code>drop ls</code></td></tr>
@@ -80,9 +85,22 @@ drop publish ./dist myapp</code></pre>
 <p>A global <code>--api &lt;url&gt;</code> flag sets the control-plane base URL for any command. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for who may run what, and <a href="configuration.html">Configuration</a> for how <code>_drop.json</code> picks the publish target.</p>
 
 <h2>MCP server</h2>
-<p>Drop ships an <strong>MCP server</strong>, so any MCP client (Claude Code/Desktop, Cursor, …) can publish and manage sites in natural language. The client launches the server on demand via <code>npx</code> — nothing to install. The <code>prepare</code> step that runs on clone builds the server bundle at <code>dist/mcp.js</code>, which is what makes <code>npx … drop-mcp</code> work without a separate build.</p>
+<p>Drop ships an <strong>MCP server</strong>, so any MCP client (Claude Code/Desktop, Cursor, …) can publish and manage sites in natural language. Use the <code>drop-mcp</code> command the installer puts on your PATH, or launch it on demand via <code>npx</code> — both are shown below.</p>
 
-<p>Add to your MCP config (e.g. Claude Code <code>.mcp.json</code>):</p>
+<p><strong>Option A — installed <code>drop-mcp</code> (recommended).</strong> The served installer
+(<code>curl … /install.sh | sh</code>) puts <code>drop-mcp</code> on your PATH alongside <code>drop</code>. Point your
+MCP config (e.g. Claude Code <code>.mcp.json</code>) straight at it:</p>
+<pre><code>{
+  <span class="tok-k">"mcpServers"</span>: {
+    <span class="tok-k">"drop"</span>: {
+      <span class="tok-k">"command"</span>: <span class="tok-s">"drop-mcp"</span>,
+      <span class="tok-k">"env"</span>: { <span class="tok-k">"DROP_API"</span>: <span class="tok-s">"https://api.drop.example.com"</span> }
+    }
+  }
+}</code></pre>
+<p><strong>Option B — <code>npx</code> (no install).</strong> The client launches the server on demand straight from
+git — the <code>prepare</code> step on clone builds <code>dist/mcp.js</code>, which is what makes <code>npx … drop-mcp</code>
+work without a separate build:</p>
 <pre><code>{
   <span class="tok-k">"mcpServers"</span>: {
     <span class="tok-k">"drop"</span>: {
