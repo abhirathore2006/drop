@@ -1,21 +1,27 @@
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { parseSiteConfig, matchRedirect, headersForPath, basicAuthOk, corsHeaders } from "./site-config.ts";
+import {
+  sanitizeSiteConfig,
+  parseDropYaml,
+  CONFIG_FILE_YAML,
+  matchRedirect,
+  headersForPath,
+  basicAuthOk,
+  corsHeaders,
+} from "./site-config.ts";
 
 const sha = (s: string) => "sha256:" + createHash("sha256").update(s).digest("hex");
 
-test("parse keeps known fields, drops junk", () => {
-  const c = parseSiteConfig(
-    JSON.stringify({
-      spaFallback: "app.html",
-      cleanUrls: true,
-      redirects: [{ from: "/old", to: "/new", status: 302 }, { bad: true }],
-      headers: [{ source: "/assets/*", headers: { "Cache-Control": "public, max-age=31536000", x: 1 } }],
-      cors: { allowOrigins: ["https://x.com"], credentials: true },
-      basicAuth: { realm: "R", users: { alice: "pw" } },
-      nonsense: 123,
-    }),
-  );
+test("sanitize keeps known fields, drops junk", () => {
+  const c = sanitizeSiteConfig({
+    spaFallback: "app.html",
+    cleanUrls: true,
+    redirects: [{ from: "/old", to: "/new", status: 302 }, { bad: true }],
+    headers: [{ source: "/assets/*", headers: { "Cache-Control": "public, max-age=31536000", x: 1 } }],
+    cors: { allowOrigins: ["https://x.com"], credentials: true },
+    basicAuth: { realm: "R", users: { alice: "pw" } },
+    nonsense: 123,
+  });
   expect(c.spaFallback).toBe("app.html");
   expect(c.cleanUrls).toBe(true);
   expect(c.redirects).toEqual([{ from: "/old", to: "/new", status: 302 }]);
@@ -26,12 +32,11 @@ test("parse keeps known fields, drops junk", () => {
   expect((c as any).nonsense).toBeUndefined();
 });
 
-test("spaFallback:false disables", () => {
-  expect(parseSiteConfig('{"spaFallback":false}').spaFallback).toBe(false);
-});
-
-test("invalid JSON throws", () => {
-  expect(() => parseSiteConfig("{not json")).toThrow();
+test("sanitize: spaFallback:false disables; tolerates null/undefined/non-objects", () => {
+  expect(sanitizeSiteConfig({ spaFallback: false }).spaFallback).toBe(false);
+  expect(sanitizeSiteConfig(undefined)).toEqual({});
+  expect(sanitizeSiteConfig(null)).toEqual({});
+  expect(sanitizeSiteConfig("nope")).toEqual({});
 });
 
 test("matchRedirect: exact, glob splat, default status", () => {
@@ -68,26 +73,6 @@ test("corsHeaders: wildcard and explicit origin", () => {
   expect(corsHeaders("https://evil.com", { allowOrigins: ["https://a.com"] })).toEqual({});
 });
 
-import {
-  sanitizeSiteConfig,
-  parseDropYaml,
-  loadSiteConfig,
-  CONFIG_FILE_YAML,
-  CONFIG_FILE_JSON,
-} from "./site-config.ts";
-
-test("sanitizeSiteConfig sanitizes a raw object like parseSiteConfig does its JSON", () => {
-  const raw = { spaFallback: "app.html", redirects: [{ from: "/old", to: "/new" }], bogus: 123 };
-  expect(sanitizeSiteConfig(raw)).toEqual(parseSiteConfig(JSON.stringify(raw)));
-  expect(sanitizeSiteConfig(raw).spaFallback).toBe("app.html");
-});
-
-test("sanitizeSiteConfig tolerates null/undefined/non-objects", () => {
-  expect(sanitizeSiteConfig(undefined)).toEqual({});
-  expect(sanitizeSiteConfig(null)).toEqual({});
-  expect(sanitizeSiteConfig("nope")).toEqual({});
-});
-
 test("parseDropYaml reads the site: section into a SiteConfig", () => {
   const cfg = parseDropYaml(
     'site:\n  spaFallback: false\n  headers:\n    - source: "/*"\n      headers:\n        x-frame-options: SAMEORIGIN\n',
@@ -105,14 +90,6 @@ test("parseDropYaml throws on malformed YAML", () => {
   expect(() => parseDropYaml("site:\n  - : : :\n   bad")).toThrow();
 });
 
-test("loadSiteConfig prefers drop.yaml over _drop.json", () => {
-  const r = loadSiteConfig({ yaml: "site:\n  name: fromyaml\n", json: '{"name":"fromjson"}' });
-  expect(r).toEqual({ config: { name: "fromyaml" }, source: "drop.yaml" });
-});
-
-test("loadSiteConfig falls back to _drop.json, and returns undefined for neither", () => {
-  expect(loadSiteConfig({ json: '{"name":"fromjson"}' })).toEqual({ config: { name: "fromjson" }, source: "_drop.json" });
-  expect(loadSiteConfig({})).toBeUndefined();
+test("CONFIG_FILE_YAML is drop.yaml", () => {
   expect(CONFIG_FILE_YAML).toBe("drop.yaml");
-  expect(CONFIG_FILE_JSON).toBe("_drop.json");
 });

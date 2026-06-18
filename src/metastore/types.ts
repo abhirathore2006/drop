@@ -16,7 +16,7 @@ export interface Site {
   members: Member[]; // full membership incl. owner
   currentVersion: string | null;
   visibility: Visibility;
-  config?: SiteConfig; // current version's parsed _drop.json (denormalized for the edge)
+  config?: SiteConfig; // current version's parsed drop.yaml (denormalized for the edge)
   createdAt: string; // ISO
   updatedAt: string; // ISO
 }

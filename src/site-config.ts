@@ -2,8 +2,9 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { validateName } from "./names.ts";
 
-// Per-site config, published as `_drop.json` at the site root. The API parses it
-// at publish time (it is NOT served as a file); the edge applies it per request.
+// Per-site config, published as `drop.yaml` at the site root (static fields under
+// `site:`). The API parses it at publish time (it is NOT served as a file); the
+// edge applies it per request.
 export interface SiteConfig {
   name?: string; // site name — lets `drop publish ./dist` identify the target from the bundle
   spaFallback?: string | false; // doc to serve for navigation misses (default "index.html"); false disables
@@ -100,13 +101,8 @@ export function sanitizeSiteConfig(input: unknown): SiteConfig {
   return cfg;
 }
 
-/** Parse + sanitize a `_drop.json` body (JSON). Throws on invalid JSON. */
-export function parseSiteConfig(text: string): SiteConfig {
-  return sanitizeSiteConfig(JSON.parse(text));
-}
-
 /** Parse a `drop.yaml` body. Static config lives under `site:`; other top-level
- *  sections (app:, database:) are ignored in Phase 0. Throws on malformed YAML. */
+ *  sections (app:, database:) are ignored for now. Throws on malformed YAML. */
 export function parseDropYaml(text: string): SiteConfig {
   const doc = parseYaml(text) as Record<string, unknown> | null;
   const site = doc && typeof doc === "object" ? (doc as Record<string, unknown>).site : undefined;
@@ -114,17 +110,6 @@ export function parseDropYaml(text: string): SiteConfig {
 }
 
 export const CONFIG_FILE_YAML = "drop.yaml";
-export const CONFIG_FILE_JSON = "_drop.json";
-
-/** Resolve a site's config from the bundle's config file bytes.
- *  drop.yaml is canonical; _drop.json is the deprecated fallback. */
-export function loadSiteConfig(
-  files: { yaml?: string; json?: string },
-): { config: SiteConfig; source: "drop.yaml" | "_drop.json" } | undefined {
-  if (files.yaml != null) return { config: parseDropYaml(files.yaml), source: CONFIG_FILE_YAML };
-  if (files.json != null) return { config: parseSiteConfig(files.json), source: CONFIG_FILE_JSON };
-  return undefined;
-}
 
 function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

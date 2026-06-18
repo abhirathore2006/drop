@@ -1,8 +1,0 @@
-{
-  "spaFallback": false,
-  "cleanUrls": true,
-  "notFound": "404.html",
-  "headers": [
-    { "source": "/style.css", "headers": { "cache-control": "public, max-age=3600" } }
-  ]
-}

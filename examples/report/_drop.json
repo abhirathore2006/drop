@@ -1,6 +1,0 @@
-{
-  "spaFallback": false,
-  "headers": [
-    { "source": "/*", "headers": { "x-frame-options": "SAMEORIGIN", "referrer-policy": "no-referrer" } }
-  ]
-}

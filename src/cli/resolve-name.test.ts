@@ -11,16 +11,16 @@ function dirWith(files: Record<string, string>): string {
 }
 
 test("explicit arg wins", async () => {
-  const d = dirWith({ "_drop.json": JSON.stringify({ name: "fromfile" }) });
+  const d = dirWith({ "drop.yaml": "site:\n  name: fromfile\n" });
   expect(await resolveSiteName(d, "fromarg")).toEqual({ name: "fromarg", source: "arg" });
 });
 
-test("falls back to _drop.json name", async () => {
-  const d = dirWith({ "_drop.json": JSON.stringify({ name: "siteb", spaFallback: "index.html" }) });
-  expect(await resolveSiteName(d)).toEqual({ name: "siteb", source: "_drop.json" });
+test("falls back to drop.yaml site.name", async () => {
+  const d = dirWith({ "drop.yaml": "site:\n  name: siteb\n  spaFallback: index.html\n" });
+  expect(await resolveSiteName(d)).toEqual({ name: "siteb", source: "drop.yaml" });
 });
 
-test("generates when no arg and no _drop.json name", async () => {
+test("generates when no arg and no drop.yaml name", async () => {
   const d = dirWith({ "index.html": "<html>" });
   const r = await resolveSiteName(d);
   expect(r.source).toBe("generated");
@@ -30,14 +30,4 @@ test("generates when no arg and no _drop.json name", async () => {
 test("invalid explicit name throws", async () => {
   const d = dirWith({});
   await expect(resolveSiteName(d, "Bad_Name")).rejects.toThrow();
-});
-
-test("reads name from drop.yaml, preferring it over _drop.json", async () => {
-  const d = dirWith({ "drop.yaml": "site:\n  name: fromyaml\n", "_drop.json": JSON.stringify({ name: "fromjson" }) });
-  expect(await resolveSiteName(d)).toEqual({ name: "fromyaml", source: "drop.yaml" });
-});
-
-test("still reads _drop.json name when no drop.yaml", async () => {
-  const d = dirWith({ "_drop.json": JSON.stringify({ name: "fromjson" }) });
-  expect(await resolveSiteName(d)).toEqual({ name: "fromjson", source: "_drop.json" });
 });

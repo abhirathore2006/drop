@@ -161,7 +161,7 @@ test("publishing a bundle with basicAuth sets password visibility", async () => 
   const { app, meta, db } = await mk();
   const tar = await tgz({
     "index.html": "<html>",
-    "_drop.json": JSON.stringify({ basicAuth: { users: { admin: "sha256:abc" } } }),
+    "drop.yaml": 'site:\n  basicAuth:\n    users:\n      admin: "sha256:abc"\n',
   });
   expect((await pub(app, "alice", "secret", tar)).status).toBe(200);
   expect((await meta.getSitePlain("secret"))!.visibility).toBe("password");
@@ -203,11 +203,11 @@ test("/v1/me reports admin flag from the users table", async () => {
   await db.destroy();
 });
 
-test("publish parses _drop.json into config and does not serve it", async () => {
+test("publish parses drop.yaml into config and does not serve it", async () => {
   const { app, meta, blob, db } = await mk();
   const tar = await tgz({
     "index.html": "<html>",
-    "_drop.json": JSON.stringify({ spaFallback: "app.html", redirects: [{ from: "/old", to: "/new" }] }),
+    "drop.yaml": "site:\n  spaFallback: app.html\n  redirects:\n    - from: /old\n      to: /new\n",
   });
   expect((await pub(app, "alice", "cfgsite", tar)).status).toBe(200);
 
@@ -216,7 +216,7 @@ test("publish parses _drop.json into config and does not serve it", async () => 
   expect(site.config?.redirects?.[0]!.to).toBe("/new");
 
   const prefix = meta.filesPrefix("cfgsite", site.currentVersion!);
-  expect(await blob.get(prefix + "_drop.json")).toBeNull(); // not a served file
+  expect(await blob.get(prefix + "drop.yaml")).toBeNull(); // not a served file
   expect(await blob.get(prefix + "index.html")).not.toBeNull();
   await db.destroy();
 });
@@ -263,29 +263,9 @@ test("serves the docs site at /docs (public, no auth)", async () => {
   await db.destroy();
 });
 
-test("publish rejects when _drop.json name mismatches the target", async () => {
+test("publish rejects when drop.yaml name mismatches the target", async () => {
   const { app, db } = await mk();
-  const tar = await tgz({ "index.html": "<html>", "_drop.json": JSON.stringify({ name: "otherapp" }) });
+  const tar = await tgz({ "index.html": "<html>", "drop.yaml": "site:\n  name: otherapp\n" });
   expect((await pub(app, "alice", "myapp", tar)).status).toBe(400);
-  await db.destroy();
-});
-
-test("publish parses drop.yaml into config (preferred over _drop.json) and serves neither", async () => {
-  const { app, meta, blob, db } = await mk();
-  const tar = await tgz({
-    "index.html": "<html>",
-    "drop.yaml": "site:\n  spaFallback: app.html\n  redirects:\n    - from: /old\n      to: /new\n",
-    "_drop.json": JSON.stringify({ spaFallback: "ignored.html" }),
-  });
-  expect((await pub(app, "alice", "yamlsite", tar)).status).toBe(200);
-
-  const site = (await meta.getSitePlain("yamlsite"))!;
-  expect(site.config?.spaFallback).toBe("app.html"); // drop.yaml won over _drop.json
-  expect(site.config?.redirects?.[0]!.to).toBe("/new");
-
-  const prefix = meta.filesPrefix("yamlsite", site.currentVersion!);
-  expect(await blob.get(prefix + "drop.yaml")).toBeNull(); // config, not served
-  expect(await blob.get(prefix + "_drop.json")).toBeNull();
-  expect(await blob.get(prefix + "index.html")).not.toBeNull();
   await db.destroy();
 });

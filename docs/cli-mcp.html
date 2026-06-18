@@ -71,7 +71,7 @@ drop publish ./dist myapp</code></pre>
 <tr><td><code>login</code></td><td>Sign in with Google via the Drop server; saves the session</td><td><code>drop login</code></td></tr>
 <tr><td><code>dev-login &lt;sub&gt; &lt;email&gt;</code></td><td>Local-only login (requires <code>DROP_DEV_AUTH=1</code> on the API)</td><td><code>drop dev-login alice alice@example.com</code></td></tr>
 <tr><td><code>logout</code></td><td>Clear the saved session</td><td><code>drop logout</code></td></tr>
-<tr><td><code>publish &lt;dir&gt; [name]</code></td><td>Publish a built folder; name optional — taken from <code>drop.yaml</code>/<code>_drop.json</code>, else generated</td><td><code>drop publish ./dist myapp</code></td></tr>
+<tr><td><code>publish &lt;dir&gt; [name]</code></td><td>Publish a built folder; name optional — taken from <code>drop.yaml</code>, else generated</td><td><code>drop publish ./dist myapp</code></td></tr>
 <tr><td><code>rollback &lt;name&gt;</code></td><td>Roll back to the previous version, or <code>--to &lt;version&gt;</code> for a specific one (version ids look like <code>v_…</code>; see <code>drop info</code>)</td><td><code>drop rollback myapp</code></td></tr>
 <tr><td><code>info &lt;name&gt;</code></td><td>Show site metadata</td><td><code>drop info myapp</code></td></tr>
 <tr><td><code>members &lt;name&gt;</code></td><td>Show owner + collaborators</td><td><code>drop members myapp</code></td></tr>

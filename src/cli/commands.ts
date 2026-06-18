@@ -70,7 +70,7 @@ export function buildProgram(): Command {
 
   program
     .command("publish <dir> [name]")
-    .description("Publish a built folder (name optional — taken from _drop.json, else generated)")
+    .description("Publish a built folder (name optional — taken from drop.yaml, else generated)")
     .action(async (dir: string, nameArg?: string) => {
       const { name, source } = await resolveSiteName(dir, nameArg);
       console.log(`  ▸ packing ${dir}`);
@@ -81,16 +81,6 @@ export function buildProgram(): Command {
       if (source === "generated") {
         console.log(`  tip: add  name: ${name}  under site: in drop.yaml to keep this URL across deploys.`);
       }
-    });
-
-  program
-    .command("migrate-config [dir]")
-    .description("Convert _drop.json → drop.yaml (config under site:) in a folder")
-    .action(async (dir = ".") => {
-      const { migrateConfig } = await import("./migrate-config.ts");
-      const r = await migrateConfig(dir);
-      if ("written" in r) console.log(`✓ wrote ${r.written}`);
-      else console.log(`• skipped — ${r.skipped} already exists`);
     });
 
   program

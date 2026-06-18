@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import * as streamConsumers from "node:stream/consumers";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { hashPassword, loadSiteConfig, CONFIG_FILE_YAML, CONFIG_FILE_JSON, type SiteConfig } from "../site-config.ts";
+import { hashPassword, parseDropYaml, CONFIG_FILE_YAML, type SiteConfig } from "../site-config.ts";
 import { installScript } from "./install.ts";
 import type { Config } from "../config.ts";
 import type { BlobStore } from "../blob/types.ts";
@@ -127,14 +127,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const nodeStream = Readable.fromWeb(c.req.raw.body as Parameters<typeof Readable.fromWeb>[0]);
 
     let result: { files: number; bytes: number };
-    // Config files are parsed at publish time, never served (they may carry credentials).
-    const captured: { yaml?: Buffer; json?: Buffer } = {};
+    // drop.yaml is parsed at publish time, never served (it may carry credentials).
+    const captured: { yaml?: Buffer } = {};
     try {
       result = await extractTarGz(
         nodeStream,
         async (rel, body, size, ct) => {
           if (rel === CONFIG_FILE_YAML) { captured.yaml = await streamConsumers.buffer(body); return; }
-          if (rel === CONFIG_FILE_JSON) { captured.json = await streamConsumers.buffer(body); return; }
           await d.blob.put(prefix + rel, body, size, ct);
         },
         { maxFiles: d.cfg.maxFiles, maxBytes: d.cfg.maxUploadBytes },
@@ -145,17 +144,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
 
     let config: SiteConfig | undefined;
-    try {
-      // drop.yaml is canonical; _drop.json is the deprecated fallback.
-      const loaded = loadSiteConfig({ yaml: captured.yaml?.toString("utf8"), json: captured.json?.toString("utf8") });
-      config = loaded?.config;
-    } catch (e) {
-      await d.blob.deletePrefix(prefix).catch(() => {});
-      return c.json({ error: `invalid config (drop.yaml/_drop.json): ${(e as Error).message}` }, 400);
+    if (captured.yaml) {
+      try {
+        config = parseDropYaml(captured.yaml.toString("utf8"));
+      } catch (e) {
+        await d.blob.deletePrefix(prefix).catch(() => {});
+        return c.json({ error: `invalid drop.yaml: ${(e as Error).message}` }, 400);
+      }
     }
     if (config?.name && config.name !== name) {
       await d.blob.deletePrefix(prefix).catch(() => {});
-      return c.json({ error: `config name "${config.name}" does not match target site "${name}"` }, 400);
+      return c.json({ error: `drop.yaml name "${config.name}" does not match target site "${name}"` }, 400);
     }
 
     await d.meta.putVersion(name, {

@@ -82,7 +82,7 @@ sequenceDiagram
     loop each file in tarball
         A->>S3: put sites/myapp/files/<verId>/<path>
     end
-    note over A: capture _drop.json (config, not served)
+    note over A: capture drop.yaml (config, not served)
     A->>PG: putVersion(<verId>, fileCount, bytes, config)
     A->>PG: updateSite → current_version, config,<br/>visibility=password if basicAuth [SELECT … FOR UPDATE tx]
     A-->>C: { url, version, files, bytes }
@@ -161,7 +161,7 @@ erDiagram
         text current_version "nullable"
         text visibility "public | private | password"
         text password_hash "nullable"
-        jsonb config "current _drop.json"
+        jsonb config "current drop.yaml"
     }
     site_members {
         text site_name PK "FK → sites; PK is (site_name, email)"

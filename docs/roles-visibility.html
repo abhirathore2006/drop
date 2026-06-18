@@ -82,7 +82,7 @@
 <p>Each site has a <code>visibility</code> of <code>public</code>, <code>password</code>, or <code>private</code>. Set it with <code>POST /v1/sites/:name/visibility</code> (the <code>configure</code> permission) or from the dashboard.</p>
 <ul>
   <li><strong>public</strong> <span class="pill">default</span> — served openly to anyone with the URL.</li>
-  <li><strong>password</strong> — the edge requires HTTP basic-auth against the site's <code>password_hash</code>. Publishing a <a href="configuration.html"><code>_drop.json</code></a> with a <code>basicAuth</code> block also turns this on.</li>
+  <li><strong>password</strong> — the edge requires HTTP basic-auth against the site's <code>password_hash</code>. Publishing a <a href="configuration.html"><code>drop.yaml</code></a> with a <code>basicAuth</code> block also turns this on.</li>
   <li><strong>private</strong> — only members (and platform admins) may view.</li>
 </ul>
 
@@ -98,7 +98,7 @@
 <pre><code>GET /v1/me            → { "admin": true }
 GET /v1/admin/sites?limit=50&amp;prefix=team-&amp;cursor=&lt;name&gt;</code></pre>
 
-<div class="note"><span class="lbl">Note</span><p>Admin status never bypasses per-site ownership or <code>_drop.json</code> name-ownership. A publish still has to satisfy the name claim in the config; being an admin does not let you steal a name that another site already owns.</p></div>
+<div class="note"><span class="lbl">Note</span><p>Admin status never bypasses per-site ownership or <code>drop.yaml</code> name-ownership. A publish still has to satisfy the name claim in the config; being an admin does not let you steal a name that another site already owns.</p></div>
 
 <div class="next">
   <a href="architecture.html"><div class="d">Next →</div><div class="t">Architecture</div></a>
