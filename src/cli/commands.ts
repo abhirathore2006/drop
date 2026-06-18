@@ -84,6 +84,16 @@ export function buildProgram(): Command {
     });
 
   program
+    .command("migrate-config [dir]")
+    .description("Convert _drop.json → drop.yaml (config under site:) in a folder")
+    .action(async (dir = ".") => {
+      const { migrateConfig } = await import("./migrate-config.ts");
+      const r = await migrateConfig(dir);
+      if ("written" in r) console.log(`✓ wrote ${r.written}`);
+      else console.log(`• skipped — ${r.skipped} already exists`);
+    });
+
+  program
     .command("rollback <name>")
     .description("Roll back to the previous (or --to) version")
     .option("--to <version>", "specific version id")
