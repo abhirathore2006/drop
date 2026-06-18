@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import * as streamConsumers from "node:stream/consumers";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { hashPassword, parseSiteConfig, type SiteConfig } from "../site-config.ts";
+import { hashPassword, loadSiteConfig, CONFIG_FILE_YAML, CONFIG_FILE_JSON, type SiteConfig } from "../site-config.ts";
 import { installScript } from "./install.ts";
 import type { Config } from "../config.ts";
 import type { BlobStore } from "../blob/types.ts";
@@ -127,16 +127,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const nodeStream = Readable.fromWeb(c.req.raw.body as Parameters<typeof Readable.fromWeb>[0]);
 
     let result: { files: number; bytes: number };
-    const captured: { raw?: Buffer } = {}; // object wrapper so the closure write survives CFA
+    // Config files are parsed at publish time, never served (they may carry credentials).
+    const captured: { yaml?: Buffer; json?: Buffer } = {};
     try {
       result = await extractTarGz(
         nodeStream,
         async (rel, body, size, ct) => {
-          // _drop.json is config, not a served asset (it may carry credentials).
-          if (rel === "_drop.json") {
-            captured.raw = await streamConsumers.buffer(body);
-            return;
-          }
+          if (rel === CONFIG_FILE_YAML) { captured.yaml = await streamConsumers.buffer(body); return; }
+          if (rel === CONFIG_FILE_JSON) { captured.json = await streamConsumers.buffer(body); return; }
           await d.blob.put(prefix + rel, body, size, ct);
         },
         { maxFiles: d.cfg.maxFiles, maxBytes: d.cfg.maxUploadBytes },
@@ -147,17 +145,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
 
     let config: SiteConfig | undefined;
-    if (captured.raw) {
-      try {
-        config = parseSiteConfig(captured.raw.toString("utf8"));
-      } catch (e) {
-        await d.blob.deletePrefix(prefix).catch(() => {});
-        return c.json({ error: `invalid _drop.json: ${(e as Error).message}` }, 400);
-      }
+    try {
+      // drop.yaml is canonical; _drop.json is the deprecated fallback.
+      const loaded = loadSiteConfig({ yaml: captured.yaml?.toString("utf8"), json: captured.json?.toString("utf8") });
+      config = loaded?.config;
+    } catch (e) {
+      await d.blob.deletePrefix(prefix).catch(() => {});
+      return c.json({ error: `invalid config (drop.yaml/_drop.json): ${(e as Error).message}` }, 400);
     }
     if (config?.name && config.name !== name) {
       await d.blob.deletePrefix(prefix).catch(() => {});
-      return c.json({ error: `_drop.json name "${config.name}" does not match target site "${name}"` }, 400);
+      return c.json({ error: `config name "${config.name}" does not match target site "${name}"` }, 400);
     }
 
     await d.meta.putVersion(name, {

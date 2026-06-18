@@ -269,3 +269,23 @@ test("publish rejects when _drop.json name mismatches the target", async () => {
   expect((await pub(app, "alice", "myapp", tar)).status).toBe(400);
   await db.destroy();
 });
+
+test("publish parses drop.yaml into config (preferred over _drop.json) and serves neither", async () => {
+  const { app, meta, blob, db } = await mk();
+  const tar = await tgz({
+    "index.html": "<html>",
+    "drop.yaml": "site:\n  spaFallback: app.html\n  redirects:\n    - from: /old\n      to: /new\n",
+    "_drop.json": JSON.stringify({ spaFallback: "ignored.html" }),
+  });
+  expect((await pub(app, "alice", "yamlsite", tar)).status).toBe(200);
+
+  const site = (await meta.getSitePlain("yamlsite"))!;
+  expect(site.config?.spaFallback).toBe("app.html"); // drop.yaml won over _drop.json
+  expect(site.config?.redirects?.[0]!.to).toBe("/new");
+
+  const prefix = meta.filesPrefix("yamlsite", site.currentVersion!);
+  expect(await blob.get(prefix + "drop.yaml")).toBeNull(); // config, not served
+  expect(await blob.get(prefix + "_drop.json")).toBeNull();
+  expect(await blob.get(prefix + "index.html")).not.toBeNull();
+  await db.destroy();
+});
