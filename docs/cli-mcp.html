@@ -22,7 +22,7 @@
       <a href="index.html">Overview</a>
       <div class="group">Guides</div>
       <a href="getting-started.html">Getting started</a>
-      <a href="configuration.html">Configuration (_drop.json)</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
       <a href="cli-mcp.html" class="active">CLI, MCP &amp; Dashboard</a>
       <a href="roles-visibility.html">Roles &amp; Visibility</a>
       <div class="group">Reference</div>
@@ -71,7 +71,7 @@ drop publish ./dist myapp</code></pre>
 <tr><td><code>login</code></td><td>Sign in with Google via the Drop server; saves the session</td><td><code>drop login</code></td></tr>
 <tr><td><code>dev-login &lt;sub&gt; &lt;email&gt;</code></td><td>Local-only login (requires <code>DROP_DEV_AUTH=1</code> on the API)</td><td><code>drop dev-login alice alice@example.com</code></td></tr>
 <tr><td><code>logout</code></td><td>Clear the saved session</td><td><code>drop logout</code></td></tr>
-<tr><td><code>publish &lt;dir&gt; [name]</code></td><td>Publish a built folder; name optional — taken from <code>_drop.json</code>, else generated</td><td><code>drop publish ./dist myapp</code></td></tr>
+<tr><td><code>publish &lt;dir&gt; [name]</code></td><td>Publish a built folder; name optional — taken from <code>drop.yaml</code>/<code>_drop.json</code>, else generated</td><td><code>drop publish ./dist myapp</code></td></tr>
 <tr><td><code>rollback &lt;name&gt;</code></td><td>Roll back to the previous version, or <code>--to &lt;version&gt;</code> for a specific one (version ids look like <code>v_…</code>; see <code>drop info</code>)</td><td><code>drop rollback myapp</code></td></tr>
 <tr><td><code>info &lt;name&gt;</code></td><td>Show site metadata</td><td><code>drop info myapp</code></td></tr>
 <tr><td><code>members &lt;name&gt;</code></td><td>Show owner + collaborators</td><td><code>drop members myapp</code></td></tr>
@@ -82,7 +82,7 @@ drop publish ./dist myapp</code></pre>
 <tr><td><code>transfer &lt;name&gt; &lt;email&gt;</code></td><td>Transfer ownership</td><td><code>drop transfer myapp bob@example.com</code></td></tr>
 </tbody>
 </table>
-<p>A global <code>--api &lt;url&gt;</code> flag sets the control-plane base URL for any command. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for who may run what, and <a href="configuration.html">Configuration</a> for how <code>_drop.json</code> picks the publish target.</p>
+<p>A global <code>--api &lt;url&gt;</code> flag sets the control-plane base URL for any command. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for who may run what, and <a href="configuration.html">Configuration</a> for how <code>drop.yaml</code> picks the publish target.</p>
 
 <h2>MCP server</h2>
 <p>Drop ships an <strong>MCP server</strong>, so any MCP client (Claude Code/Desktop, Cursor, …) can publish and manage sites in natural language. Use the <code>drop-mcp</code> command the installer puts on your PATH, or launch it on demand via <code>npx</code> — both are shown below.</p>

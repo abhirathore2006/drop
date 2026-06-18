@@ -22,7 +22,7 @@
       <a href="index.html">Overview</a>
       <div class="group">Guides</div>
       <a href="getting-started.html">Getting started</a>
-      <a href="configuration.html" class="active">Configuration (_drop.json)</a>
+      <a href="configuration.html" class="active">Configuration (drop.yaml)</a>
       <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
       <a href="roles-visibility.html">Roles &amp; Visibility</a>
       <div class="group">Reference</div>
@@ -34,36 +34,34 @@
   </aside>
   <main class="content"><article>
 <p class="crumbs">Guides</p>
-<h1>Configuration — <code>_drop.json</code></h1>
-<p class="lead">A single optional file at your build root controls routing, headers, CORS, and password protection for the published site.</p>
+<h1>Configuration — <code>drop.yaml</code></h1>
+<p class="lead">A single optional file at your build root controls routing, headers, CORS, and password protection for the published site. <code>drop.yaml</code> is canonical; the legacy <code>_drop.json</code> still works but is deprecated.</p>
 
 <h2>How it works</h2>
-<p>Put a <code>_drop.json</code> at the root of your build folder (the same directory you publish — e.g. <code>./dist</code>). At publish time the API parses and sanitizes it; it is <strong>not</strong> served as a file, so visitors can never fetch it back. The edge then applies the parsed config on every request — resolving clean URLs, running redirects, merging headers, answering CORS, and challenging for basic auth.</p>
-<p>The config is <strong>versioned with the deploy</strong>. Each publish can ship a different <code>_drop.json</code>, and a rollback restores the exact config that shipped with that version — routing rules and all.</p>
+<p>Put a <code>drop.yaml</code> at the root of your build folder (the same directory you publish — e.g. <code>./dist</code>), with your static config under a <code>site:</code> section. At publish time the API parses and sanitizes it; it is <strong>not</strong> served as a file, so visitors can never fetch it back. The edge then applies the parsed config on every request — resolving clean URLs, running redirects, merging headers, answering CORS, and challenging for basic auth.</p>
+<p>The config is <strong>versioned with the deploy</strong>. Each publish can ship a different <code>drop.yaml</code>, and a rollback restores the exact config that shipped with that version — routing rules and all.</p>
+<div class="note tip"><span class="lbl">Migrating</span><p>The legacy <code>_drop.json</code> is still read (deprecated; <code>drop.yaml</code> wins when both are present). Convert an existing file in one step — <code>drop migrate-config</code> writes a <code>drop.yaml</code> with your config nested under <code>site:</code>.</p></div>
 
 <div class="note"><span class="lbl">Note</span><p>Parsing is lenient: invalid JSON is rejected outright, but unknown fields and malformed entries are silently ignored rather than failing the publish. List fields are capped at 500 entries.</p></div>
 
 <h2>A complete example</h2>
 <p>Every key is optional. This annotated example uses all of them at once.</p>
-<pre><code>{
-  <span class="tok-k">"name"</span>: <span class="tok-s">"my-site"</span>,                  <span class="tok-c">// target site — lets `drop publish ./dist` skip the name arg</span>
-  <span class="tok-k">"spaFallback"</span>: <span class="tok-s">"index.html"</span>,        <span class="tok-c">// doc served on navigation misses; false to disable</span>
-  <span class="tok-k">"cleanUrls"</span>: true,                  <span class="tok-c">// /about → try /about.html</span>
-  <span class="tok-k">"notFound"</span>: <span class="tok-s">"404.html"</span>,             <span class="tok-c">// custom 404 document (served with status 404)</span>
-  <span class="tok-k">"redirects"</span>: [
-    { <span class="tok-k">"from"</span>: <span class="tok-s">"/old"</span>, <span class="tok-k">"to"</span>: <span class="tok-s">"/new"</span>, <span class="tok-k">"status"</span>: 301 },
-    { <span class="tok-k">"from"</span>: <span class="tok-s">"/docs/*"</span>, <span class="tok-k">"to"</span>: <span class="tok-s">"/help/:splat"</span>, <span class="tok-k">"status"</span>: 302 }
-  ],
-  <span class="tok-k">"headers"</span>: [
-    { <span class="tok-k">"source"</span>: <span class="tok-s">"/assets/*"</span>, <span class="tok-k">"headers"</span>: { <span class="tok-k">"cache-control"</span>: <span class="tok-s">"public, max-age=31536000, immutable"</span> } },
-    { <span class="tok-k">"source"</span>: <span class="tok-s">"/*"</span>, <span class="tok-k">"headers"</span>: { <span class="tok-k">"x-frame-options"</span>: <span class="tok-s">"DENY"</span>, <span class="tok-k">"x-content-type-options"</span>: <span class="tok-s">"nosniff"</span> } }
-  ],
-  <span class="tok-k">"cors"</span>: { <span class="tok-k">"allowOrigins"</span>: [<span class="tok-s">"https://app.example.com"</span>], <span class="tok-k">"allowMethods"</span>: [<span class="tok-s">"GET"</span>, <span class="tok-s">"HEAD"</span>], <span class="tok-k">"maxAge"</span>: 600 },
-  <span class="tok-k">"basicAuth"</span>: {
-    <span class="tok-k">"realm"</span>: <span class="tok-s">"Staging"</span>,
-    <span class="tok-k">"users"</span>: { <span class="tok-k">"team"</span>: <span class="tok-s">"sha256:2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"</span> }
-  }
-}</code></pre>
+<pre><code><span class="tok-k">site</span>:                                  <span class="tok-c"># static-site config (the only section today)</span>
+  <span class="tok-k">name</span>: <span class="tok-s">my-site</span>                        <span class="tok-c"># target site — lets `drop publish ./dist` skip the name arg</span>
+  <span class="tok-k">spaFallback</span>: <span class="tok-s">index.html</span>              <span class="tok-c"># doc served on navigation misses; false to disable</span>
+  <span class="tok-k">cleanUrls</span>: true                        <span class="tok-c"># /about → try /about.html</span>
+  <span class="tok-k">notFound</span>: <span class="tok-s">404.html</span>                   <span class="tok-c"># custom 404 document (served with status 404)</span>
+  <span class="tok-k">redirects</span>:
+    - { <span class="tok-k">from</span>: <span class="tok-s">/old</span>, <span class="tok-k">to</span>: <span class="tok-s">/new</span>, <span class="tok-k">status</span>: 301 }
+    - { <span class="tok-k">from</span>: <span class="tok-s">"/docs/*"</span>, <span class="tok-k">to</span>: <span class="tok-s">/help/:splat</span>, <span class="tok-k">status</span>: 302 }
+  <span class="tok-k">headers</span>:
+    - { <span class="tok-k">source</span>: <span class="tok-s">"/assets/*"</span>, <span class="tok-k">headers</span>: { <span class="tok-k">cache-control</span>: <span class="tok-s">"public, max-age=31536000, immutable"</span> } }
+    - { <span class="tok-k">source</span>: <span class="tok-s">"/*"</span>, <span class="tok-k">headers</span>: { <span class="tok-k">x-frame-options</span>: <span class="tok-s">DENY</span>, <span class="tok-k">x-content-type-options</span>: <span class="tok-s">nosniff</span> } }
+  <span class="tok-k">cors</span>: { <span class="tok-k">allowOrigins</span>: [<span class="tok-s">"https://app.example.com"</span>], <span class="tok-k">allowMethods</span>: [<span class="tok-s">GET</span>, <span class="tok-s">HEAD</span>], <span class="tok-k">maxAge</span>: 600 }
+  <span class="tok-k">basicAuth</span>:
+    <span class="tok-k">realm</span>: <span class="tok-s">Staging</span>
+    <span class="tok-k">users</span>: { <span class="tok-k">team</span>: <span class="tok-s">"sha256:2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"</span> }</code></pre>
+<p>The legacy JSON form (same keys, no <code>site:</code> wrapper) in <code>_drop.json</code> still works but is deprecated.</p>
 
 <h2>Key reference</h2>
 <table class="tbl">
@@ -81,7 +79,7 @@
 </table>
 
 <h3>name</h3>
-<p>Lets the bundle identify itself. <code>drop publish ./dist</code> (no name argument) uses <code>_drop.json</code>'s <code>name</code>; with neither, a friendly name is generated (e.g. <code>twilight-cherry-8f3a</code>). The server still validates that <strong>you own</strong> that name, and <strong>rejects</strong> a bundle whose <code>name</code> contradicts the explicit publish target. It must pass site-name validation (≤ 63 chars) or it is ignored.</p>
+<p>Lets the bundle identify itself. <code>drop publish ./dist</code> (no name argument) uses <code>drop.yaml</code>'s <code>site.name</code> (or the legacy <code>_drop.json</code> <code>name</code>); with neither, a friendly name is generated (e.g. <code>twilight-cherry-8f3a</code>). The server still validates that <strong>you own</strong> that name, and <strong>rejects</strong> a bundle whose <code>name</code> contradicts the explicit publish target. It must pass site-name validation (≤ 63 chars) or it is ignored.</p>
 <pre><code>{ <span class="tok-k">"name"</span>: <span class="tok-s">"my-site"</span> }</code></pre>
 
 <h3>spaFallback</h3>
@@ -146,7 +144,7 @@
     }
   }
 }</code></pre>
-<div class="note warn"><span class="lbl">Note</span><p>Publishing a <code>_drop.json</code> with <code>basicAuth</code> — like setting <code>visibility=password</code> — makes the edge require an <code>Authorization: Basic</code> header before serving anything. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for how this interacts with org-level visibility modes.</p></div>
+<div class="note warn"><span class="lbl">Note</span><p>Publishing a <code>drop.yaml</code> with <code>basicAuth</code> — like setting <code>visibility=password</code> — makes the edge require an <code>Authorization: Basic</code> header before serving anything. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for how this interacts with org-level visibility modes.</p></div>
 
 <div class="next">
   <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
