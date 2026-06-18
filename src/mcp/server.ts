@@ -71,7 +71,7 @@ export function buildMcp(): McpServer {
       description: "Publish a built static folder to <name>.drop.example.com. Returns the live URL.",
       inputSchema: {
         directory: z.string().describe("path to the built folder, e.g. ./dist"),
-        name: z.string().optional().describe("site name (optional — taken from _drop.json, else generated)"),
+        name: z.string().optional().describe("site name (optional — taken from drop.yaml site.name / _drop.json, else generated)"),
       },
     },
     async ({ directory, name }) =>

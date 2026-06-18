@@ -31,3 +31,13 @@ test("invalid explicit name throws", async () => {
   const d = dirWith({});
   await expect(resolveSiteName(d, "Bad_Name")).rejects.toThrow();
 });
+
+test("reads name from drop.yaml, preferring it over _drop.json", async () => {
+  const d = dirWith({ "drop.yaml": "site:\n  name: fromyaml\n", "_drop.json": JSON.stringify({ name: "fromjson" }) });
+  expect(await resolveSiteName(d)).toEqual({ name: "fromyaml", source: "drop.yaml" });
+});
+
+test("still reads _drop.json name when no drop.yaml", async () => {
+  const d = dirWith({ "_drop.json": JSON.stringify({ name: "fromjson" }) });
+  expect(await resolveSiteName(d)).toEqual({ name: "fromjson", source: "_drop.json" });
+});

@@ -1,14 +1,22 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { parseSiteConfig } from "../site-config.ts";
+import { loadSiteConfig, CONFIG_FILE_YAML, CONFIG_FILE_JSON } from "../site-config.ts";
 import { validateName, generateName } from "../names.ts";
 
-export type NameSource = "arg" | "_drop.json" | "generated";
+export type NameSource = "arg" | "drop.yaml" | "_drop.json" | "generated";
+
+const readOrUndef = async (p: string): Promise<string | undefined> => {
+  try {
+    return await readFile(p, "utf8");
+  } catch {
+    return undefined;
+  }
+};
 
 /**
  * Resolve the target site name for a publish, in order:
  *   1. explicit CLI/tool argument
- *   2. `name` in the bundle's `_drop.json`
+ *   2. `site.name` in the bundle's drop.yaml (preferred), else `name` in _drop.json
  *   3. a generated name
  * Shared by the CLI and the MCP server so `drop publish ./dist` "just works".
  */
@@ -22,10 +30,13 @@ export async function resolveSiteName(
     return { name: argName, source: "arg" };
   }
   try {
-    const cfg = parseSiteConfig(await readFile(join(dir, "_drop.json"), "utf8"));
-    if (cfg.name) return { name: cfg.name, source: "_drop.json" };
+    const loaded = loadSiteConfig({
+      yaml: await readOrUndef(join(dir, CONFIG_FILE_YAML)),
+      json: await readOrUndef(join(dir, CONFIG_FILE_JSON)),
+    });
+    if (loaded?.config.name) return { name: loaded.config.name, source: loaded.source };
   } catch {
-    /* no _drop.json (or unreadable/invalid) → fall through to generate */
+    /* unreadable/invalid config → fall through to generate */
   }
   return { name: generateName(), source: "generated" };
 }

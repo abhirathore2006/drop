@@ -79,7 +79,7 @@ export function buildProgram(): Command {
       const res = await (await client()).publish(name, tarball);
       console.log(`  ✓ live at ${res.url}`);
       if (source === "generated") {
-        console.log(`  tip: add  "name": "${name}"  to _drop.json to keep this URL across deploys.`);
+        console.log(`  tip: add  name: ${name}  under site: in drop.yaml to keep this URL across deploys.`);
       }
     });
 
