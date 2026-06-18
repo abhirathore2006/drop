@@ -13,7 +13,7 @@ COPY infra/ca/ /usr/local/share/drop-ca/
 RUN cat /usr/local/share/drop-ca/*.crt > /usr/local/share/drop-ca-bundle.pem 2>/dev/null || true; touch /usr/local/share/drop-ca-bundle.pem
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/drop-ca-bundle.pem
 
-COPY dist/api.js ./dist/api.js
+COPY dist/api.js dist/drop.js dist/mcp.js ./dist/
 COPY docs ./docs
 RUN printf '{"type":"module"}\n' > package.json
 EXPOSE 8080

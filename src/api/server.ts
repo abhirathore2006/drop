@@ -2,7 +2,10 @@ import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Readable } from "node:stream";
 import * as streamConsumers from "node:stream/consumers";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { hashPassword, parseSiteConfig, type SiteConfig } from "../site-config.ts";
+import { installScript } from "./install.ts";
 import type { Config } from "../config.ts";
 import type { BlobStore } from "../blob/types.ts";
 import type { Db } from "../db/db.ts";
@@ -45,6 +48,19 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // shipped with the deployment and served at /docs. Uses relative links, so it
   // works equally at https://api.…/docs/ and on GitHub Pages.
   app.get("/docs", (c) => c.redirect("/docs/"));
+  // Served-by-app signal: when THIS api serves the docs, announce its own origin
+  // so docs/assets/site.js rewrites the placeholder API URL to the live instance.
+  // Registered before the static handler so it shadows the shipped no-op of the
+  // same name; on static hosts (GitHub Pages, etc.) the no-op runs and the docs
+  // keep their documented placeholder. Must precede the /docs/* serveStatic.
+  app.get("/docs/drop-served.js", (c) => {
+    const proto = c.req.header("x-forwarded-proto") ?? new URL(c.req.url).protocol.replace(/:$/, "");
+    const host = c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "localhost";
+    return c.body(`window.__DROP_API_ORIGIN__ = ${JSON.stringify(`${proto}://${host}`)};\n`, 200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-cache",
+    });
+  });
   app.use(
     "/docs/*",
     serveStatic({
@@ -52,6 +68,24 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       rewriteRequestPath: (p) => p.replace(/^\/docs/, "") || "/",
     }),
   );
+
+  // Self-contained CLI installer: `curl <API>/install.sh | sh` installs the CLI
+  // (served from /cli below) and auto-configures it to point at this instance.
+  app.get("/install.sh", (c) => {
+    const proto = c.req.header("x-forwarded-proto") ?? new URL(c.req.url).protocol.replace(/:$/, "");
+    const host = c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "localhost";
+    return c.body(installScript(`${proto}://${host}`), 200, { "content-type": "text/x-shellscript; charset=utf-8" });
+  });
+  const serveCli = async (file: string): Promise<Response> => {
+    try {
+      const buf = await readFile(join(d.cfg.cliDir, file));
+      return new Response(buf, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } });
+    } catch {
+      return new Response("not found", { status: 404 });
+    }
+  };
+  app.get("/cli/drop.mjs", () => serveCli("drop.js"));
+  app.get("/cli/mcp.mjs", () => serveCli("mcp.js"));
 
   app.use("/v1/*", authMiddleware(d.verifier));
 

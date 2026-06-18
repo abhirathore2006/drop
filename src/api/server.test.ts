@@ -221,6 +221,22 @@ test("publish parses _drop.json into config and does not serve it", async () => 
   await db.destroy();
 });
 
+test("serves the self-contained CLI installer + bundles (public, no auth)", async () => {
+  const { app, db } = await mk();
+  const sh = await app.request("/install.sh");
+  expect(sh.status).toBe(200);
+  expect(sh.headers.get("content-type") ?? "").toContain("shellscript");
+  const body = await sh.text();
+  expect(body).toContain('API="http://localhost"'); // baked from the request host
+  expect(body).toContain("/cli/drop.mjs"); // downloads the bundle this API serves
+  expect(body).toContain('"apiBase"'); // auto-configures the CLI
+  const js = await app.request("/cli/drop.mjs");
+  expect(js.status).toBe(200);
+  expect(js.headers.get("content-type") ?? "").toContain("javascript");
+  expect((await js.text()).length).toBeGreaterThan(1000); // the real bundle
+  await db.destroy();
+});
+
 test("serves the docs site at /docs (public, no auth)", async () => {
   const { app, db } = await mk();
   const idx = await app.request("/docs/");
@@ -232,6 +248,18 @@ test("serves the docs site at /docs (public, no auth)", async () => {
   const bare = await app.request("/docs");
   expect([301, 302, 307, 308]).toContain(bare.status);
   expect(bare.headers.get("location")).toBe("/docs/");
+
+  // served-by-app signal: the API announces its own origin so the docs rewrite
+  // their placeholder API URL to the live instance (positive opt-in, not a guess).
+  const sig = await app.request("/docs/drop-served.js");
+  expect(sig.status).toBe(200);
+  expect(sig.headers.get("content-type") ?? "").toContain("javascript");
+  expect(await sig.text()).toContain('window.__DROP_API_ORIGIN__ = "http://localhost"');
+  // honors X-Forwarded-* (behind nginx/ALB)
+  const fwd = await app.request("/docs/drop-served.js", {
+    headers: { "x-forwarded-proto": "https", "x-forwarded-host": "api.acme.internal" },
+  });
+  expect(await fwd.text()).toContain('window.__DROP_API_ORIGIN__ = "https://api.acme.internal"');
   await db.destroy();
 });
 

@@ -73,6 +73,12 @@ header{
 .empty,.gate{min-height:60vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:18px}
 .empty p,.gate p{color:var(--mut);max-width:420px}
 .empty code{font-family:var(--mono);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:3px 9px;color:var(--acc);font-size:13px}
+.install{display:flex;flex-direction:column;gap:8px;align-items:center}
+.install-lbl{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}
+.install-row{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:7px 8px 7px 12px;max-width:100%}
+.install-row code{font-family:var(--mono);font-size:13px;color:var(--acc);white-space:nowrap;overflow:auto}
+.install-copy{font-family:var(--mono);font-size:11.5px;color:var(--mut);background:transparent;border:1px solid var(--line);border-radius:6px;padding:4px 9px;cursor:pointer;flex:none}
+.install-copy:hover{color:var(--acc);border-color:var(--acc)}
 .btn{font-family:var(--mono);font-size:13px;font-weight:500;border:1px solid var(--line2);background:var(--surface);color:var(--txt);
   border-radius:10px;padding:11px 20px;cursor:pointer;transition:.15s;text-decoration:none;display:inline-flex;align-items:center;gap:9px}
 .btn:hover{border-color:var(--acc);color:var(--acc)}
@@ -141,6 +147,19 @@ const esc=s=>String(s);
 let toastT;
 function toast(msg,err){const t=$('#toast');t.textContent=msg;t.className='on'+(err?' err':'');clearTimeout(toastT);toastT=setTimeout(()=>t.className='',2600)}
 
+// One-line CLI installer, baked with THIS instance's origin so it always points home.
+function installSnippet(){
+  const cmd='curl -fsSL '+location.origin+'/install.sh | sh';
+  const box=el('div','install');
+  box.appendChild(el('span','install-lbl','install the CLI'));
+  const row=el('div','install-row');
+  row.appendChild(el('code',null,cmd));
+  const cp=el('button','install-copy','copy');
+  cp.onclick=()=>{navigator.clipboard.writeText(cmd).then(()=>toast('copied'),()=>toast('copy failed',true))};
+  row.appendChild(cp);box.appendChild(row);
+  return box;
+}
+
 // Build the public URL for a site. Local (*.localhost) → http + edge port; prod → as returned.
 function siteUrl(name){
   if(BASE_DOMAIN.endsWith('.localhost')) return 'http://'+name+'.'+BASE_DOMAIN+':8474/';
@@ -161,6 +180,7 @@ function gate(){
   g.appendChild(el('p',null,'Sign in to publish and manage static sites on your company infrastructure.'));
   const a=el('a','btn primary','Sign in with Google →');a.href='/login';
   g.appendChild(a);
+  g.appendChild(installSnippet());
   $('#main').appendChild(g);
 }
 function shortVer(v){return v?v.replace(/^v_\\d+_/,'#'):'—'}
@@ -218,7 +238,8 @@ async function render(){
   if(!sites.length){
     const e=el('div','empty');
     e.appendChild(el('p',null,'No sites yet.'));
-    const p=el('p');p.innerHTML='Publish one from your terminal: <code>drop publish ./dist myapp</code>';
+    e.appendChild(installSnippet());
+    const p=el('p');p.innerHTML='Then publish from your terminal: <code>drop login</code> · <code>drop publish ./dist myapp</code>';
     e.appendChild(p);
     main.appendChild(e);return;
   }
