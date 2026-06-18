@@ -30,6 +30,7 @@
     "openid-client": "^6.1.0",
     "pg": "^8.21.0",
     "tar-stream": "^3.1.7",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
