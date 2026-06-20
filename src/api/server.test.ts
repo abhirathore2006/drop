@@ -4,6 +4,7 @@ import { createGzip } from "node:zlib";
 import { buffer } from "node:stream/consumers";
 import { createApp } from "./server.ts";
 import { FakeBlob } from "../blob/fake.ts";
+import { FakeKube } from "../kube/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { UserStore } from "../users/store.ts";
 import { makeTestDb } from "../db/testdb.ts";
@@ -22,13 +23,14 @@ async function mk(opts: { admins?: string[] } = {}) {
   const users = new UserStore(db);
   if (opts.admins) await users.seedAdmins(opts.admins);
   const blob = new FakeBlob();
+  const kube = new FakeKube();
   const meta = new MetaStore(db);
   const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
   const verifier = new FakeVerifier({
     alice: { sub: "alice@example.com", email: "alice@example.com" },
     bob: { sub: "bob@example.com", email: "bob@example.com" },
   });
-  return { app: createApp({ cfg, meta, blob, db, users, verifier }), meta, blob, db, users };
+  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube }), meta, blob, kube, db, users };
 }
 
 const pub = (app: any, tok: string, name: string, body: Buffer) =>
@@ -267,5 +269,59 @@ test("publish rejects when drop.yaml name mismatches the target", async () => {
   const { app, db } = await mk();
   const tar = await tgz({ "index.html": "<html>", "drop.yaml": "site:\n  name: otherapp\n" });
   expect((await pub(app, "alice", "myapp", tar)).status).toBe(400);
+  await db.destroy();
+});
+
+test("deploy: claims an app, applies manifests, sets pointer type=app", async () => {
+  const { app, meta, kube, db } = await mk();
+  const res = await call(app, "POST", "/v1/apps/billing", "alice", {
+    image: "ecr/billing:v1",
+    services: [{ internal_port: 8080, protocol: "http" }],
+    scale: { min: 0, max: 3 },
+  });
+  expect(res.status).toBe(200);
+  const j = await res.json();
+  expect(j.url).toBe("https://billing.drop.example.com");
+  expect(j.image).toBe("ecr/billing:v1");
+
+  const site = (await meta.getSitePlain("billing"))!;
+  expect(site.type).toBe("app");
+  expect(site.owner).toBe("alice@example.com");
+  expect(site.currentVersion).not.toBeNull();
+
+  expect(kube.applies).toHaveLength(1);
+  const m = kube.applies[0]!.manifests;
+  expect((m.deployment as any).spec.template.spec.containers[0].image).toBe("ecr/billing:v1");
+  expect((m.httpScaledObject as any).spec.hosts).toEqual(["billing.drop.example.com"]);
+  await db.destroy();
+});
+
+test("deploy: app and site names don't collide (409 both ways)", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "shared", await tgz({ "index.html": "x" })); // a site
+  expect((await call(app, "POST", "/v1/apps/shared", "alice", { image: "x:1" })).status).toBe(409);
+  await call(app, "POST", "/v1/apps/onlyapp", "alice", { image: "x:1" }); // an app
+  expect((await pub(app, "alice", "onlyapp", await tgz({ "index.html": "x" }))).status).toBe(409);
+  await db.destroy();
+});
+
+test("deploy: non-owner 403; bad config 400", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" }); // alice owns
+  expect((await call(app, "POST", "/v1/apps/billing", "bob", { image: "y:1" })).status).toBe(403);
+  expect((await call(app, "POST", "/v1/apps/noimg", "alice", { foo: 1 })).status).toBe(400);
+  expect(
+    (await call(app, "POST", "/v1/apps/tcpapp", "alice", { image: "x:1", services: [{ internal_port: 5432, protocol: "tcp" }] })).status,
+  ).toBe(400);
+  await db.destroy();
+});
+
+test("deploy: 501 when compute is not enabled (no kube)", async () => {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  const app = createApp({ cfg, meta: new MetaStore(db), blob: new FakeBlob(), db, users, verifier }); // no kube
+  expect((await call(app, "POST", "/v1/apps/x", "alice", { image: "x:1" })).status).toBe(501);
   await db.destroy();
 });

@@ -1,6 +1,6 @@
 import type { SiteRole } from "../db/schema.ts";
 
-export type Action = "read" | "publish" | "rollback" | "configure" | "share" | "transfer" | "delete";
+export type Action = "read" | "publish" | "deploy" | "rollback" | "configure" | "share" | "transfer" | "delete";
 
 export interface Actor {
   email: string;
@@ -8,11 +8,12 @@ export interface Actor {
   siteRole: SiteRole | null; // null = not a member of this site
 }
 
-// read = see the site in the dashboard / its versions & settings.
+// read = see the workload in the dashboard / its versions & settings.
+// publish = ship a static-site version; deploy = ship a container-app revision.
 // configure = set visibility / password.
 const MAP: Record<SiteRole, Action[]> = {
-  owner: ["read", "publish", "rollback", "configure", "share", "transfer", "delete"],
-  editor: ["read", "publish", "rollback"],
+  owner: ["read", "publish", "deploy", "rollback", "configure", "share", "transfer", "delete"],
+  editor: ["read", "publish", "deploy", "rollback"],
   viewer: ["read"],
 };
 

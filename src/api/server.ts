@@ -18,6 +18,9 @@ import { can, type Action, type Actor } from "../authz/permissions.ts";
 import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
+import { sanitizeAppConfig, assertHttpOnly } from "../app-config.ts";
+import { appManifests } from "../kube/manifests.ts";
+import type { KubeClient } from "../kube/types.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { dashboardHtml } from "./dashboard.ts";
 
@@ -28,12 +31,15 @@ export interface Deps {
   db: Db;
   users: UserStore;
   verifier: Verifier;
+  kube?: KubeClient; // optional: when absent, /v1/apps returns 501 (static-only instance)
   now?: () => Date;
 }
 
 export function createApp(d: Deps): Hono<AuthEnv> {
   const now = d.now ?? (() => new Date());
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
+  // v1: a single namespace for all apps. Namespace-per-tenant is a later slice.
+  const APP_NAMESPACE = "drop-apps";
   const app = new Hono<AuthEnv>();
 
   app.get("/healthz", (c) => c.text("ok"));
@@ -118,6 +124,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       site = claimed ?? (await d.meta.getSitePlain(name));
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
+    if (site.type !== "site") return c.json({ error: `name "${name}" is an ${site.type}, not a site` }, 409);
     const actor = await actorFor(email, site);
     if (!can(actor, "publish")) return c.json({ error: `site is owned by ${site.owner}` }, 403);
 
@@ -177,6 +184,52 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
     void pruneVersions(d, name);
     return c.json({ url: siteUrl(name), version: verId, files: result.files, bytes: result.bytes });
+  });
+
+  // ---- deploy (container app) ----
+  app.post("/v1/apps/:name", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const nameErr = validateName(name);
+    if (nameErr) return c.json({ error: nameErr }, 400);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const appCfg = sanitizeAppConfig(body);
+    if (!appCfg) return c.json({ error: "app config requires an image" }, 400);
+    try {
+      assertHttpOnly(appCfg); // v1: one HTTP service (443-only)
+    } catch (e) {
+      return c.json({ error: (e as Error).message }, 400);
+    }
+    if (appCfg.name && appCfg.name !== name) {
+      return c.json({ error: `app name "${appCfg.name}" does not match target "${name}"` }, 400);
+    }
+
+    // resolve or claim — apps share the one name namespace with sites
+    let site = await d.meta.getSitePlain(name);
+    if (!site) {
+      await ensureUser(email);
+      const claimed = await d.meta.claimSite(name, email, "app");
+      site = claimed ?? (await d.meta.getSitePlain(name));
+    }
+    if (!site) return c.json({ error: "claim failed" }, 500);
+    if (site.type !== "app") return c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409);
+    const actor = await actorFor(email, site);
+    if (!can(actor, "deploy")) return c.json({ error: `app is owned by ${site.owner}` }, 403);
+
+    const verId = newVersionId(now());
+    const manifests = appManifests(appCfg, { name, namespace: APP_NAMESPACE, host: `${name}.${d.cfg.baseDomain}` });
+    await d.kube.applyApp(APP_NAMESPACE, name, manifests);
+
+    await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
+    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
+    return c.json({ url: siteUrl(name), name, version: verId, image: appCfg.image });
   });
 
   // ---- rollback ----
