@@ -65,9 +65,21 @@ const m0001_init: Migration = {
   },
 };
 
+// Workload type discriminator: a row in `sites` is a static site by default, or
+// an "app" (container workload). Existing rows backfill to 'site'. Apps share the
+// one name namespace with sites (same PK), so a name can't be both.
+const m0002_workload_type: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema.alterTable("sites").addColumn("type", "text", (c) => c.notNull().defaultTo("site")).execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
-    return { "0001_init": m0001_init };
+    return { "0001_init": m0001_init, "0002_workload_type": m0002_workload_type };
   }
 }

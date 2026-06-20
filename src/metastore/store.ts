@@ -6,6 +6,7 @@ import {
   type Site,
   type SitePointer,
   type Visibility,
+  type WorkloadType,
   type VersionMeta,
   SiteNotFoundError,
 } from "./types.ts";
@@ -31,6 +32,7 @@ export class MetaStore {
     const owner = members.find((m) => m.role === "owner")?.email ?? "";
     return {
       name: row.name as string,
+      type: (row.type as WorkloadType) ?? "site",
       owner,
       members,
       collaborators: members.filter((m) => m.role !== "owner").map((m) => m.email),
@@ -51,12 +53,13 @@ export class MetaStore {
     return rows.map((r) => ({ email: r.email, role: r.role }));
   }
 
-  /** Atomic claim: insert site + owner membership in one tx. Null if name taken. */
-  async claimSite(name: string, owner: string): Promise<Site | null> {
+  /** Atomic claim: insert workload + owner membership in one tx. Null if name taken
+   *  (by a site OR an app — one shared name namespace). Defaults to a static site. */
+  async claimSite(name: string, owner: string, type: WorkloadType = "site"): Promise<Site | null> {
     return await this.db.transaction().execute(async (tx) => {
       const site = await tx
         .insertInto("sites")
-        .values({ name, updated_at: sql`now()` })
+        .values({ name, type, updated_at: sql`now()` })
         .onConflict((oc) => oc.column("name").doNothing())
         .returningAll()
         .executeTakeFirst();
@@ -76,11 +79,12 @@ export class MetaStore {
   async getPointer(name: string): Promise<SitePointer | null> {
     const row = await this.db
       .selectFrom("sites")
-      .select(["current_version", "visibility", "password_hash", "config"])
+      .select(["type", "current_version", "visibility", "password_hash", "config"])
       .where("name", "=", name)
       .executeTakeFirst();
     if (!row) return null;
     return {
+      type: (row.type as WorkloadType) ?? "site",
       currentVersion: row.current_version ?? null,
       visibility: row.visibility as Visibility,
       passwordHash: row.password_hash ?? null,
