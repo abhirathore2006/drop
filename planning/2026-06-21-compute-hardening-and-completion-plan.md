@@ -17,6 +17,17 @@
 - **Internal-trusted-images first:** the sandbox `RuntimeClass` is *available* and used for untrusted tenants; do not block v1 on it.
 - **Tenant = workload owner** (email) for v1: namespace `drop-t-<slug(email)>`. (A `tenants` mapping table is a later option; per-owner is the safe default.)
 
+## Review refinements (applied from the adversarial plan review — 16 confirmed)
+
+These corrections are folded into the tasks below; the decision-level ones are stated here so they're explicit, not implied:
+
+- **SEC-3 is only PARTIALLY closed (stated tradeoff).** PSA `enforce: baseline` blocks privileged/hostPath/host-namespaces but does **not** force `runAsNonRoot`/`readOnlyRootFilesystem` (only the `restricted` profile does). Enforcing `restricted` would reject the very images the e2e exercised (nginx/postgres chown/setuid at entrypoint — the bug already documented in `manifests.ts`). So **root is still permitted**; the actual root-escape guard is the **gVisor sandbox + NetworkPolicy**, with full non-root as an **opt-in** per-app/per-namespace path for images that support it. The coverage table marks SEC-3 *partial*.
+- **gVisor is PROD-ONLY** (EKS sandboxed/Bottlerocket nodes). `runsc` won't run on the locally-nested k3s (no nested-virt/ptrace platform). Locally, **PSA(baseline) + default-deny NetworkPolicy + ResourceQuota are THE isolation guard**; the verify script treats the `gvisor` RuntimeClass as optional. Consequently **v1 default is `trusted: true`** (no `runtimeClassName`) so deploys never depend on gVisor being present; sandbox is opt-in for explicitly-untrusted tenants.
+- **Default-deny EGRESS is an intentional breaking change.** A2's egress allows only DNS + intra-namespace, which blocks apps' outbound to the internet/cross-namespace. Add a **config-driven egress allowlist** (443 to `0.0.0.0/0` **except** the node/control-plane CIDRs and `169.254.169.254/32` link-local metadata, which must stay blocked). The app↔DB path therefore requires **same-namespace** colocation (the tenant's DB lives in the tenant ns).
+- **LIM-3** is closed via the quota's `count/services` (1 service per app ⇒ the cap is the de-facto app-count limit); stated explicitly rather than adding a second mechanism.
+- **CNPG `barmanObjectStore` is deprecated** (CNPG ≥ 1.26, moving to the Barman Cloud Plugin). Phase C **pins the CNPG chart** to a version where it's first-class (and notes the EOL), or adopts the plugin — a deliberate choice, plus an explicit **`endpointURL`** (+ static S3 creds locally for Floci; IRSA in prod) so Barman targets Floci, not real AWS.
+- **CRD-presence before apply.** Server-side apply does **not** install/wait for CRDs; applying an `HTTPScaledObject`/CNPG `Cluster` before its CRD is Established returns 404. The `KubeClient` does a one-time CRD-presence check (GET the API group) before app/db applies and surfaces "compute not ready" clearly.
+
 ## File Structure
 
 - `src/api/tenant.ts` — **create.** `tenantSlug(email)` and `tenantNamespace(email)` — deterministic, DNS-safe namespace per owner. One responsibility: tenant→namespace identity.
@@ -24,7 +35,7 @@
 - `src/kube/types.ts` — **modify.** `KubeClient` gains `applyTenant(namespace, manifests)`.
 - `src/kube/fake.ts` — **modify.** `FakeKube.applyTenant` records tenant applies.
 - `src/kube/client.ts` — **modify.** Implement `applyTenant` (server-side apply each tenant object).
-- `src/app-config.ts` — **modify.** `DEFAULT_RESOURCES`; `sanitizeAppConfig` fills `resources` when omitted. Add `trusted?: boolean` (default false → sandboxed).
+- `src/app-config.ts` — **modify.** `DEFAULT_RESOURCES`; `sanitizeAppConfig` fills `resources` when omitted. Add `trusted?: boolean` — **default `true`** (no sandbox; v1 = internal-trusted images, and gVisor isn't available on local k3s anyway). Set `trusted: false` to opt a tenant into the gVisor `RuntimeClass` (prod sandboxed nodes).
 - `src/api/server.ts` — **modify.** Deploy endpoint: resolve tenant ns, `ensureTenant`, apply app into it, env→Secret. Add the `/v1/databases` endpoints (Phase C).
 - `src/kube/cnpg.ts` — **create (Phase C).** CNPG `Cluster` + `ScheduledBackup` manifest builder.
 - `src/db-config.ts` — **create (Phase C).** Parse the `database:` section of `drop.yaml`.
@@ -146,11 +157,17 @@ export function tenantManifests(namespace: string): TenantManifests {
         policyTypes: ["Ingress", "Egress"],
         ingress: [{ from: [{ podSelector: {} }] }], // intra-namespace ingress
         egress: [
-          { to: [{ podSelector: {} }] }, // intra-namespace egress
+          { to: [{ podSelector: {} }] }, // intra-namespace egress (incl. the tenant's own DB)
           {
             // DNS to kube-dns
             to: [{ namespaceSelector: {} }],
             ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }],
+          },
+          {
+            // outbound HTTPS allowlist — everything EXCEPT link-local metadata + the
+            // control-plane/node CIDR (so an app can't reach the platform DB/IMDS).
+            to: [{ ipBlock: { cidr: "0.0.0.0/0", except: ["169.254.169.254/32", "10.0.0.0/8"] } }],
+            ports: [{ protocol: "TCP", port: 443 }],
           },
         ],
       },
@@ -225,12 +242,15 @@ test("appManifests: env goes into a Secret (not inline); interceptor ingress all
   expect(ctr.env).toBeUndefined();
   expect(ctr.envFrom[0].secretRef.name).toBe("billing-env");
   expect((m.deployment as any).spec.template.spec.runtimeClassName).toBe("gvisor");
-  // an ingress NetworkPolicy lets the KEDA interceptor reach this app
-  expect((m.ingressPolicy as any).kind).toBe("NetworkPolicy");
-  expect(JSON.stringify(m.ingressPolicy)).toContain("keda");
+  // ingress NetworkPolicy lets the KEDA interceptor (keda ns) reach this app's CONTAINER port
+  const ip = m.ingressPolicy as any;
+  expect(ip.kind).toBe("NetworkPolicy");
+  // exact selector — the control-plane-injected immutable label, NOT the common-but-wrong `name: keda`
+  expect(ip.spec.ingress[0].from[0].namespaceSelector.matchLabels).toEqual({ "kubernetes.io/metadata.name": "keda" });
+  expect(ip.spec.ingress[0].ports[0].port).toBe(8080); // the CONTAINER port (NetworkPolicy matches dest pod port), not Service :80
 });
 
-test("appManifests: no runtimeClassName when sandbox is false/omitted (internal-trusted)", () => {
+test("appManifests: no runtimeClassName when sandbox is false/omitted (internal-trusted default)", () => {
   const m = appManifests({ image: "x:1", services: [{ internalPort: 80, protocol: "http" }] }, { name: "a", namespace: "n", host: "a.x" });
   expect((m.deployment as any).spec.template.spec.runtimeClassName).toBeUndefined();
 });
@@ -238,7 +258,25 @@ test("appManifests: no runtimeClassName when sandbox is false/omitted (internal-
 
 - [ ] **Step 2: Run** `bun test src/kube/manifests.test.ts` → FAIL.
 
-- [ ] **Step 3: Implement** — in `src/kube/manifests.ts`: extend `ManifestContext` with `sandbox?: boolean`; extend `AppManifests` with `secret` and `ingressPolicy`. In `appManifests`: build `secret = { apiVersion:"v1", kind:"Secret", metadata:{name:`${ctx.name}-env`,namespace}, stringData: app.env ?? {} }`; replace the container `env` with `envFrom: [{ secretRef: { name: `${ctx.name}-env` } }]` (omit `envFrom` if no env); add `...(ctx.sandbox ? { runtimeClassName: "gvisor" } : {})` to the pod spec; add `ingressPolicy` (NetworkPolicy `name: `${ctx.name}-allow-interceptor`` selecting the app pods, allowing ingress from the `keda` namespace on the container port). Show the full edited `appManifests` body in the implementation.
+- [ ] **Step 3: Implement** — in `src/kube/manifests.ts`: extend `ManifestContext` with `sandbox?: boolean`; extend `AppManifests` with `secret` and `ingressPolicy`. In `appManifests`: build `secret = { apiVersion:"v1", kind:"Secret", metadata:{name:`${ctx.name}-env`,namespace}, stringData: app.env ?? {} }`; replace the container `env` with `envFrom: [{ secretRef: { name: `${ctx.name}-env` } }]` (omit `envFrom` if no env); add `...(ctx.sandbox ? { runtimeClassName: "gvisor" } : {})` to the pod spec. Build `ingressPolicy` exactly:
+
+```ts
+ingressPolicy: {
+  apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy",
+  metadata: { name: `${ctx.name}-allow-interceptor`, namespace },
+  spec: {
+    podSelector: { matchLabels: labels },
+    policyTypes: ["Ingress"],
+    ingress: [{
+      // the immutable control-plane label — NOT `name: keda` (that label isn't auto-applied)
+      from: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": "keda" } } }],
+      ports: [{ protocol: "TCP", port: containerPort }], // dest POD port, not the Service port
+    }],
+  },
+},
+```
+
+Show the full edited `appManifests` body in the implementation.
 
 - [ ] **Step 4: Run** `bun test src/kube/manifests.test.ts` → PASS.
 
@@ -258,7 +296,7 @@ test("appManifests: no runtimeClassName when sandbox is false/omitted (internal-
 
 - [ ] **Step 2: Run** → FAIL.
 
-- [ ] **Step 3: Implement** — `types.ts`: add `applyTenant`. `fake.ts`: record `tenantApplies`. `client.ts`: `applyTenant` SSA-applies each via the existing `apply()` (Namespace at `/api/v1/namespaces/<ns>`, NetworkPolicy at `/apis/networking.k8s.io/v1/namespaces/<ns>/networkpolicies/<name>`, ResourceQuota at `/api/v1/namespaces/<ns>/resourcequotas/<name>`, LimitRange at `/api/v1/namespaces/<ns>/limitranges/<name>`); extend `applyApp` to also apply Secret (`/api/v1/namespaces/<ns>/secrets/<name>`) and the ingress NetworkPolicy.
+- [ ] **Step 3: Implement** — `types.ts`: add `applyTenant`. `fake.ts`: record `tenantApplies`. `client.ts`: `applyTenant` SSA-applies each via the existing `apply()` (Namespace at `/api/v1/namespaces/<ns>`, NetworkPolicy at `/apis/networking.k8s.io/v1/namespaces/<ns>/networkpolicies/<name>`, ResourceQuota at `/api/v1/namespaces/<ns>/resourcequotas/<name>`, LimitRange at `/api/v1/namespaces/<ns>/limitranges/<name>`); extend `applyApp` to also apply Secret (`/api/v1/namespaces/<ns>/secrets/<name>`) and the ingress NetworkPolicy. **Remove the bare-`Namespace` apply from `applyApp`** — the PSA-labeled namespace now comes from `applyTenant` (a second SSA of an unlabeled Namespace with `fieldManager=drop` would fight the PSA labels). **Add a one-time `assertCrd(group)` check** (GET `/apis/<group>` and confirm the kind is served) called before applying an `HTTPScaledObject` (`http.keda.sh`) and, in Phase C, a CNPG `Cluster` (`postgresql.cnpg.io`); on a miss throw a clear `compute not ready: <group> CRD not installed (run make compute-up)` rather than letting SSA return a bare 404.
 
 - [ ] **Step 4: Run** → PASS.
 
@@ -306,7 +344,7 @@ test("deploy provisions a per-owner tenant namespace with isolation objects", as
 
 - [ ] **Step 1:** In `compute-up.sh`, after the cluster is up, install the gVisor `RuntimeClass` (containerd `runsc`) — for k3s, deploy the gVisor installer DaemonSet + a `RuntimeClass` named `gvisor`; document that EKS uses Bottlerocket/sandboxed-containers. (k3s note: if `runsc` isn't available on the node, mark sandbox best-effort and keep PSA+NetworkPolicy as the guard.)
 
-- [ ] **Step 2:** Create `infra/local/verify-isolation.sh` that reproduces the finding probes and asserts they now PASS: (a) deploy two apps under different owners → different namespaces; (b) `kubectl get networkpolicy,resourcequota,limitrange -n <ns>` non-empty; (c) a probe pod in tenant A **cannot** curl tenant B's service (cross-namespace blocked) — expect timeout; (d) an app without `resources:` now has limits from the LimitRange; (e) env is in a Secret, not the pod spec.
+- [ ] **Step 2:** Create `infra/local/verify-isolation.sh` that reproduces the finding probes and asserts they now PASS: (a) deploy two apps under different owners → different namespaces; (b) `kubectl get networkpolicy,resourcequota,limitrange -n <ns>` non-empty; (c) a probe pod in tenant A **cannot** curl tenant B's service (cross-namespace blocked) — expect timeout; (d) an app without `resources:` now has limits from the LimitRange; (e) env is in a Secret, not the pod spec; **(f) the load-bearing wake test — deploy an app, let it scale to 0, then curl through the interceptor with `Host: <name>.<baseDomain>` and expect 200 (proves the default-deny NetworkPolicy does NOT over-block the interceptor→app wake path; this is the regression guard for scale-from-zero).**
 
 - [ ] **Step 3: Run** `make compute-up && ./infra/local/verify-isolation.sh` → all assertions PASS (cross-tenant blocked, quota/limits present, env in Secret).
 
@@ -326,7 +364,7 @@ test("deploy provisions a per-owner tenant namespace with isolation objects", as
 
 - [ ] **Step 2: Run** → FAIL.
 
-- [ ] **Step 3: Implement** — in `src/edge/server.ts`, after resolving the pointer, branch on `type`: `app` → build a `fetch` to `${cfg.interceptorUrl}${path}` with headers incl. `host` preserved + `X-Forwarded-*`, return the upstream response; `site` → existing S3 path. Inject `interceptorUrl` via `EdgeDeps`.
+- [ ] **Step 3: Implement** — in `src/edge/server.ts`, after resolving the pointer, branch on `type`: `app` → proxy to the interceptor; `site` → existing S3 path. Inject `interceptorUrl` via `EdgeDeps`. **Do NOT use `fetch`** — undici's `fetch` forbids setting the `Host` header (a security restriction), and KEDA's interceptor routes purely by `Host` against the registered `HTTPScaledObject.spec.hosts`. Use **`node:http.request`** (the same primitive family as `KubeClient`'s `node:https`), which can set `Host` and stream the body. Forward `Host: ${name}.${cfg.baseDomain}` — the **reconstructed registered HSO host** (from the resolved site name + base domain), not a raw pass-through of the proxy's own host. Use a generous upstream timeout (cold-start wake can exceed defaults) and stream request/response bodies. (Same-namespace/host routing means the edge needs only the name → it derives the host; the interceptor maps host → tenant app.)
 
 - [ ] **Step 4: Run** `bun test src/edge/server.test.ts` → PASS.
 
@@ -353,7 +391,9 @@ test("deploy provisions a per-owner tenant namespace with isolation objects", as
 
 **Files:** Create `src/kube/cnpg.ts`, `src/kube/cnpg.test.ts`
 
-- [ ] TDD a pure `databaseManifests(db, ctx)` → `{ cluster, scheduledBackup }` where `cluster` is `postgresql.cnpg.io/v1` `Cluster` (`instances: 1`, `storage.size`, `resources.limits`) in the tenant namespace, and `scheduledBackup` targets the existing S3 bucket via a Barman object-store (`backup.barmanObjectStore` with the bucket + IRSA/credentials). Commit.
+- [ ] TDD a pure `databaseManifests(db, ctx)` → `{ cluster, scheduledBackup }` where `cluster` is `postgresql.cnpg.io/v1` `Cluster` (`instances: 1`, `storage.size`, `resources.limits`) **in the tenant namespace** (so the app↔DB path is same-namespace, allowed by A2's intra-namespace egress). Backup specifics — confirmed corrections:
+  - **`barmanObjectStore` is deprecated** (CNPG ≥ 1.26, moving to the Barman Cloud Plugin). **Pin the CNPG chart** in `compute-up.sh` to a version where `backup.barmanObjectStore` is first-class (document the EOL), or adopt the plugin (install it + emit an `ObjectStore` CR referenced from the Cluster). Make it a deliberate, version-pinned choice — don't build silently on a deprecated field.
+  - **`ctx` carries an explicit `endpointURL` + credentials mode** so Barman targets the right S3: **locally** emit `barmanObjectStore.endpointURL = http://floci:4566` (+ `s3Credentials.{accessKeyId,secretAccessKey}` from a Secret, and `endpointCA`/path-style as needed) — Barman defaults to real AWS S3 and will fail against Floci without `endpointURL`; **in prod** omit `endpointURL` (real S3) and use IRSA. Commit.
 
 ### Task C3: `POST /v1/databases/:name` endpoint + `db` authz action
 
@@ -398,7 +438,7 @@ test("deploy provisions a per-owner tenant namespace with isolation objects", as
 
 ## Self-Review
 
-- **Finding coverage:** SEC-1 (A2 NetworkPolicy + A4 ingress), SEC-2 (A4 RuntimeClass + A7 gVisor), SEC-3 (A2 PSA labels enforce baseline/restricted), SEC-4 (A1 + A6 per-tenant ns), SEC-5 (A4 env Secret); LIM-1 (A2 LimitRange + A3 defaults), LIM-2 (A2 ResourceQuota), LIM-3 (A2 `count/pods`/`count/services` quota). ✓ all mapped.
+- **Finding coverage:** SEC-1 **fixed** (A2 default-deny + A4 interceptor ingress with the exact `kubernetes.io/metadata.name=keda` selector on the container port; egress allowlist); SEC-2 **prod-only** (A4 gVisor `RuntimeClass` on EKS sandboxed nodes; locally PSA+NetworkPolicy+quota are the guard — A7 treats gVisor as optional); SEC-3 **partial (stated tradeoff)** — A2 `enforce: baseline` blocks privileged/hostPath/host-ns but does **not** force non-root (would break chown/setuid images); root-escape guarded by sandbox+NetworkPolicy, full non-root opt-in; SEC-4 **fixed** (A1 + A6 per-tenant ns); SEC-5 **fixed** (A4 env Secret). LIM-1 **fixed** (A2 LimitRange + A3 defaults), LIM-2 **fixed** (A2 ResourceQuota), LIM-3 **fixed** via `count/services` (1 service/app ⇒ de-facto app cap; stated decision).
 - **Original requirements:** table above — all preserved or completed.
 - **Type consistency:** `tenantNamespace`, `tenantManifests`, `TenantManifests`, `AppManifests{secret,ingressPolicy}`, `ManifestContext{sandbox}`, `KubeClient.applyTenant/applyDatabase`, `databaseManifests` used consistently across tasks.
 - **Sequencing:** Phase A is the security gate (do first); B and C are independent and each shippable.
