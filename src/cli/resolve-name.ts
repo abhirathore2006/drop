@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseDropYaml, CONFIG_FILE_YAML } from "../site-config.ts";
+import { parseAppConfig, type AppConfig } from "../app-config.ts";
 import { validateName, generateName } from "../names.ts";
 
 export type NameSource = "arg" | "drop.yaml" | "generated";
@@ -28,4 +29,29 @@ export async function resolveSiteName(
     /* no drop.yaml (or unreadable/invalid) → fall through to generate */
   }
   return { name: generateName(), source: "generated" };
+}
+
+/**
+ * Load a container-app deploy from a folder's drop.yaml `app:` section and resolve
+ * its name (arg > app.name > generated). Throws if there is no valid app: section.
+ */
+export async function loadAppDeploy(
+  dir: string,
+  argName?: string,
+): Promise<{ name: string; source: NameSource; app: AppConfig }> {
+  let text: string;
+  try {
+    text = await readFile(join(dir, CONFIG_FILE_YAML), "utf8");
+  } catch {
+    throw new Error(`no ${CONFIG_FILE_YAML} found in ${dir}`);
+  }
+  const app = parseAppConfig(text);
+  if (!app) throw new Error(`${CONFIG_FILE_YAML} has no valid app: section (image is required)`);
+  if (argName) {
+    const err = validateName(argName);
+    if (err) throw new Error(err);
+    return { name: argName, source: "arg", app };
+  }
+  if (app.name) return { name: app.name, source: "drop.yaml", app };
+  return { name: generateName(), source: "generated", app };
 }

@@ -5,7 +5,7 @@ import { loadConfig, saveConfig, resolveApiBase } from "./config.ts";
 import { Client } from "./client.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
-import { resolveSiteName } from "./resolve-name.ts";
+import { resolveSiteName, loadAppDeploy } from "./resolve-name.ts";
 
 async function client(): Promise<Client> {
   try {
@@ -80,6 +80,19 @@ export function buildProgram(): Command {
       console.log(`  ✓ live at ${res.url}`);
       if (source === "generated") {
         console.log(`  tip: add  name: ${name}  under site: in drop.yaml to keep this URL across deploys.`);
+      }
+    });
+
+  program
+    .command("deploy <dir> [name]")
+    .description("Deploy a container app (reads the app: section from drop.yaml)")
+    .action(async (dir: string, nameArg?: string) => {
+      const { name, source, app } = await loadAppDeploy(dir, nameArg);
+      console.log(`  ▸ deploying ${name}  (${app.image})…`);
+      const res = await (await client()).deploy(name, app);
+      console.log(`  ✓ live at ${res.url}`);
+      if (source === "generated") {
+        console.log(`  tip: add  name: ${name}  under app: in drop.yaml to keep this URL across deploys.`);
       }
     });
 

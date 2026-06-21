@@ -1,4 +1,5 @@
 import type { Session } from "./session.ts";
+import type { AppConfig } from "../app-config.ts";
 
 export class Client {
   constructor(private s: Session) {}
@@ -25,6 +26,12 @@ export class Client {
     return this.req("POST", `/v1/sites/${name}/versions`, {
       contentType: "application/gzip",
       body: tarball,
+    });
+  }
+  deploy(name: string, app: AppConfig) {
+    return this.req("POST", `/v1/apps/${name}`, {
+      contentType: "application/json",
+      body: JSON.stringify(app),
     });
   }
   rollback(name: string, to: string) {

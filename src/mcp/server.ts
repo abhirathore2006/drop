@@ -5,7 +5,7 @@ import { defaultSessionPath, loadSession, saveSession, type Session } from "../c
 import { Client } from "../cli/client.ts";
 import { packDir } from "../cli/pack.ts";
 import { devLoginToken, serverLogin } from "../cli/login.ts";
-import { resolveSiteName } from "../cli/resolve-name.ts";
+import { resolveSiteName, loadAppDeploy } from "../cli/resolve-name.ts";
 
 function apiBase(s?: Session): string {
   return process.env.DROP_API ?? s?.apiBase ?? "https://api.drop.example.com";
@@ -81,6 +81,23 @@ export function buildMcp(): McpServer {
         const tarball = await packDir(dir);
         const res = await (await getClient()).publish(resolved.name, tarball);
         return { ...res, name: resolved.name, nameSource: resolved.source };
+      }),
+  );
+
+  server.registerTool(
+    "deploy",
+    {
+      description: "Deploy a container app from a folder's drop.yaml app: section to <name>.drop.example.com.",
+      inputSchema: {
+        directory: z.string().describe("path to the folder containing drop.yaml, e.g. ."),
+        name: z.string().optional().describe("app name (optional — taken from drop.yaml app.name, else generated)"),
+      },
+    },
+    async ({ directory, name }) =>
+      run(async () => {
+        const { name: resolved, source, app } = await loadAppDeploy(resolve(directory), name);
+        const res = await (await getClient()).deploy(resolved, app);
+        return { ...res, name: resolved, nameSource: source };
       }),
   );
 
