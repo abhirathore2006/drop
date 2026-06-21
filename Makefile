@@ -25,7 +25,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert
+.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -42,7 +42,19 @@ help:
 	@echo "  make trust-cert                 trust the local HTTPS cert in the OS store (sudo)"
 	@echo "  make untrust-cert               remove it again"
 	@echo ""
+	@echo "Compute plane (container apps + DBs) — reproducible AWS-on-Floci, needs Docker Desktop:"
+	@echo "  make compute-up                 Floci EKS (real k3s) + KEDA + CloudNativePG"
+	@echo "  make compute-down               tear it down"
+	@echo ""
 	@echo "  corporate CA for podman pulls:  make setup CORP_CA=~/certs/your-root-ca.cer"
+
+# Compute plane: a reproducible local copy of the prod AWS/EKS architecture via
+# Floci. Needs a real Docker daemon (Floci nests k3s); see infra/local/compute-up.sh.
+compute-up:
+	@./infra/local/compute-up.sh
+
+compute-down:
+	@./infra/local/compute-down.sh
 
 # One-time local setup: Node (via nvm + .nvmrc), deps, podman VM, Floci image.
 # Behind a TLS-inspecting proxy, pass CORP_CA=<root.cer> so the podman VM can pull images.
