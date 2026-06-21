@@ -58,3 +58,9 @@ test("assertHttpOnly enforces the v1 443-only rule (one http service)", () => {
     }),
   ).toThrow(/one service/i);
 });
+
+test("sanitizeAppConfig is round-trip safe (CLI sanitizes -> JSON -> API re-sanitizes)", () => {
+  const once = sanitizeAppConfig({ image: "x:1", services: [{ internal_port: 80, protocol: "http" }] })!;
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!; // feed the sanitized object back in
+  expect(twice.services).toEqual([{ internalPort: 80, protocol: "http" }]); // port survives, not defaulted to 8080
+});

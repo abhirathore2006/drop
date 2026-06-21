@@ -58,7 +58,10 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
 
   if (Array.isArray(raw.services)) {
     for (const s of (raw.services as any[]).slice(0, 16)) {
-      const port = typeof s?.internal_port === "number" ? s.internal_port : undefined;
+      // accept drop.yaml's `internal_port` AND the already-sanitized `internalPort`
+      // so re-sanitizing an AppConfig (CLI -> JSON -> API) is round-trip safe.
+      const port =
+        typeof s?.internal_port === "number" ? s.internal_port : typeof s?.internalPort === "number" ? s.internalPort : undefined;
       if (port == null || port < 1 || port > 65535) continue;
       cfg.services.push({ internalPort: port, protocol: s?.protocol === "tcp" ? "tcp" : "http" });
     }

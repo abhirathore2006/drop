@@ -21,7 +21,8 @@ test("appManifests builds Deployment + Service + HTTPScaledObject", () => {
   expect(ctr.env).toEqual([{ name: "NODE_ENV", value: "production" }]);
   expect(ctr.resources.limits).toEqual({ cpu: "0.5", memory: "512Mi" });
   expect(ctr.securityContext.allowPrivilegeEscalation).toBe(false);
-  expect(ctr.securityContext.capabilities.drop).toContain("ALL");
+  expect(ctr.securityContext.seccompProfile.type).toBe("RuntimeDefault");
+  expect(ctr.securityContext.capabilities).toBeUndefined(); // no cap-drop — would break images that chown/setuid (nginx, postgres)
 
   const sm = m.service as any;
   expect(sm.kind).toBe("Service");

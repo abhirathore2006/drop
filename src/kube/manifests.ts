@@ -49,11 +49,14 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
               ports: [{ containerPort }],
               ...(env ? { env } : {}),
               ...(limits ? { resources: { limits, requests: limits } } : {}),
-              // baseline hardening; real multi-tenant isolation also needs a
-              // RuntimeClass (gVisor/Kata) + NetworkPolicy + ResourceQuota (cluster-level).
+              // Minimal, non-breaking baseline: block privilege escalation + use the
+              // default seccomp profile, but DON'T drop capabilities — most official
+              // images chown/setuid in their entrypoint (nginx, postgres, …) and break
+              // under `drop: ALL`. Strong multi-tenant isolation (cap-drop, runAsNonRoot,
+              // gVisor/Kata RuntimeClass, NetworkPolicy, ResourceQuota) is a cluster/PSA
+              // layer applied per-tenant, not forced on every arbitrary image here.
               securityContext: {
                 allowPrivilegeEscalation: false,
-                capabilities: { drop: ["ALL"] },
                 seccompProfile: { type: "RuntimeDefault" },
               },
             },
