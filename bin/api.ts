@@ -8,7 +8,9 @@ import { UserStore } from "../src/users/store.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
 import { createApp } from "../src/api/server.ts";
+import { KubeApiClient } from "../src/kube/client.ts";
 import type { Verifier } from "../src/auth/types.ts";
+import type { KubeClient } from "../src/kube/types.ts";
 
 const cfg = loadConfig();
 
@@ -53,7 +55,15 @@ if (cfg.devAuth) {
   verifier = new SessionVerifier(cfg.sessionSecret);
 }
 
-const app = createApp({ cfg, meta, blob, db, users, verifier });
+// Compute plane is opt-in: set DROP_KUBECONFIG to enable container-app deploys
+// (POST /v1/apps). Without it, the API is static-only and /v1/apps returns 501.
+let kube: KubeClient | undefined;
+if (process.env.DROP_KUBECONFIG) {
+  kube = new KubeApiClient(process.env.DROP_KUBECONFIG);
+  console.log(`drop-api compute plane enabled (kubeconfig: ${process.env.DROP_KUBECONFIG})`);
+}
+
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });
