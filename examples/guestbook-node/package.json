@@ -1,0 +1,9 @@
+{
+  "name": "guestbook-node",
+  "private": true,
+  "version": "1.0.0",
+  "description": "A Postgres-backed guestbook — a Drop Node.js app demonstrating a managed-database binding",
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}

@@ -1,0 +1,26 @@
+# Deploy with:  drop deploy examples/notes-next
+# Full walkthrough (create the DB + map these env vars):  examples/DATABASE_APPS.md
+app:
+  name: notes
+  # Built locally and imported into k3s (see the guide). NOT a :latest tag.
+  image: notes-next:1
+  services:
+    - internal_port: 8080 # matches PORT=8080 baked into the image
+  scale:
+    min: 1 # Next has a cold start; min: 1 keeps it warm. Use 0 for scale-to-zero.
+    max: 2
+  resources:
+    cpu: "500m"
+    memory: "512Mi" # Next needs a little more than the Node app
+  env:
+    # --- non-secret DB connection config (safe to commit) ---
+    PGHOST: notes-db-rw # the `-rw` Service of the DB you create with `drop db:create notes-db`
+    PGPORT: "5432"
+    PGUSER: app
+    PGDATABASE: app
+    PGSSLMODE: require
+  # PGPASSWORD is NOT here — it is a SECRET (never committed). After deploying, set it write-only:
+  #   drop db:password notes-db                       # prints the password once
+  #   printf '<that password>' | drop secrets set notes PGPASSWORD --stdin
+  #   drop restart notes                              # apply it
+  # Secrets are stored in the secret manager and injected as env vars — see ../DATABASE_APPS.md.

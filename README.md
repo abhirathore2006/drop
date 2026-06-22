@@ -1,16 +1,26 @@
 # Drop
 
-Self-hosted, Surge.sh-style static-site publishing for `*.drop.example.com`.
-Push a built folder, get a URL. **TypeScript on Node (v24, see `.nvmrc`);
-metadata in Postgres, file bytes in S3**; gated by Google login.
-(Bun is used only to run the test suite.)
+Self-hosted, Surge.sh-style **static-site publishing** for `*.drop.example.com` — *and* a
+Heroku/Fly-style **compute platform**: deploy scale-to-zero **container apps**, provision
+**managed Postgres databases**, and manage write-only **secrets**, all under the same names,
+auth, and CLI/MCP/dashboard. **TypeScript on Node (v24, see `.nvmrc`); metadata in Postgres,
+file bytes in S3**; gated by Google login. (Bun is used only to run the test suite.)
 
 ```
-$ drop publish ./dist myapp
-  ▸ packing ./dist
-  ▸ dropping…
+$ drop publish ./dist myapp           # static site
   ✓ live at https://myapp.drop.example.com
+
+$ drop deploy ./api myapi             # container app (drop.yaml app:)
+  ✓ live at https://myapi.drop.example.com
+$ drop db:create myapi-db             # managed Postgres (CloudNativePG)
+$ printf "$PW" | drop secrets set myapi DATABASE_PASSWORD --stdin   # write-only secret
+$ drop restart myapi                  # apply it
 ```
+
+> **Two planes, one product.** *Static sites* serve bytes from S3 at the edge. *Compute*
+> (apps + databases + secrets) is **opt-in** — enabled only when the API has a Kubernetes
+> cluster (`DROP_KUBECONFIG`); without it Drop is static-only and `/v1/apps` returns 501.
+> See [Compute platform](#compute-platform) and [`examples/DATABASE_APPS.md`](examples/DATABASE_APPS.md).
 
 ## Documentation
 
@@ -56,12 +66,18 @@ Everything else is Postgres (via Kysely; migrations run on API boot under a
 read-only and never migrates):
 
 ```
-users         email PK · name · role(admin|member) · status · last_login_at
-sites         name PK · current_version · visibility · password_hash · config(jsonb)
-site_members  (site_name, email) · role(owner|editor|viewer)   -- one owner per site
-versions      (site_name, id) · published_by · file_count · bytes · config(jsonb)
-auth_handles  id PK · poll_token · code_verifier · status · mode · token   -- ephemeral OAuth
+users           email PK · name · role(admin|member) · status · last_login_at
+sites           name PK · type(site|app|database) · current_version · visibility ·
+                password_hash · runtime_state(running|stopped) · config(jsonb)
+site_members    (site_name, email) · role(owner|editor|viewer)   -- one owner per site
+versions        (site_name, id) · published_by · file_count · bytes · config(jsonb)
+app_secret_keys (app, key) · fingerprint · updated_by · updated_at   -- secret KEY NAMES only, never values
+auth_handles    id PK · poll_token · code_verifier · status · mode · token   -- ephemeral OAuth
 ```
+
+`sites.type` is the workload discriminator — **`site`** (static), **`app`** (container), or
+**`database`** (managed Postgres) — all sharing the one name namespace, so a name can't be two
+things. Static sites use S3 bytes; apps and databases use the [compute plane](#compute-platform).
 
 Atomic name claim is `INSERT … ON CONFLICT DO NOTHING`; pointer flips and member
 edits are `SELECT … FOR UPDATE` transactions. `GET /v1/sites` (your sites) is a
@@ -79,8 +95,11 @@ Two role axes, with permissions defined in code (`src/authz/permissions.ts`):
   `member` is a normal user. `DROP_ADMINS` (comma-separated) seeds admins on API
   boot — thereafter they're DB-managed.
 - **Per-site role** (`site_members.role`): `owner` (all), `editor`
-  (publish/rollback/read), `viewer` (read). `can(actor, action)` is the single
-  authority check; admins are all-powerful, non-members can do nothing.
+  (publish/deploy/db:create/rollback/restart-stop-start/read+logs), `viewer` (read only).
+  `can(actor, action)` is the single authority check; admins are all-powerful, non-members can
+  do nothing. Compute-relevant actions: `deploy` & `db:create` (editor+), `logs` & lifecycle
+  (editor+ — logs can echo env, so above plain `read`/viewer), `configure` (owner/admin —
+  visibility, DB password, **secrets**), `delete`/`transfer` (owner/admin).
 
 ### Visibility
 
@@ -102,6 +121,80 @@ Each site has a `visibility` (set via `POST /v1/sites/:name/visibility`):
 sites** tab backed by the same endpoint. Admin status never bypasses per-site
 ownership or `_drop.json` name-ownership.
 
+## Compute platform
+
+Beyond static sites, Drop runs **container apps** and **managed databases** on Kubernetes
+(EKS in prod; k3s-on-podman locally), with the same names/auth/CLI. **Opt-in:** the API enables
+it only when `DROP_KUBECONFIG` is set; otherwise `/v1/apps` & `/v1/databases` return `501`.
+Per-tenant isolation: every owner gets a namespace `drop-t-<slug(email)>-<hash>` with a
+default-deny **NetworkPolicy**, **ResourceQuota**/**LimitRange**, and PSA labels; prod adds the
+**gVisor** runtime for untrusted images.
+
+### Container apps
+
+Declare an `app:` section in `drop.yaml` and `drop deploy <dir>`:
+
+```yaml
+app:
+  name: myapi
+  image: myapi:1            # built + pushed to a registry (or imported into k3s locally)
+  services: [{ internal_port: 8080 }]
+  scale: { min: 0, max: 3 } # min:0 = scale-to-zero
+  resources: { cpu: "500m", memory: "512Mi" }
+  env: { LOG_LEVEL: info }  # non-secret config (secrets go via `drop secrets`, below)
+```
+
+The API translates this to a **Deployment + Service + HTTPScaledObject** (KEDA HTTP add-on) +
+ingress NetworkPolicy. Apps **scale to zero** when idle; the **edge** dispatches
+`<name>.drop.example.com` to the KEDA interceptor, which wakes the pod on the first request.
+v1 is one HTTP service, 443-only.
+
+### Managed databases (CloudNativePG)
+
+```bash
+drop db:create myapi-db          # a single-instance Postgres 18 in your namespace
+drop db:password myapi-db        # set/rotate the `app` role password — printed ONCE
+```
+
+CloudNativePG provisions a `Cluster`; backups go to S3 via the **Barman Cloud Plugin**
+(`ObjectStore` + `ScheduledBackup`, local Floci or prod IRSA). Apps connect in-namespace to the
+`<db>-rw` service as user/db `app`; the connection ref (host/port/db/user + the `<db>-app`
+Secret) is returned — **never the password**. `db:password` rotates it via a one-shot in-namespace
+`ALTER ROLE` Job (no superuser). Databases can't be transferred (stateful) and tear down cleanly.
+
+### Secrets (write-only)
+
+Per-app secrets — DB passwords, API keys, tokens — are **set/rotated/deleted but never read
+back**, and injected as env vars:
+
+```bash
+printf "$PW" | drop secrets set myapi DATABASE_PASSWORD --stdin   # stdin → not in shell history
+drop secrets ls myapi            # key names + when changed — NEVER values
+drop restart myapi               # secrets apply on the next restart/deploy
+```
+
+A `SecretStore` **port** picks the backend at deploy time (`DROP_SECRET_BACKEND`): **`kube`**
+(default — writes the `<app>-secret` Secret directly) or **`aws`** (**AWS Secrets Manager** at
+`drop/<ns>/<app>/<KEY>`, synced into the cluster by the **External Secrets Operator**; locally it
+runs against **Floci's** SM emulation, so the local stack exercises the prod path). Every backend
+converges on the `<app>-secret` Secret the Deployment `envFrom`s (listed last → a secret wins over
+a same-named config value). Values never touch `drop.yaml`/git, API/MCP/CLI responses, logs, or
+the metastore — only the secret manager + the pod env. Owner/admin only.
+
+### Lifecycle
+
+```bash
+drop restart <app>   # roll the pods (apply new secrets/config)
+drop stop <app>      # TRUE offline — scale to 0 AND don't wake on traffic (pause KEDA)
+drop start <app>     # restore the configured scale
+```
+
+Editor+. `stop` survives redeploys (`runtime_state=stopped`). All of the above are also in the
+**console** (per-app drawer: status, logs, secrets, lifecycle) and as **MCP tools**.
+
+Full walkthrough with two runnable examples (Node + Next.js, each with a DB + secret):
+[`examples/DATABASE_APPS.md`](examples/DATABASE_APPS.md).
+
 ## Local development
 
 Uses Node (version in `.nvmrc`): `nvm use` (or `nvm install`) first.
@@ -119,6 +212,25 @@ Other targets: `make status`, `make logs`, `make restart`, `make stop`
 volumes). Published sites + metadata persist across restarts in named volumes. The edge routes by `Host` header, so
 either curl with `-H "Host: <name>.drop.localhost"` or add
 `127.0.0.1 <name>.drop.localhost` to `/etc/hosts` to view in a browser.
+
+### Compute plane (local)
+
+The static stack above needs no cluster. To exercise **apps / databases / secrets**, bring up the
+local Kubernetes compute plane — a single-node **k3s** (in podman) with **KEDA** + the HTTP
+add-on (scale-to-zero), **CloudNativePG** + the Barman Cloud Plugin (managed Postgres), and the
+**External Secrets Operator** + a `floci` `ClusterSecretStore` (so the `aws` secrets backend runs
+against Floci's Secrets-Manager emulation):
+
+```bash
+make compute-up                  # k3s + KEDA + CNPG + ESO (bash .run/cluster-up.sh under the hood)
+# run the API with the cluster + the aws-on-Floci secrets backend:
+DROP_KUBECONFIG=~/.kube/drop-k3s.yaml DROP_SECRET_BACKEND=aws \
+  DROP_SECRET_MANAGER_ENDPOINT=http://localhost:4566 DROP_SECRET_STORE_NAME=floci ... node dist/api.js
+```
+
+Then `drop deploy`, `drop db:create`, `drop secrets set`, and `drop restart/stop/start` work
+locally exactly as in prod. See [`examples/DATABASE_APPS.md`](examples/DATABASE_APPS.md) for the
+end-to-end flow (build an image, import it into k3s, create a DB, set a secret, deploy).
 
 ### Trusted local HTTPS (optional, via nginx in containers)
 
@@ -167,11 +279,14 @@ no in-image `npm install`, so they build offline / behind a TLS-inspecting proxy
 
 ## Dashboard (web UI)
 
-The control-plane API serves a dashboard at its root — open the API URL in a browser
-(local: <http://localhost:8473/>). Click **Sign in with Google** (server-mediated,
-sets an HttpOnly cookie), then you get a list of your sites and a per-site drawer to
-roll back versions, add/remove collaborators, transfer ownership, and delete. It uses
-the same `/v1/*` endpoints and identity as the CLI/MCP. Publishing stays in the CLI/MCP.
+The control-plane API serves a **React** dashboard ("console") at its root — open the API URL in
+a browser (local: <http://localhost:8473/>). Click **Sign in with Google** (server-mediated, sets
+an HttpOnly cookie), then you get your workloads grouped by type (**sites / apps / databases**)
+with **live status**, and a per-workload drawer: roll back versions (sites), image/scale/**logs**
++ **lifecycle** (restart/stop/start) and a write-only **Secrets** panel (apps), connection ref +
+**set/rotate password** (databases), plus collaborators, transfer, and delete. Admins get an
+**all-workloads** view with type/owner filters and user suspend. Same `/v1/*` endpoints and
+identity as the CLI/MCP. Publishing/deploying stays in the CLI/MCP.
 
 ## Per-site config — `_drop.json`
 
@@ -239,10 +354,11 @@ For local dev against `make start`, point it at the built server and dev-auth:
   "env": { "DROP_API": "http://localhost:8473", "DROP_DEV_AUTH": "1" } } } }
 ```
 
-Tools exposed: `login`, `dev_login`, `publish`, `list_sites`, `site_info`,
-`rollback`, `delete_site`, `add_collaborator`, `remove_collaborator`,
-`transfer_site`. (The server reads/writes the same `~/.config/drop/session.json`
-as the CLI, so `login` once and both work.)
+Tools exposed: `login`, `dev_login`, `publish`, **`deploy`** (container app), **`db_create`**
+(managed Postgres), **`secret_set`/`secret_list`/`secret_delete`** (write-only app secrets),
+**`app_restart`/`app_stop`/`app_start`** (lifecycle), `list_sites`, `site_info`, `rollback`,
+`delete_site`, `add_collaborator`, `remove_collaborator`, `transfer_site`. (The server
+reads/writes the same `~/.config/drop/session.json` as the CLI, so `login` once and both work.)
 
 ## Running the CLI (any user)
 
@@ -325,8 +441,23 @@ Storage + edge:
   and freed after the response, so it scales to many sites without retaining bytes.
   (CloudFront optional in front.)
 
+Compute (apps + databases + secrets) — *only if you enable the compute plane*:
+- `DROP_KUBECONFIG` — path to the cluster kubeconfig (enables `/v1/apps` + `/v1/databases`).
+- `DROP_BLOCKED_EGRESS_CIDRS` — the cluster pod+service CIDRs, excluded from tenants' HTTPS
+  egress allowlist (defaults to `10.0.0.0/8` = local k3s only; **set the real EKS CIDRs** or
+  cross-tenant egress silently stays open).
+- `DROP_DB_BACKUP_ROLE_ARN` — IRSA role for CNPG → S3 backups (prod fails closed without it).
+- `DROP_SECRET_BACKEND=aws` + `DROP_SECRET_STORE_NAME=<ESO ClusterSecretStore>` (region/IRSA via
+  the SDK default chain) to store app secrets in **AWS Secrets Manager** behind the External
+  Secrets Operator. Default `kube` keeps them in etcd Secrets (use a KMS encryption-at-rest
+  provider). Install KEDA + the HTTP add-on, CloudNativePG + the Barman Cloud Plugin, and (for
+  the `aws` backend) the External Secrets Operator in the cluster.
+
 **Clients (CLI + MCP) need only `DROP_API`** — `drop login` / the MCP `login` tool drive
 the server flow and store the returned session token.
 
-See `../docs/superpowers/specs/2026-06-09-drop-static-publishing-design.md` for the
-full design.
+Designs & plans: static publishing
+(`docs/superpowers/specs/2026-06-09-drop-static-publishing-design.md`), the compute hardening &
+completion plan (`planning/2026-06-21-compute-hardening-and-completion-plan.md`), the admin
+console (`planning/2026-06-22-admin-console-plan.md`), and app secrets + lifecycle
+(`planning/2026-06-22-app-secrets-design.md` / `-plan.md`).

@@ -90,6 +90,38 @@ helm upgrade --install cnpg cnpg/cloudnative-pg --namespace cnpg-system --create
 kubectl apply -f https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.13.0/manifest.yaml
 kubectl -n cnpg-system rollout status deploy/barman-cloud --timeout=180s || true
 
+say "Install the External Secrets Operator + a 'floci' ClusterSecretStore (the 'aws' secrets backend)"
+# App secrets with DROP_SECRET_BACKEND=aws are written to AWS Secrets Manager (Floci locally) and
+# synced into <app>-secret by ESO. Point ESO's AWS client at the IN-CLUSTER Floci endpoint (the
+# same address the DB backups use — NOT the host-side localhost:4566). Override via
+# DROP_SECRET_MANAGER_IN_CLUSTER_ENDPOINT. With DROP_SECRET_BACKEND=kube this is unused.
+ESO_ENDPOINT="${DROP_SECRET_MANAGER_IN_CLUSTER_ENDPOINT:-${DROP_DB_BACKUP_S3_ENDPOINT:-http://host.docker.internal:${FLOCI_PORT}}}"
+helm repo add external-secrets https://charts.external-secrets.io >/dev/null 2>&1 || true
+helm repo update >/dev/null
+helm upgrade --install external-secrets external-secrets/external-secrets --namespace external-secrets --create-namespace \
+  --set installCRDs=true \
+  --set "extraEnv[0].name=AWS_ENDPOINT_URL" --set "extraEnv[0].value=${ESO_ENDPOINT}" \
+  --set "extraEnv[1].name=AWS_REGION" --set "extraEnv[1].value=${REGION}" --wait
+# Static creds (Floci accepts any) + a cluster-wide store the per-app ExternalSecrets reference.
+kubectl -n external-secrets create secret generic floci-aws-creds \
+  --from-literal=access-key-id="${AWS_ACCESS_KEY_ID}" --from-literal=secret-access-key="${AWS_SECRET_ACCESS_KEY}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply -f - <<YAML
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata: { name: floci }
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: ${REGION}
+      auth:
+        secretRef:
+          accessKeyIDSecretRef: { name: floci-aws-creds, key: access-key-id, namespace: external-secrets }
+          secretAccessKeySecretRef: { name: floci-aws-creds, key: secret-access-key, namespace: external-secrets }
+YAML
+echo "✓ ESO + 'floci' ClusterSecretStore ready (run the API with DROP_SECRET_BACKEND=aws DROP_SECRET_STORE_NAME=floci)"
+
 say "Register the gvisor RuntimeClass (PROD sandbox for untrusted images)"
 # Note: runsc is NOT installed on the locally-nested k3s — it needs nested virt/ptrace
 # that this stack lacks. So locally PSA(baseline)+NetworkPolicy+ResourceQuota are the
@@ -109,7 +141,9 @@ echo "✓ db hibernation CronJobs installed (toggle cnpg.io/hibernation on drop.
 
 say "Done — compute plane is up"
 echo "  KUBECONFIG=$KUBECONFIG"
-echo "  point the API at it:  DROP_KUBECONFIG=$KUBECONFIG  (and DROP_COMPUTE=1)"
+echo "  point the API at it:  DROP_KUBECONFIG=$KUBECONFIG"
+echo "  app secrets via AWS Secrets Manager (Floci) + ESO:"
+echo "    DROP_SECRET_BACKEND=aws DROP_SECRET_STORE_NAME=floci DROP_SECRET_MANAGER_ENDPOINT=$AWS_ENDPOINT_URL"
 echo "  DB backups to local S3: set DROP_DB_BACKUP_S3_ENDPOINT to the in-cluster-reachable"
 echo "    Floci/MinIO address (NOT the API's host-side DROP_S3_ENDPOINT) +"
 echo "    DROP_DB_BACKUP_S3_EGRESS_CIDR. See docs/spikes/2026-06-22-local-cnpg-backups.md."

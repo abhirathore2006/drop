@@ -1,0 +1,6 @@
+// Liveness/readiness endpoint — never cached.
+export const dynamic = "force-dynamic";
+
+export function GET() {
+  return new Response("ok");
+}

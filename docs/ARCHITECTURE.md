@@ -1,18 +1,22 @@
 # Drop — Architecture
 
-Drop is a self-hosted static-site publisher. Two stateless Hono services share a
-**Postgres** metadata store and an **S3** (or S3-compatible) byte store:
+Drop is a self-hosted **static-site publisher** *and* an opt-in **compute platform** (container
+apps + managed Postgres + secrets). Two stateless Hono services share a **Postgres** metadata
+store and an **S3** byte store; the compute plane adds a **Kubernetes** cluster:
 
-- **api** — the control plane: auth, publishing, rollback, sharing, visibility,
-  admin, and the dashboard. Owns schema migrations.
-- **edge** — the data plane: serves published bytes by hostname, applies per-site
-  config and visibility. Read-only against Postgres.
+- **api** — the control plane: auth, publishing/deploy, rollback, sharing, visibility, admin, the
+  dashboard, and — when compute is enabled — apps, databases, secrets, and lifecycle. Owns schema
+  migrations; the only writer to Postgres and the cluster.
+- **edge** — the data plane: serves published **site** bytes by hostname, and **dispatches `app`
+  hostnames** to the in-cluster KEDA HTTP interceptor (scale-from-zero). Read-only against Postgres.
 
-File **bytes** live in S3 (`sites/<name>/files/<verId>/…`). Everything else —
-sites, members, versions, users, auth handles — lives in Postgres.
+Static **site** bytes live in S3 (`sites/<name>/files/<verId>/…`); site/app/database **metadata**
+lives in Postgres; **apps**, **databases**, and **secrets** are Kubernetes objects in per-tenant
+namespaces. Compute is **opt-in** — enabled only when the api has `DROP_KUBECONFIG`; otherwise
+`/v1/apps` & `/v1/databases` return `501` and Drop is static-only.
 
-Ports: api `8473`, edge `8474`, Postgres `5432`, S3/Floci `4566` (local), nginx
-`443` (local HTTPS, optional).
+Ports: api `8473`, edge `8474`, Postgres `5432`, S3/Floci `4566` (local), nginx `443` (local
+HTTPS, optional), k3s `6443` (local compute).
 
 ---
 
@@ -269,3 +273,69 @@ Migrations run on api-pod boot under a `pg_advisory_lock`, so a multi-replica
 rollout is safe — one pod migrates, the rest wait then serve. The edge connects
 read-only and never migrates. `DROP_DATABASE_URL` is injected from a Secret into
 both deployments.
+
+---
+
+## 7. Compute plane (apps · databases · secrets)
+
+Opt-in (enabled by `DROP_KUBECONFIG`). The **api** is the only cluster writer; it talks to the
+Kubernetes API over plain `node:https` with **server-side apply** (no `@kubernetes/client-node`),
+behind a `KubeClient` port (`FakeKube` in tests). Everything a tenant owns lives in a **per-tenant
+namespace** `drop-t-<slug(email)>-<hash>`, locked down by:
+
+- **NetworkPolicy** — default-deny; egress allowlist excludes the cluster pod/service CIDRs
+  (`DROP_BLOCKED_EGRESS_CIDRS`) so tenants can't reach each other or the platform DB.
+- **ResourceQuota** + **LimitRange** (no unbounded pods), **PodSecurity** (baseline) labels, and
+  the **gVisor** RuntimeClass for untrusted images in prod.
+
+```mermaid
+flowchart TB
+    subgraph cp["api (control plane)"]
+        K["KubeClient (https + SSA)"]
+        SS["SecretStore port<br/>kube | aws"]
+    end
+    subgraph ns["tenant namespace drop-t-…"]
+        dep["app Deployment<br/>+ Service + HTTPScaledObject"]
+        sec["&lt;app&gt;-secret Secret<br/>(envFrom)"]
+        cl["CNPG Cluster<br/>+ ObjectStore + ScheduledBackup"]
+    end
+    keda["KEDA HTTP add-on<br/>interceptor (scale-from-zero)"]
+    eso["External Secrets Operator"]
+    asm[("AWS Secrets Manager<br/>/ Floci")]
+    s3[("S3 / Floci<br/>(WAL + backups)")]
+
+    K --> dep & cl
+    SS -->|kube| sec
+    SS -->|aws| asm --> eso --> sec
+    edge["edge"] -->|"&lt;app&gt; host"| keda --> dep
+    dep -->|envFrom| sec
+    cl --> s3
+```
+
+**Apps.** `drop deploy` → `appManifests` translates `drop.yaml` `app:` into a Deployment +
+Service + **HTTPScaledObject** (KEDA HTTP add-on) + ingress NetworkPolicy. No `replicas` on the
+Deployment — KEDA owns the count (0..max). The edge proxies `<name>.drop.example.com` to the KEDA
+**interceptor** via `node:http` (preserving the Host header), which wakes a scaled-to-zero pod on
+the first request. Lifecycle: **restart** bumps a pod-template annotation; **stop** pauses the
+ScaledObject (`paused-replicas: 0`) *and* scales to 0 (true offline — won't wake on traffic);
+**start** un-pauses. `runtime_state` in Postgres makes a stop survive redeploys.
+
+**Databases.** `drop db:create` → a **CloudNativePG** `Cluster` (Postgres 18, single instance),
+with backups via the **Barman Cloud Plugin** (`ObjectStore` + `ScheduledBackup`, method `plugin`)
+to S3 (local Floci, prod IRSA). The app user/db are bootstrapped from a platform-owned
+`<db>-app` Secret. `drop db:password` rotates the role password with a one-shot, idempotent
+in-namespace `ALTER ROLE` Job (a role changes its own password — no superuser), then syncs the
+Secret. Apps connect in-namespace to `<db>-rw`.
+
+**Secrets.** Write-only per-app secrets behind a `SecretStore` **port**, backend chosen at deploy
+time. **`kube`**: the api merge-patches the `<app>-secret` Secret per key (set never prunes
+siblings). **`aws`**: the api writes one **AWS Secrets Manager** secret per key at
+`drop/<ns>/<app>/<KEY>` and reconciles an **ExternalSecret** (explicit per-key `remoteRef`s); the
+**External Secrets Operator** syncs it into `<app>-secret`. Either way the Deployment `envFrom`s
+`<app>-secret` (listed after `<app>-env`, so a secret wins on a key collision; `optional` so an
+absent Secret never blocks startup). The metastore holds only key **names** + a fingerprint; a
+value is never returned, logged, or persisted outside the secret manager and the pod env.
+
+**Local = prod shape.** Locally the cluster is **k3s-in-podman** with KEDA, CNPG, and ESO
+installed by `make compute-up`; the `aws` secrets backend and CNPG backups run against **Floci**'s
+S3 + Secrets-Manager emulation, so the local stack exercises the same code paths as EKS.
