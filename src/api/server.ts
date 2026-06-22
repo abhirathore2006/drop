@@ -94,7 +94,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.get("/cli/drop.mjs", () => serveCli("drop.js"));
   app.get("/cli/mcp.mjs", () => serveCli("mcp.js"));
 
-  app.use("/v1/*", authMiddleware(d.verifier));
+  app.use(
+    "/v1/*",
+    authMiddleware(d.verifier, { isSuspended: async (email) => (await d.users.getUser(email))?.status === "suspended" }),
+  );
 
   const ensureUser = (email: string) => d.users.upsertOnLogin(email, null);
 
@@ -344,8 +347,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!can(await actorFor(email, site), "read")) return c.json({ error: "not permitted" }, 403);
     const versions = await d.meta.listVersions(name);
-    return c.json({
+    const out: Record<string, unknown> = {
       name: site.name,
+      type: site.type,
       owner: site.owner,
       collaborators: site.collaborators,
       members: site.members,
@@ -353,7 +357,63 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       current: site.currentVersion,
       url: siteUrl(name),
       versions,
-    });
+    };
+    // Per-type live detail — best-effort: a cluster read failure (compute off / object gone)
+    // must never fail the metadata read, so it's wrapped and simply omitted on error.
+    if (d.kube && site.type === "app") {
+      const ns = tenantNamespace(site.owner);
+      const a: Record<string, unknown> = { image: null, scale: null, status: null };
+      try {
+        const m = await d.kube.getApp(ns, name);
+        const ctr = (m?.deployment as any)?.spec?.template?.spec?.containers?.[0];
+        a.image = ctr?.image ?? null;
+        a.scale = (m?.httpScaledObject as any)?.spec?.replicas ?? null;
+      } catch {
+        /* leave image/scale null */
+      }
+      try {
+        a.status = await d.kube.getAppStatus(ns, name); // {replicas, ready} | null
+      } catch {
+        /* leave status null */
+      }
+      out.app = a;
+    } else if (d.kube && site.type === "database") {
+      const ns = tenantNamespace(site.owner);
+      // Static connection metadata (derived from name+namespace, no cluster call) is ALWAYS
+      // returned; only the live status depends on a cluster read and degrades on its own.
+      const dbInfo: Record<string, unknown> = {
+        host: `${name}-rw.${ns}.svc.cluster.local`,
+        port: 5432,
+        database: "app",
+        credentialsSecret: `${name}-app`, // the password lives in this Secret; never returned here
+        status: null,
+      };
+      try {
+        dbInfo.status = await d.kube.getDatabaseStatus(ns, name); // {phase, ready, instances} | null
+      } catch {
+        /* leave status null */
+      }
+      out.database = dbInfo;
+    }
+    return c.json(out);
+  });
+
+  // ---- recent workload logs (crash diagnostics; apps + databases) ----
+  app.get("/v1/sites/:name/logs", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (!can(await actorFor(email, site), "read")) return c.json({ error: "not permitted" }, 403);
+    if (!d.kube || site.type === "site") return c.json({ logs: "" }); // static sites have no pods
+    const tail = Math.min(Number(c.req.query("tail") ?? "100") || 100, 1000);
+    let logs = "";
+    try {
+      logs = await d.kube.getWorkloadLogs(tenantNamespace(site.owner), name, tail);
+    } catch {
+      /* best-effort — never fail the call on a transient cluster error */
+    }
+    return c.json({ logs });
   });
 
   // ---- set visibility (owner/admin) ----
@@ -398,7 +458,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const out: unknown[] = [];
     for (const name of names) {
       const s = await d.meta.getSitePlain(name);
-      if (s) out.push({ name: s.name, owner: s.owner, visibility: s.visibility, url: siteUrl(name), current: s.currentVersion });
+      if (s) out.push({ name: s.name, type: s.type, owner: s.owner, visibility: s.visibility, url: siteUrl(name), current: s.currentVersion });
     }
     return c.json({ sites: out });
   });
@@ -410,13 +470,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const cursor = c.req.query("cursor") || undefined;
     const limit = Math.min(Number(c.req.query("limit") ?? "100") || 100, 1000);
     const prefix = c.req.query("prefix") || undefined;
-    const { names, nextCursor } = await d.meta.listSitesPage({ cursor, limit, prefix });
+    const owner = c.req.query("owner")?.toLowerCase() || undefined;
+    const typeQ = c.req.query("type");
+    const type = typeQ === "site" || typeQ === "app" || typeQ === "database" ? typeQ : undefined;
+    const { names, nextCursor } = await d.meta.listSitesPage({ cursor, limit, prefix, owner, type });
     const out: unknown[] = [];
     for (const name of names) {
       const s = await d.meta.getSitePlain(name);
       if (s)
         out.push({
           name: s.name,
+          type: s.type,
           owner: s.owner,
           visibility: s.visibility,
           current: s.currentVersion,
@@ -425,6 +489,24 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         });
     }
     return c.json({ sites: out, nextCursor });
+  });
+
+  // ---- admin: suspend / reactivate a user (platform admins only) ----
+  app.post("/v1/admin/users/:email/status", async (c) => {
+    const actor = c.get("identity").email;
+    if (!(await isPlatformAdmin(actor))) return c.json({ error: "admin only" }, 403);
+    const target = c.req.param("email").toLowerCase();
+    const body = (await c.req.json().catch(() => ({}))) as { status?: string };
+    if (body.status !== "active" && body.status !== "suspended") {
+      return c.json({ error: "status must be active|suspended" }, 400);
+    }
+    if (target === actor) return c.json({ error: "cannot change your own status" }, 400); // no self-lockout
+    if (body.status === "suspended" && (await d.users.getUser(target))?.role === "admin") {
+      return c.json({ error: "cannot suspend another admin" }, 409); // no admin-on-admin disable (segregation of duties)
+    }
+    const ok = await d.users.setStatus(target, body.status);
+    if (!ok) return c.json({ error: "no such user" }, 404);
+    return c.json({ email: target, status: body.status });
   });
 
   // ---- collaborators ----
@@ -436,16 +518,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!can(await actorFor(email, site), "share")) return c.json({ error: "owner only" }, 403);
     const body = (await c.req.json().catch(() => ({}))) as { email?: string; role?: string };
     if (!body.email) return c.json({ error: "email required" }, 400);
+    const target = body.email.toLowerCase(); // canonical principal — must match the lowercased identity
     const role = body.role === "viewer" ? "viewer" : "editor";
-    await ensureUser(body.email); // FK
-    await d.meta.addMember(name, body.email, role);
-    return c.json({ added: body.email, role });
+    await ensureUser(target); // FK
+    await d.meta.addMember(name, target, role);
+    return c.json({ added: target, role });
   });
 
   app.delete("/v1/sites/:name/collaborators/:email", async (c) => {
     const email = c.get("identity").email;
     const name = c.req.param("name");
-    const target = c.req.param("email");
+    const target = c.req.param("email").toLowerCase(); // canonical principal
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!can(await actorFor(email, site), "share")) return c.json({ error: "owner only" }, 403);
@@ -469,14 +552,15 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     const body = (await c.req.json().catch(() => ({}))) as { email?: string };
     if (!body.email) return c.json({ error: "email required" }, 400);
-    await ensureUser(body.email); // FK
+    const newOwner = body.email.toLowerCase(); // canonical principal — must match the lowercased identity
+    await ensureUser(newOwner); // FK
     const oldOwner = site.owner;
-    await d.meta.transferOwner(name, body.email);
+    await d.meta.transferOwner(name, newOwner);
     // An app's workload lives in the OLD owner's tenant namespace; the namespace is
     // owner-derived, so a transfer must remove it there. The new owner redeploys to
     // provision it in their own namespace (avoids cross-tenant objects + a dangling Secret).
     if (site.type === "app" && d.kube) await d.kube.deleteApp(tenantNamespace(oldOwner), name);
-    return c.json({ owner: body.email });
+    return c.json({ owner: newOwner });
   });
 
   return app;

@@ -183,14 +183,22 @@ export class MetaStore {
     return rows.map((r) => r.site_name);
   }
 
-  /** Keyset page over all sites (admin browse), optional name prefix. */
+  /** Keyset page over all sites (admin browse), optional name prefix / owner / type filters. */
   async listSitesPage(
-    opts: { cursor?: string; limit?: number; prefix?: string } = {},
+    opts: { cursor?: string; limit?: number; prefix?: string; owner?: string; type?: WorkloadType } = {},
   ): Promise<{ names: string[]; nextCursor?: string }> {
     const limit = opts.limit ?? 100;
     let q = this.db.selectFrom("sites").select("name").orderBy("name").limit(limit + 1);
     if (opts.cursor) q = q.where("name", ">", opts.cursor);
     if (opts.prefix) q = q.where("name", "like", opts.prefix.replace(/[%_\\]/g, "\\$&") + "%");
+    if (opts.type) q = q.where("type", "=", opts.type);
+    // owner = the site's role='owner' membership row.
+    if (opts.owner) {
+      const owner = opts.owner;
+      q = q.where("name", "in", (eb) =>
+        eb.selectFrom("site_members").select("site_name").where("email", "=", owner).where("role", "=", "owner"),
+      );
+    }
     const rows = await q.execute();
     const names = rows.slice(0, limit).map((r) => r.name);
     const nextCursor = rows.length > limit ? names[names.length - 1] : undefined;

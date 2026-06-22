@@ -37,6 +37,22 @@ test("setRole changes the platform role", async () => {
   await db.destroy();
 });
 
+test("email is canonicalized to lowercase across the store (suspension lookups must match login)", async () => {
+  const db = await makeTestDb();
+  const u = new UserStore(db);
+  // login with a mixed-case IdP email — must be stored lowercase…
+  await u.upsertOnLogin("Bob@Example.com", "Bob");
+  expect((await u.getUser("bob@example.com"))?.email).toBe("bob@example.com");
+  expect((await u.getUser("BOB@EXAMPLE.COM"))?.email).toBe("bob@example.com"); // lookup is case-insensitive too
+  // …so a status change keyed on any casing matches the single row (the kill-switch works).
+  expect(await u.setStatus("BOB@EXAMPLE.COM", "suspended")).toBe(true);
+  expect((await u.getUser("bob@example.com"))?.status).toBe("suspended");
+  // and a re-login with different casing doesn't create a second row
+  await u.upsertOnLogin("BOB@example.COM", null);
+  expect((await u.listUsers()).filter((x) => x.email.includes("bob"))).toHaveLength(1);
+  await db.destroy();
+});
+
 test("getUser returns null for unknown", async () => {
   const db = await makeTestDb();
   expect(await new UserStore(db).getUser("nobody@x.com")).toBeNull();

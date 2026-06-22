@@ -6,8 +6,10 @@ export type AuthEnv = { Variables: { identity: Identity } };
 
 export const SESSION_COOKIE = "drop_session";
 
-/** Verifies the bearer token (or the dashboard session cookie) and injects the Identity. */
-export function authMiddleware(v: Verifier) {
+/** Verifies the bearer token (or the dashboard session cookie) and injects the Identity.
+ *  `opts.isSuspended` (when given) rejects a verified-but-suspended principal with 403 —
+ *  the platform-admin kill-switch enforced on every authenticated request. */
+export function authMiddleware(v: Verifier, opts: { isSuspended?: (email: string) => Promise<boolean> } = {}) {
   return createMiddleware<AuthEnv>(async (c, next) => {
     const header = c.req.header("authorization") ?? "";
     const m = /^bearer\s+(.+)$/i.exec(header);
@@ -19,7 +21,9 @@ export function authMiddleware(v: Verifier) {
     // (site.owner) + the derived tenant namespace must agree. Without this, "Alice@x"
     // and "alice@x" become distinct DB owners that hash to the SAME tenant namespace —
     // two "tenants" sharing one isolation boundary.
-    c.set("identity", { ...id, email: id.email.toLowerCase() });
+    const email = id.email.toLowerCase();
+    if (opts.isSuspended && (await opts.isSuspended(email))) return c.json({ error: "account suspended" }, 403);
+    c.set("identity", { ...id, email });
     await next();
   });
 }

@@ -5,8 +5,8 @@
 // integration-verified against Floci's k3s (make compute-up) on a Docker host.
 import { request } from "node:https";
 import { readFileSync } from "node:fs";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import type { KubeClient } from "./types.ts";
+import { parse as parseYaml } from "yaml";
+import type { KubeClient, AppStatus, DatabaseStatus } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 
@@ -70,10 +70,14 @@ export class KubeApiClient implements KubeClient {
     });
   }
 
-  /** Server-side apply a single object (create-or-update, idempotent). */
+  /** Server-side apply a single object (create-or-update, idempotent). The body is JSON, not
+   *  YAML: JSON is valid YAML (the apiserver parses it), and crucially it QUOTES every string —
+   *  YAML-serializing would emit values like "yes"/"no"/"on"/"123" unquoted, which the apiserver's
+   *  YAML-1.1 parser then coerces to booleans/numbers ("expected string, got true"), breaking any
+   *  env value that looks YAML-ambiguous. */
   private async apply(path: string, obj: Record<string, unknown>): Promise<void> {
     const res = await this.call("PATCH", `${path}?fieldManager=drop&force=true`, {
-      body: stringifyYaml(obj),
+      body: JSON.stringify(obj),
       contentType: "application/apply-patch+yaml",
     });
     if (res.status >= 300) throw new Error(`apply ${path} -> ${res.status}: ${res.body.slice(0, 300)}`);
@@ -110,7 +114,14 @@ export class KubeApiClient implements KubeClient {
     // add-on, applying then throwing would orphan the Deployment/Service/NetworkPolicy.
     await this.assertCrd("http.keda.sh");
     // namespace is provisioned (PSA-labeled) by applyTenant — don't re-apply a bare one here.
-    if (m.secret) await this.apply(this.secretPath(namespace, this.objName(m.secret)), m.secret as Record<string, unknown>);
+    // The env Secret is REPLACED (delete then create), not server-side-merged: SSA on a
+    // Secret's stringData does NOT prune keys removed since the last deploy, so a removed env
+    // var (e.g. a stale DATABASE_URL) would otherwise linger and silently poison the app.
+    if (m.secret) {
+      const sp = this.secretPath(namespace, this.objName(m.secret));
+      await this.call("DELETE", sp); // 404 if absent — harmless (call() doesn't throw on non-2xx)
+      await this.apply(sp, m.secret as Record<string, unknown>);
+    }
     await this.apply(this.deploymentPath(namespace, name), m.deployment as Record<string, unknown>);
     await this.apply(this.servicePath(namespace, name), m.service as Record<string, unknown>);
     await this.apply(this.netpolPath(namespace, this.objName(m.ingressPolicy)), m.ingressPolicy as Record<string, unknown>);
@@ -146,6 +157,64 @@ export class KubeApiClient implements KubeClient {
     await this.call("DELETE", this.objectStorePath(namespace, `${name}-store`));
     await this.call("DELETE", this.netpolPath(namespace, `${name}-db`));
     await this.call("DELETE", this.secretPath(namespace, `${name}-backup-creds`));
+  }
+
+  private podsPath = (ns: string, n: string) =>
+    `/api/v1/namespaces/${ns}/pods?labelSelector=${encodeURIComponent(`app.kubernetes.io/name=${n}`)}`;
+
+  async getAppStatus(namespace: string, name: string): Promise<AppStatus | null> {
+    const r = await this.call("GET", this.deploymentPath(namespace, name));
+    if (r.status === 404) return null;
+    if (r.status >= 300) throw new Error(`getAppStatus ${name} -> ${r.status}`);
+    const s = (JSON.parse(r.body).status ?? {}) as { replicas?: number; readyReplicas?: number };
+    // Restarts + crash reason come from the PODS (the Deployment status has neither).
+    let restarts = 0;
+    let reason = (s.replicas ?? 0) === 0 ? "ScaledToZero" : "NoPods";
+    try {
+      const pr = await this.call("GET", this.podsPath(namespace, name));
+      if (pr.status < 300) {
+        const pods = (JSON.parse(pr.body).items ?? []) as any[];
+        if (pods.length) {
+          for (const p of pods) {
+            for (const cs of p.status?.containerStatuses ?? []) restarts = Math.max(restarts, cs.restartCount ?? 0);
+          }
+          // reason from the newest pod's app container: waiting reason (e.g. CrashLoopBackOff) or phase.
+          const newest = pods[pods.length - 1];
+          const cs = (newest.status?.containerStatuses ?? []).find((c: any) => c.name === name) ?? newest.status?.containerStatuses?.[0];
+          reason = cs?.state?.waiting?.reason ?? cs?.state?.terminated?.reason ?? newest.status?.phase ?? reason;
+        }
+      }
+    } catch {
+      /* leave restarts/reason at defaults */
+    }
+    return { replicas: s.replicas ?? 0, ready: s.readyReplicas ?? 0, restarts, reason };
+  }
+
+  async getWorkloadLogs(namespace: string, name: string, tailLines = 100): Promise<string> {
+    // find a pod for this workload — apps label app.kubernetes.io/name; CNPG uses cnpg.io/cluster.
+    for (const sel of [`app.kubernetes.io/name=${name}`, `cnpg.io/cluster=${name}`]) {
+      const pr = await this.call("GET", `/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(sel)}`);
+      if (pr.status >= 300) continue;
+      const pods = (JSON.parse(pr.body).items ?? []) as any[];
+      if (!pods.length) continue;
+      const pod = pods[pods.length - 1].metadata.name as string;
+      const lr = await this.call("GET", `/api/v1/namespaces/${namespace}/pods/${pod}/log?tailLines=${tailLines}&container=${name}`);
+      // container=name may 404 for CNPG (container is "postgres"); retry without the container filter.
+      if (lr.status >= 300) {
+        const lr2 = await this.call("GET", `/api/v1/namespaces/${namespace}/pods/${pod}/log?tailLines=${tailLines}`);
+        return lr2.status < 300 ? lr2.body : "";
+      }
+      return lr.body;
+    }
+    return "";
+  }
+
+  async getDatabaseStatus(namespace: string, name: string): Promise<DatabaseStatus | null> {
+    const r = await this.call("GET", this.clusterPath(namespace, name));
+    if (r.status === 404) return null;
+    if (r.status >= 300) throw new Error(`getDatabaseStatus ${name} -> ${r.status}`);
+    const o = JSON.parse(r.body) as { status?: { phase?: string; readyInstances?: number }; spec?: { instances?: number } };
+    return { phase: o.status?.phase ?? "unknown", ready: o.status?.readyInstances ?? 0, instances: o.spec?.instances ?? 0 };
   }
 
   async getApp(namespace: string, name: string): Promise<AppManifests | null> {

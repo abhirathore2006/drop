@@ -474,6 +474,100 @@ test("transfer: a database is rejected (409) — stateful, can't be moved by a m
   await db.destroy();
 });
 
+// ---- Phase D1: read-model (type everywhere) + per-type live detail + admin filters + suspension ----
+
+test("read-model: list + detail + admin all carry the workload `type`", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await pub(app, "alice", "mysite", await tgz({ "index.html": "x" }));
+  await call(app, "POST", "/v1/apps/myapp", "alice", { image: "x:1" });
+  const list = await (await call(app, "GET", "/v1/sites", "alice")).json();
+  const byName = Object.fromEntries(list.sites.map((s: any) => [s.name, s.type]));
+  expect(byName.mysite).toBe("site");
+  expect(byName.myapp).toBe("app");
+  expect((await (await call(app, "GET", "/v1/sites/myapp", "alice")).json()).type).toBe("app");
+  const admin = await (await call(app, "GET", "/v1/admin/sites", "alice")).json();
+  expect(admin.sites.every((s: any) => typeof s.type === "string")).toBe(true);
+  await db.destroy();
+});
+
+test("app detail: GET /v1/sites/:name returns image/scale + live status", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "ecr/billing:v2", scale: { min: 0, max: 3 } });
+  const j = await (await call(app, "GET", "/v1/sites/billing", "alice")).json();
+  expect(j.type).toBe("app");
+  expect(j.app.image).toBe("ecr/billing:v2");
+  expect(j.app.scale).toEqual({ min: 0, max: 3 });
+  expect(j.app.status).toEqual({ replicas: 1, ready: 1, restarts: 0, reason: "Running" }); // FakeKube healthy default
+  await db.destroy();
+});
+
+test("app detail surfaces crash diagnostics (restarts + reason); logs endpoint returns recent logs", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
+  const ns = kube.applies[0]!.namespace;
+  // simulate a crash-looping app + some logs
+  kube.statusOverride.set(`${ns}/billing`, { replicas: 1, ready: 0, restarts: 7, reason: "CrashLoopBackOff" } as any);
+  kube.logsByName.set(`${ns}/billing`, "todo: DB not ready (attempt 3): FailedToOpenSocket\n");
+  const detail = await (await call(app, "GET", "/v1/sites/billing", "alice")).json();
+  expect(detail.app.status).toEqual({ replicas: 1, ready: 0, restarts: 7, reason: "CrashLoopBackOff" });
+  const logs = await (await call(app, "GET", "/v1/sites/billing/logs", "alice")).json();
+  expect(logs.logs).toContain("FailedToOpenSocket");
+  // a static site has no pods → empty logs, no error
+  await pub(app, "alice", "asite", await tgz({ "index.html": "x" }));
+  expect((await (await call(app, "GET", "/v1/sites/asite/logs", "alice")).json()).logs).toBe("");
+  await db.destroy();
+});
+
+test("database detail: GET /v1/sites/:name returns connection ref (no password) + live status", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/databases/bills", "alice", {});
+  const j = await (await call(app, "GET", "/v1/sites/bills", "alice")).json();
+  expect(j.type).toBe("database");
+  expect(j.database.port).toBe(5432);
+  expect(j.database.database).toBe("app");
+  expect(j.database.credentialsSecret).toBe("bills-app");
+  expect(j.database.host).toMatch(/^bills-rw\.drop-t-/);
+  expect(j.database.status.phase).toBe("Cluster in healthy state");
+  expect(JSON.stringify(j)).not.toContain("password");
+  await db.destroy();
+});
+
+test("admin filters: ?type= and ?owner= narrow the catalog", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await pub(app, "alice", "asite", await tgz({ "index.html": "x" }));
+  await call(app, "POST", "/v1/apps/anapp", "alice", { image: "x:1" });
+  await call(app, "POST", "/v1/databases/bobdb", "bob", {});
+  const apps = await (await call(app, "GET", "/v1/admin/sites?type=app", "alice")).json();
+  expect(apps.sites.map((s: any) => s.name)).toEqual(["anapp"]);
+  const bobs = await (await call(app, "GET", "/v1/admin/sites?owner=bob@example.com", "alice")).json();
+  expect(bobs.sites.map((s: any) => s.name)).toEqual(["bobdb"]);
+  await db.destroy();
+});
+
+test("suspension: a suspended user is blocked (403); admin can suspend + reactivate; no self-lockout", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await pub(app, "bob", "bobsite", await tgz({ "index.html": "x" })); // bob acts → registered in users
+  // alice (admin) suspends bob → bob is blocked on every /v1 route
+  expect((await call(app, "POST", "/v1/admin/users/bob@example.com/status", "alice", { status: "suspended" })).status).toBe(200);
+  expect((await call(app, "GET", "/v1/me", "bob")).status).toBe(403);
+  expect((await call(app, "POST", "/v1/apps/x", "bob", { image: "x:1" })).status).toBe(403);
+  // reactivate → bob works again
+  await call(app, "POST", "/v1/admin/users/bob@example.com/status", "alice", { status: "active" });
+  expect((await call(app, "GET", "/v1/me", "bob")).status).toBe(200);
+  // non-admin can't suspend; admin can't lock themselves out
+  expect((await call(app, "POST", "/v1/admin/users/alice@example.com/status", "bob", { status: "suspended" })).status).toBe(403);
+  expect((await call(app, "POST", "/v1/admin/users/alice@example.com/status", "alice", { status: "suspended" })).status).toBe(400);
+  await db.destroy();
+});
+
+test("suspension: an admin cannot suspend another admin (409), but can reactivate", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com", "bob@example.com"] });
+  await pub(app, "bob", "bobsite", await tgz({ "index.html": "x" })); // bob registered (seeded admin)
+  expect((await call(app, "POST", "/v1/admin/users/bob@example.com/status", "alice", { status: "suspended" })).status).toBe(409);
+  expect((await call(app, "POST", "/v1/admin/users/bob@example.com/status", "alice", { status: "active" })).status).toBe(200);
+  await db.destroy();
+});
+
 test("deploy: tenant egress except is sourced from config (DROP_BLOCKED_EGRESS_CIDRS)", async () => {
   const db = await makeTestDb();
   const users = new UserStore(db);
