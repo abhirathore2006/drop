@@ -12,7 +12,7 @@ button{font:inherit;cursor:pointer}
 
 /* header */
 header{display:flex;align-items:center;justify-content:space-between;padding:18px 28px;border-bottom:1px solid #1c2128;position:sticky;top:0;background:#0b0d10cc;backdrop-filter:blur(6px);z-index:5}
-.brand{font-weight:700;font-size:19px;letter-spacing:-.01em}.tri{color:#9be15d}
+.brand{font-weight:700;font-size:19px;letter-spacing:-.01em;background:none;border:0;color:inherit;cursor:pointer;font-family:inherit;padding:0}.tri{color:#9be15d}
 .tag{font-size:11px;color:#8a9099;border:1px solid #2a2f37;border-radius:6px;padding:2px 7px;margin-left:6px;font-weight:500;vertical-align:middle}
 nav{display:flex;align-items:center;gap:18px}
 .navlink{background:none;border:0;color:#8a9099;text-decoration:none;font-size:14px}
@@ -46,13 +46,17 @@ h2 .count{background:#11151a;border:1px solid #2a2f37;border-radius:20px;padding
 .restarts{color:#ff8d8d;font-size:12px}
 
 /* drawer */
-.scrim{position:fixed;inset:0;background:#0008;z-index:10}
-.drawer{position:fixed;top:0;right:0;height:100vh;width:min(520px,94vw);background:#0e1217;border-left:1px solid #1c2128;overflow-y:auto;padding:24px;z-index:11;box-shadow:-20px 0 50px #0006}
-.dhead{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px}
-.dname{font-size:20px;font-weight:700;display:flex;align-items:center;gap:10px}
-.dhost{display:block;color:#9be15d;font-size:13px;text-decoration:none;margin-top:5px}
-.downer{color:#8a9099;font-size:12px;margin-top:3px}
-.x{background:none;border:0;color:#8a9099;font-size:18px}.x:hover{color:#e7e9ea}
+/* full-page workload detail (routed) */
+.back{background:none;border:0;color:#8a9099;font-size:13px;cursor:pointer;padding:0;margin-bottom:14px}.back:hover{color:#9be15d}
+.page{animation:fade .15s ease}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.phead{margin-bottom:8px}
+.dname{font-size:24px;font-weight:700;display:flex;align-items:center;gap:10px}
+.dhost{display:inline-block;color:#9be15d;font-size:13px;text-decoration:none;margin-top:6px}
+.downer{color:#8a9099;font-size:12px;margin-top:4px}
+/* sections become panels in a responsive grid; sticky-ish cards on wide screens */
+.panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:18px;align-items:start}
+.panels .sec{border:1px solid #1c2128;border-radius:14px;padding:16px 18px;background:#0e1217;margin:0}
 .sec{border-top:1px solid #1c2128;padding:16px 0}
 .sec h3,.sec-h h3{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:#8a9099;margin:0 0 10px;font-weight:600}
 .sec-h{display:flex;justify-content:space-between;align-items:center}

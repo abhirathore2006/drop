@@ -57,7 +57,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   registerAuthRoutes(app, d.cfg, d.db, d.users);
 
   // Dashboard (public page; its JS calls /v1/* with the session cookie).
-  app.get("/", (c) => c.html(dashboardHtml(d.cfg.baseDomain)));
+  // The console SPA shell. Served at the root AND at its client-side routes so deep links and
+  // browser refresh load the same shell (the React app reads location and renders the route).
+  const shell = (c: any) => c.html(dashboardHtml(d.cfg.baseDomain));
+  app.get("/", shell);
+  app.get("/admin", shell);
+  app.get("/app/:name", shell);
+  app.get("/database/:name", shell);
+  app.get("/site/:name", shell);
 
   // Public docs site — the same static files GitHub Pages serves (docs/), now
   // shipped with the deployment and served at /docs. Uses relative links, so it
@@ -508,12 +515,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // must never fail the metadata read, so it's wrapped and simply omitted on error.
     if (d.kube && site.type === "app") {
       const ns = tenantNamespace(site.owner);
-      const a: Record<string, unknown> = { image: null, scale: null, status: null };
+      const a: Record<string, unknown> = { image: null, scale: null, resources: null, status: null };
       try {
         const m = await d.kube.getApp(ns, name);
         const ctr = (m?.deployment as any)?.spec?.template?.spec?.containers?.[0];
         a.image = ctr?.image ?? null;
         a.scale = (m?.httpScaledObject as any)?.spec?.replicas ?? null;
+        a.resources = ctr?.resources?.limits ?? null; // { cpu, memory }
       } catch {
         /* leave image/scale null */
       }

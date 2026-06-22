@@ -3,20 +3,51 @@ import { api, type Detail, type ListItem, type Me, type WorkloadType } from "./a
 
 const TYPE_LABEL: Record<WorkloadType, string> = { site: "SITE", app: "APP", database: "DB" };
 
+// --- tiny history router (full-page routes; no router dep). The API serves the SPA shell at
+//     /, /admin, and /{app,database,site}/:name (see server.ts), so deep links + refresh work. ---
+type Route = { kind: "list" } | { kind: "admin" } | { kind: "detail"; name: string };
+function parseRoute(): Route {
+  const p = (location.pathname.replace(/\/+$/, "") || "/");
+  if (p === "/admin") return { kind: "admin" };
+  const m = /^\/(?:app|database|site)\/(.+)$/.exec(p);
+  if (m) return { kind: "detail", name: decodeURIComponent(m[1]!) };
+  return { kind: "list" };
+}
+function navigate(path: string) {
+  if (location.pathname !== path) {
+    history.pushState({}, "", path);
+    window.dispatchEvent(new Event("drop:nav"));
+  }
+}
+function useRoute(): Route {
+  const [r, setR] = useState(parseRoute);
+  useEffect(() => {
+    const on = () => setR(parseRoute());
+    window.addEventListener("popstate", on);
+    window.addEventListener("drop:nav", on);
+    return () => {
+      window.removeEventListener("popstate", on);
+      window.removeEventListener("drop:nav", on);
+    };
+  }, []);
+  return r;
+}
+const pathFor = (w: { type: WorkloadType; name: string }) => `/${w.type}/${encodeURIComponent(w.name)}`;
+
 function TypeBadge({ t }: { t: WorkloadType }) {
   return <span className={`badge badge-${t}`}>{TYPE_LABEL[t]}</span>;
 }
 
 function StatusPill({ reason }: { reason: string }) {
   const danger = /CrashLoopBackOff|Error|Failed|ImagePull|Pending/i.test(reason);
-  const idle = /ScaledToZero|NoPods|hibernat/i.test(reason);
+  const idle = /ScaledToZero|NoPods|hibernat|Stopped/i.test(reason);
   const cls = danger ? "pill pill-danger" : idle ? "pill pill-idle" : "pill pill-ok";
   return <span className={cls}>{reason}</span>;
 }
 
-function Card({ w, onOpen }: { w: ListItem; onOpen: () => void }) {
+function Card({ w }: { w: ListItem }) {
   return (
-    <button className="card" onClick={onOpen}>
+    <button className="card" onClick={() => navigate(pathFor(w))}>
       <div className="card-top">
         <span className="dot" />
         <span className="card-name">{w.name}</span>
@@ -140,7 +171,9 @@ function Secrets({ name, canManage, onChanged }: { name: string; canManage: bool
   );
 }
 
-function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClose: () => void; onChanged: () => void }) {
+function WorkloadPage({ name, me }: { name: string; me: Me }) {
+  const onClose = () => navigate("/"); // delete/transfer → back to the list
+  const onChanged = () => {}; // full-page: the list refetches on return; sections self-refresh
   const [d, setD] = useState<Detail | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -194,30 +227,27 @@ function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClos
   };
 
   return (
-    <>
-      <div className="scrim" onClick={onClose} />
-      <aside className="drawer">
-        {!d ? (
-          <div className="spin">loading…</div>
-        ) : (
-          <>
-            <div className="dhead">
-              <div>
-                <div className="dname">
-                  {d.name} <TypeBadge t={d.type} />
-                </div>
-                {(d.type === "site" || d.type === "app") && (
-                  <a className="dhost" href={d.url} target="_blank" rel="noreferrer">
-                    {d.url.replace(/^https?:\/\//, "")} ↗
-                  </a>
-                )}
-                <div className="downer">owner: {d.owner}</div>
-              </div>
-              <button className="x" onClick={onClose}>
-                ✕
-              </button>
+    <div className="page">
+      <button className="back" onClick={onClose}>
+        ← all workloads
+      </button>
+      {!d ? (
+        <div className="spin">loading…</div>
+      ) : (
+        <>
+          <div className="phead">
+            <div className="dname">
+              {d.name} <TypeBadge t={d.type} />
             </div>
-            {err && <div className="err">{err}</div>}
+            {(d.type === "site" || d.type === "app") && (
+              <a className="dhost" href={d.url} target="_blank" rel="noreferrer">
+                {d.url.replace(/^https?:\/\//, "")} ↗
+              </a>
+            )}
+            <div className="downer">owner: {d.owner}</div>
+          </div>
+          {err && <div className="err">{err}</div>}
+          <div className="panels">
 
             {/* APP */}
             {d.type === "app" && d.app && (
@@ -225,6 +255,9 @@ function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClos
                 <h3>container app</h3>
                 <Field label="image">{d.app.image ?? "—"}</Field>
                 <Field label="scale">{d.app.scale ? `min ${d.app.scale.min} · max ${d.app.scale.max}` : "—"}</Field>
+                <Field label="resources">
+                  {d.app.resources ? `${d.app.resources.cpu ?? "—"} cpu · ${d.app.resources.memory ?? "—"}` : "—"}
+                </Field>
                 <Field label="status">
                   {d.app.status ? (
                     <>
@@ -382,10 +415,10 @@ function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClos
                 </button>
               </div>
             )}
-          </>
-        )}
-      </aside>
-    </>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -421,7 +454,7 @@ function AddRow({
   );
 }
 
-function WorkloadGrid({ items, onOpen }: { items: ListItem[]; onOpen: (n: string) => void }) {
+function WorkloadGrid({ items }: { items: ListItem[] }) {
   const groups: { t: WorkloadType; label: string }[] = [
     { t: "app", label: "Apps" },
     { t: "database", label: "Databases" },
@@ -439,7 +472,7 @@ function WorkloadGrid({ items, onOpen }: { items: ListItem[]; onOpen: (n: string
             </h2>
             <div className="grid">
               {g.map((w) => (
-                <Card key={w.name} w={w} onOpen={() => onOpen(w.name)} />
+                <Card key={w.name} w={w} />
               ))}
             </div>
           </section>
@@ -449,7 +482,7 @@ function WorkloadGrid({ items, onOpen }: { items: ListItem[]; onOpen: (n: string
   );
 }
 
-function Admin({ me, onOpen }: { me: Me; onOpen: (n: string) => void }) {
+function Admin({ me }: { me: Me }) {
   const [items, setItems] = useState<ListItem[]>([]);
   const [type, setType] = useState("");
   const [owner, setOwner] = useState("");
@@ -504,7 +537,7 @@ function Admin({ me, onOpen }: { me: Me; onOpen: (n: string) => void }) {
           {items.map((w) => (
             <tr key={w.name}>
               <td>
-                <button className="link" onClick={() => onOpen(w.name)}>
+                <button className="link" onClick={() => navigate(pathFor(w))}>
                   {w.name}
                 </button>
               </td>
@@ -539,22 +572,33 @@ function Admin({ me, onOpen }: { me: Me; onOpen: (n: string) => void }) {
   );
 }
 
+function MyWorkloads() {
+  const [items, setItems] = useState<ListItem[] | null>(null);
+  useEffect(() => {
+    api.list().then((r) => setItems(r.sites)).catch(() => setItems([]));
+  }, []);
+  if (!items) return <div className="spin">loading…</div>;
+  if (!items.length)
+    return (
+      <div className="empty">
+        <p>No workloads yet.</p>
+        <p className="muted">
+          Ship one from the CLI: <code>drop deploy ./app</code> · <code>drop db:create mydb</code> ·{" "}
+          <code>drop publish ./site</code>
+        </p>
+      </div>
+    );
+  return <WorkloadGrid items={items} />;
+}
+
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [gated, setGated] = useState(false);
-  const [view, setView] = useState<"mine" | "admin">("mine");
-  const [items, setItems] = useState<ListItem[]>([]);
-  const [open, setOpen] = useState<string | null>(null);
+  const route = useRoute();
 
   useEffect(() => {
     api.me().then(setMe).catch(() => setGated(true));
   }, []);
-  const refresh = useCallback(() => {
-    api.list().then((r) => setItems(r.sites)).catch(() => {});
-  }, []);
-  useEffect(() => {
-    if (me) refresh();
-  }, [me, refresh]);
 
   if (gated)
     return (
@@ -573,15 +617,15 @@ export function App() {
   return (
     <div>
       <header>
-        <div className="brand">
+        <button className="brand" onClick={() => navigate("/")}>
           <span className="tri">▸</span> drop <span className="tag">console</span>
-        </div>
+        </button>
         <nav>
-          <button className={view === "mine" ? "navlink on" : "navlink"} onClick={() => setView("mine")}>
+          <button className={route.kind === "admin" ? "navlink" : "navlink on"} onClick={() => navigate("/")}>
             my workloads
           </button>
           {me.admin && (
-            <button className={view === "admin" ? "navlink on" : "navlink"} onClick={() => setView("admin")}>
+            <button className={route.kind === "admin" ? "navlink on" : "navlink"} onClick={() => navigate("/admin")}>
               all tenants
             </button>
           )}
@@ -592,30 +636,14 @@ export function App() {
         </nav>
       </header>
       <main>
-        {view === "mine" ? (
-          items.length ? (
-            <WorkloadGrid items={items} onOpen={setOpen} />
-          ) : (
-            <div className="empty">
-              <p>No workloads yet.</p>
-              <p className="muted">
-                Ship one from the CLI: <code>drop deploy ./app</code> · <code>drop db:create mydb</code> ·{" "}
-                <code>drop publish ./site</code>
-              </p>
-            </div>
-          )
+        {route.kind === "detail" ? (
+          <WorkloadPage key={route.name} name={route.name} me={me} />
+        ) : route.kind === "admin" && me.admin ? (
+          <Admin me={me} />
         ) : (
-          <Admin me={me} onOpen={setOpen} />
+          <MyWorkloads />
         )}
       </main>
-      {open && (
-        <Drawer
-          name={open}
-          me={me}
-          onClose={() => setOpen(null)}
-          onChanged={refresh}
-        />
-      )}
     </div>
   );
 }

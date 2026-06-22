@@ -45,7 +45,13 @@ export interface Detail {
   current: string | null;
   url: string;
   versions: Version[];
-  app?: { image: string | null; scale: { min: number; max: number } | null; status: AppStatus | null; runtimeState?: "running" | "stopped" };
+  app?: {
+    image: string | null;
+    scale: { min: number; max: number } | null;
+    resources?: { cpu?: string; memory?: string } | null;
+    status: AppStatus | null;
+    runtimeState?: "running" | "stopped";
+  };
   database?: { host: string; port: number; database: string; user: string; credentialsSecret: string; status: DatabaseStatus | null };
 }
 
