@@ -45,6 +45,12 @@
     <code>8473</code>, edge <code>8474</code>, Postgres <code>5432</code>, S3/Floci <code>4566</code>
     (local), nginx <code>443</code> (local HTTPS, optional).</p>
 
+    <p>Drop is also an <strong>opt-in compute platform</strong>: alongside static sites it runs container
+    <strong>apps</strong>, managed <strong>databases</strong>, and write-only <strong>secrets</strong> on a
+    Kubernetes cluster. Compute is enabled only when the api has <code>DROP_KUBECONFIG</code>; otherwise
+    <code>/v1/apps</code> &amp; <code>/v1/databases</code> return <code>501</code> and Drop is static-only.
+    See <a href="#compute">§7 Compute plane</a>. Compute port: k3s <code>6443</code> (local).</p>
+
     <h2>1. System overview</h2>
     <p>The api and edge are the only moving parts; both scale horizontally because all shared state is in
     Postgres + S3. The edge never writes and never migrates.</p>
@@ -89,6 +95,68 @@
     migrates, the rest wait then serve. <code>DROP_DATABASE_URL</code> is injected from a Secret into both
     deployments. See <a href="deployment.html">Deployment</a>.</p>
     <div class="mermaid" id="m6"></div>
+
+    <h2 id="compute">7. Compute plane (apps · databases · secrets)</h2>
+    <p>Opt-in, enabled by <code>DROP_KUBECONFIG</code>. The <strong>api</strong> is the only cluster writer; it
+    talks to the Kubernetes API over plain <code>node:https</code> with <strong>server-side apply</strong> (no
+    <code>@kubernetes/client-node</code>), behind a <code>KubeClient</code> port (<code>FakeKube</code> in tests).
+    Everything a tenant owns lives in a <strong>per-tenant namespace</strong>
+    <code>drop-t-&lt;slug(email)&gt;-&lt;hash&gt;</code>, locked down by:</p>
+    <ul>
+      <li><strong>NetworkPolicy</strong> — default-deny; the egress allowlist excludes the cluster pod/service
+      CIDRs (<code>DROP_BLOCKED_EGRESS_CIDRS</code>) so tenants can't reach each other or the platform DB.</li>
+      <li><strong>ResourceQuota</strong> + <strong>LimitRange</strong> (no unbounded pods),
+      <strong>PodSecurity</strong> (baseline) labels, and the <strong>gVisor</strong> RuntimeClass for untrusted
+      images in prod.</li>
+    </ul>
+    <div class="mermaid" id="m7"></div>
+
+    <h3>Apps</h3>
+    <p><code>drop deploy</code> → <code>appManifests</code> translates the <code>drop.yaml</code> <code>app:</code>
+    section into a <strong>Deployment + Service + HTTPScaledObject</strong> (KEDA HTTP add-on) + ingress
+    NetworkPolicy. No <code>replicas</code> on the Deployment — KEDA owns the count (<code>0..max</code>). The
+    <strong>edge</strong> proxies <code>&lt;name&gt;.drop.example.com</code> to the KEDA <strong>interceptor</strong>
+    via <code>node:http</code> (preserving the Host header), which wakes a scaled-to-zero pod on the first request.</p>
+    <table class="tbl">
+    <thead><tr><th>Lifecycle</th><th>What the api does to the cluster</th></tr></thead>
+    <tbody>
+      <tr><td><code>restart</code></td><td>Bumps a pod-template annotation (rolls the pods; applies new secrets/config)</td></tr>
+      <tr><td><code>stop</code></td><td>Pauses the ScaledObject (<code>paused-replicas: 0</code>) <em>and</em> scales to 0 — true offline; won't wake on traffic</td></tr>
+      <tr><td><code>start</code></td><td>Un-pauses; restores the configured scale</td></tr>
+    </tbody>
+    </table>
+    <div class="note tip"><span class="lbl">Note</span><p><code>runtime_state</code> in Postgres makes a
+    <code>stop</code> survive redeploys, so a stopped app stays offline until you <code>start</code> it.</p></div>
+
+    <h3>Databases</h3>
+    <p><code>drop db:create</code> → a <strong>CloudNativePG</strong> <code>Cluster</code> (Postgres 18, single
+    instance), with backups via the <strong>Barman Cloud Plugin</strong> (<code>ObjectStore</code> +
+    <code>ScheduledBackup</code>, method <code>plugin</code>) to S3 (local Floci, prod IRSA). The app user/db are
+    bootstrapped from a platform-owned <code>&lt;db&gt;-app</code> Secret. <code>drop db:password</code> rotates the
+    role password with a one-shot, idempotent in-namespace <code>ALTER ROLE</code> Job (a role changes its own
+    password — no superuser), then syncs the Secret. Apps connect in-namespace to <code>&lt;db&gt;-rw</code>.</p>
+
+    <h3>Secrets</h3>
+    <p>Write-only per-app secrets behind a <code>SecretStore</code> <strong>port</strong>, with the backend chosen at
+    deploy time (<code>DROP_SECRET_BACKEND</code>):</p>
+    <table class="tbl">
+    <thead><tr><th>Backend</th><th>How the api persists a key</th><th>How it reaches the pod</th></tr></thead>
+    <tbody>
+      <tr><td><code>kube</code></td><td>Merge-patches the <code>&lt;app&gt;-secret</code> Secret per key (<code>set</code> never prunes siblings)</td><td>Directly — the Secret <em>is</em> the source</td></tr>
+      <tr><td><code>aws</code></td><td>Writes one <strong>AWS Secrets Manager</strong> secret per key at <code>drop/&lt;ns&gt;/&lt;app&gt;/&lt;KEY&gt;</code> and reconciles an <code>ExternalSecret</code> (explicit per-key <code>remoteRef</code>s)</td><td>The <strong>External Secrets Operator</strong> syncs it into <code>&lt;app&gt;-secret</code></td></tr>
+    </tbody>
+    </table>
+    <p>Either way the Deployment <code>envFrom</code>s <code>&lt;app&gt;-secret</code> (listed after
+    <code>&lt;app&gt;-env</code>, so a <strong>secret wins</strong> on a key collision; <code>optional</code> so an
+    absent Secret never blocks startup). The metastore holds only key <strong>names</strong> + a fingerprint.</p>
+    <div class="note warn"><span class="lbl">Write-only</span><p>A secret value is never returned, logged, or
+    persisted outside the secret manager and the pod env — there is no read-back path.</p></div>
+
+    <div class="note tip"><span class="lbl">Local = prod shape</span><p>Locally the cluster is
+    <strong>k3s-in-podman</strong> with KEDA, CNPG, and ESO installed by <code>make compute-up</code>; the
+    <code>aws</code> secrets backend and CNPG backups run against <strong>Floci</strong>'s S3 + Secrets-Manager
+    emulation, so the local stack exercises the same code paths as EKS. See
+    <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for the commands and console.</p></div>
 
     <div class="next">
       <a href="deployment.html"><div class="d">Next →</div><div class="t">Deployment</div></a>
@@ -260,6 +328,30 @@ m6: `flowchart TB
     apiD --> rds
     edgeD --> s3
     edgeD --> rds`,
+m7: `flowchart TB
+    subgraph cp["api (control plane)"]
+        K["KubeClient<br/>(https + server-side apply)"]
+        SS["SecretStore port<br/>kube | aws"]
+    end
+    subgraph ns["tenant namespace drop-t-…<br/>NetworkPolicy · Quota · PSA · gVisor"]
+        dep["app Deployment<br/>+ Service + HTTPScaledObject"]
+        sec["&lt;app&gt;-secret Secret<br/>(envFrom, secret-wins)"]
+        cl["CNPG Cluster<br/>+ ObjectStore + ScheduledBackup"]
+    end
+    keda["KEDA HTTP add-on<br/>interceptor (scale-from-zero)"]
+    eso["External Secrets Operator"]
+    asm[("AWS Secrets Manager<br/>/ Floci")]
+    s3[("S3 / Floci<br/>(WAL + backups)")]
+    edge["edge"]
+
+    K --> dep
+    K --> cl
+    SS -->|kube| sec
+    SS -->|aws| asm
+    asm --> eso --> sec
+    edge -->|"&lt;app&gt; host"| keda --> dep
+    dep -->|envFrom| sec
+    cl --> s3`,
   };
   for (const [id, src] of Object.entries(diagrams)) {
     const el = document.getElementById(id);

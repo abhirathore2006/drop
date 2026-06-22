@@ -144,6 +144,46 @@
 }</code></pre>
 <div class="note warn"><span class="lbl">Note</span><p>Publishing a <code>drop.yaml</code> with <code>basicAuth</code> — like setting <code>visibility=password</code> — makes the edge require an <code>Authorization: Basic</code> header before serving anything. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for how this interacts with org-level visibility modes.</p></div>
 
+<h2>Compute environment variables</h2>
+<p class="lead">The <code>drop.yaml</code> keys above are per-bundle <em>client</em> config. The compute plane (container apps, managed databases, write-only secrets) is configured on the <strong>API server</strong> through environment variables — these are operator settings, not part of any bundle.</p>
+<div class="note"><span class="lbl">Note</span><p>Compute is <strong>opt-in</strong>: the API enables apps and databases only when <code>DROP_KUBECONFIG</code> is set. Without it Drop is static-only and <code>/v1/apps</code> / <code>/v1/databases</code> return <code>501</code>. See <a href="architecture.html">Architecture</a> §7 for how these map to the cluster.</p></div>
+
+<h3>Enabling compute</h3>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>DROP_KUBECONFIG</code></td><td><span class="cx">—</span></td><td>Path to the cluster kubeconfig. Setting it <strong>enables the compute plane</strong> (<code>/v1/apps</code> + <code>/v1/databases</code>); unset = static-only.</td></tr>
+<tr><td><code>DROP_BLOCKED_EGRESS_CIDRS</code></td><td><code>10.0.0.0/8</code></td><td>Comma-separated cluster pod+service CIDRs excluded from each tenant's HTTPS egress allowlist (the per-namespace NetworkPolicy), so tenants can't reach each other or the platform DB. The default covers local k3s only — <strong>set the real EKS pod/service CIDRs in prod</strong> or cross-tenant egress silently stays open.</td></tr>
+</tbody>
+</table>
+
+<h3>Managed-database backups (CloudNativePG)</h3>
+<p>Drive the Barman Cloud Plugin <code>ObjectStore</code> that streams WAL + base backups to S3.</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>DROP_DB_BACKUP_ROLE_ARN</code></td><td><span class="cx">—</span></td><td>IRSA role ARN CNPG assumes to write backups to S3. Prod <strong>fails closed</strong> without it.</td></tr>
+<tr><td><code>DROP_DB_BACKUP_S3_ENDPOINT</code></td><td><span class="cx">—</span></td><td>S3 endpoint for backups. Leave empty for real AWS S3; set it to point at Floci (local) or another S3-compatible store.</td></tr>
+<tr><td><code>DROP_DB_BACKUP_S3_EGRESS_CIDR</code></td><td><span class="cx">—</span></td><td>CIDR added to the tenant egress allowlist so CNPG pods can reach the backup endpoint despite the default-deny NetworkPolicy.</td></tr>
+</tbody>
+</table>
+
+<h3>App secrets backend</h3>
+<p>Write-only app secrets are stored behind a <code>SecretStore</code> port whose backend is picked at deploy time. <code>kube</code> writes the <code>&lt;app&gt;-secret</code> Secret directly; <code>aws</code> writes <strong>AWS Secrets Manager</strong> entries that the <strong>External Secrets Operator</strong> syncs into the cluster.</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>DROP_SECRET_BACKEND</code></td><td><code>kube</code></td><td><code>kube</code> | <code>aws</code>. <code>kube</code> keeps secrets in etcd Secrets (use a KMS encryption-at-rest provider); <code>aws</code> routes them through AWS Secrets Manager + the External Secrets Operator.</td></tr>
+<tr><td><code>DROP_SECRET_STORE_NAME</code></td><td><code>floci</code></td><td>Name of the ESO <code>ClusterSecretStore</code> the <code>aws</code> backend reconciles <code>ExternalSecret</code>s against.</td></tr>
+<tr><td><code>DROP_SECRET_MANAGER_ENDPOINT</code></td><td><span class="cx">—</span></td><td>Secrets Manager endpoint. Empty = real AWS; set it to point at Floci's SM emulation locally (e.g. <code>http://localhost:4566</code>).</td></tr>
+<tr><td><code>DROP_SECRET_MANAGER_REGION</code></td><td><code>DROP_S3_REGION</code> → <code>us-east-1</code></td><td>Region for Secrets Manager calls. Falls back to <code>DROP_S3_REGION</code>, then <code>us-east-1</code>.</td></tr>
+<tr><td><code>DROP_SECRET_MANAGER_KEY_ID</code></td><td><span class="cx">—</span></td><td>Static access key id for Secrets Manager. Omit in prod to use the IRSA / SDK default credential chain.</td></tr>
+<tr><td><code>DROP_SECRET_MANAGER_SECRET</code></td><td><span class="cx">—</span></td><td>Static secret access key paired with <code>DROP_SECRET_MANAGER_KEY_ID</code> (local/dev only; prefer IRSA in prod).</td></tr>
+<tr><td><code>DROP_SECRET_PATH_PREFIX</code></td><td><code>drop</code></td><td>Path prefix for Secrets Manager entries — secrets land at <code>&lt;prefix&gt;/&lt;ns&gt;/&lt;app&gt;/&lt;KEY&gt;</code>.</td></tr>
+</tbody>
+</table>
+<div class="note warn"><span class="lbl">Note</span><p>App-secret <em>values</em> are write-only end to end — set/rotated/deleted via <code>drop secrets</code> but never returned by the API, CLI, MCP, logs, or the metastore. They reach only the secret manager and the pod env. See <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for the commands and tools.</p></div>
+
 <div class="next">
   <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
   <a href="roles-visibility.html"><div class="d">Next →</div><div class="t">Roles &amp; Visibility</div></a>

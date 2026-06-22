@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Drop — self-hosted static-site publishing</title>
-<meta name="description" content="Drop is a self-hosted, Surge-style static-site publisher. Push a built folder, get an internal HTTPS URL. Metadata in Postgres, file bytes in S3, gated by Google login.">
+<title>Drop — self-hosted static-site publishing &amp; compute platform</title>
+<meta name="description" content="Drop is a self-hosted, Surge-style static-site publisher and a Heroku/Fly-style compute platform: push a built folder or deploy a container app with managed Postgres and write-only secrets, all on an internal HTTPS URL. Metadata in Postgres, file bytes in S3, gated by Google login.">
 <link rel="stylesheet" href="assets/style.css">
 <script defer src="drop-served.js"></script>
 <script defer src="assets/site.js"></script>
@@ -36,22 +36,34 @@
   <main class="content"><article>
 
     <section class="hero">
-      <h1>Ship internal sites.<br><span class="g">Nothing ever leaves.</span></h1>
-      <p class="lead">Drop is a self-hosted, Surge/Netlify/Vercel-style static-site publisher for your own
-      network. Push a built folder — an HTML report, a slide deck, a Vite/React dashboard — and get a
-      confidential URL on <code>*.drop.example.com</code>. Everything lives in <strong>your own S3</strong>
-      and <strong>your own Postgres</strong>, behind <strong>your own Google Workspace</strong>.</p>
+      <h1>Ship internal sites <span class="g">and apps.</span><br><span class="g">Nothing ever leaves.</span></h1>
+      <p class="lead">Drop is a self-hosted publisher for your own network — a Surge/Netlify/Vercel-style
+      <strong>static-site host</strong> <em>and</em> a Heroku/Fly-style <strong>compute platform</strong>.
+      Push a built folder, or deploy a <strong>container app</strong> with a <strong>managed Postgres</strong>
+      and <strong>write-only secrets</strong> — both get a confidential URL on <code>*.drop.example.com</code>,
+      under one set of names, auth, and tooling. Everything lives in <strong>your own S3</strong>, <strong>your
+      own Postgres</strong>, and <strong>your own cluster</strong>, behind <strong>your own Google Workspace</strong>.</p>
       <div class="btnrow">
         <a class="btn primary" href="getting-started.html">Get started →</a>
+        <a class="btn" href="cli-mcp.html">CLI &amp; MCP</a>
         <a class="btn" href="architecture.html">Architecture</a>
         <a class="btn" href="deployment.html">Deploy</a>
       </div>
     </section>
 
-    <pre><code><span class="tok-c">$</span> drop publish ./dist myapp
-  ▸ packing ./dist
-  ▸ dropping…
-  <span class="tok-s">✓ live at https://myapp.drop.example.com</span>  <span class="tok-c">(internal-only)</span></code></pre>
+    <pre><code><span class="tok-c">$</span> drop publish ./dist myapp           <span class="tok-c"># static site</span>
+  <span class="tok-s">✓ live at https://myapp.drop.example.com</span>  <span class="tok-c">(internal-only)</span>
+
+<span class="tok-c">$</span> drop deploy ./api myapi             <span class="tok-c"># container app (drop.yaml app:)</span>
+  <span class="tok-s">✓ live at https://myapi.drop.example.com</span>
+<span class="tok-c">$</span> drop db:create myapi-db             <span class="tok-c"># managed Postgres (CloudNativePG)</span>
+<span class="tok-c">$</span> printf "$PW" | drop secrets set myapi DATABASE_PASSWORD --stdin  <span class="tok-c"># write-only secret</span>
+<span class="tok-c">$</span> drop restart myapi                  <span class="tok-c"># apply it</span></code></pre>
+
+    <div class="note tip"><span class="lbl">Two planes, one product</span><p><strong>Static sites</strong>
+    serve bytes from S3 at the edge. <strong>Compute</strong> (apps + databases + secrets) is <strong>opt-in</strong>
+    — enabled only when the API has a Kubernetes cluster; without one, Drop is static-only. See
+    <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> and <a href="../examples/DATABASE_APPS.md">examples/DATABASE_APPS.md</a>.</p></div>
 
     <h2 id="quickstart">Quickstart</h2>
     <p>Install the CLI straight from your Drop server. The installer is served by the API itself, so it
@@ -108,42 +120,111 @@ drop publish ./dist myapp</code></pre>
         <p>Per-site owner / editor / viewer roles, platform admins, and public / private / password
         visibility — all backed by Postgres for real reporting.</p>
       </div>
+      <div class="card">
+        <div class="n">COMPUTE</div>
+        <h3>Container apps</h3>
+        <p>Deploy a container with <code>drop deploy</code> — a Deployment + Service + KEDA
+        HTTPScaledObject. Apps <strong>scale to zero</strong> when idle; the edge wakes the pod on the
+        first request to <code>&lt;app&gt;.drop.example.com</code>.</p>
+      </div>
+      <div class="card">
+        <div class="n">DATA</div>
+        <h3>Managed Postgres</h3>
+        <p><code>drop db:create</code> provisions a CloudNativePG cluster in your namespace with Barman
+        backups to S3. <code>drop db:password</code> sets/rotates the role password — printed once, never
+        the connection password stored where it can be read back.</p>
+      </div>
+      <div class="card">
+        <div class="n">WRITE-ONLY</div>
+        <h3>App secrets</h3>
+        <p>Set, rotate, and delete per-app secrets — <strong>never readable back</strong> — injected as
+        env vars. Backed by the <code>kube</code> Secret store or <strong>AWS Secrets Manager</strong> via
+        the External Secrets Operator. Values never touch <code>drop.yaml</code>, git, logs, or responses.</p>
+      </div>
+      <div class="card">
+        <div class="n">OPERATE</div>
+        <h3>Lifecycle &amp; console</h3>
+        <p><code>restart</code> / <code>stop</code> (true offline) / <code>start</code> from the CLI, MCP,
+        or the React <strong>console</strong> — workloads grouped by type with live status, a per-app drawer
+        for logs/secrets/lifecycle, per-DB connection + password, and an admin all-workloads view.</p>
+      </div>
     </div>
 
     <h2>How it fits together</h2>
-    <p>Two small, stateless services share a Postgres metadata store and an S3 byte store:</p>
+    <p>Two small, stateless services share a Postgres metadata store and an S3 byte store; the
+    compute plane adds an opt-in Kubernetes cluster:</p>
     <ul>
-      <li><strong>api</strong> — the control plane: Google login, publishing, rollback, sharing,
-        visibility, admin, and the dashboard. Owns schema migrations.</li>
-      <li><strong>edge</strong> — the data plane: serves published bytes by hostname, applies per-site
-        config and visibility. Read-only against Postgres.</li>
+      <li><strong>api</strong> — the control plane: Google login, publishing, deploy, rollback, sharing,
+        visibility, admin, the dashboard, and — when compute is enabled — apps, databases, secrets, and
+        lifecycle. Owns schema migrations; the only writer to Postgres and the cluster.</li>
+      <li><strong>edge</strong> — the data plane: serves published <strong>site</strong> bytes by hostname,
+        and <strong>dispatches <code>app</code> hostnames</strong> to the in-cluster KEDA HTTP interceptor
+        (scale-from-zero). Read-only against Postgres.</li>
     </ul>
-    <p>File <strong>bytes</strong> live in S3 (<code>sites/&lt;name&gt;/files/&lt;verId&gt;/…</code>);
-    everything else — sites, members, versions, users, auth handles — lives in Postgres. See the
-    <a href="architecture.html">architecture</a> for diagrams of the publish and serve flows.</p>
+    <p>Static-site <strong>bytes</strong> live in S3 (<code>sites/&lt;name&gt;/files/&lt;verId&gt;/…</code>);
+    site / app / database <strong>metadata</strong> lives in Postgres; <strong>apps</strong>,
+    <strong>databases</strong>, and <strong>secrets</strong> are Kubernetes objects in per-tenant namespaces.
+    The <code>sites.type</code> discriminator — <code>site</code>, <code>app</code>, or <code>database</code> —
+    shares one name namespace. See the <a href="architecture.html">architecture</a> for diagrams of the
+    publish, serve, and compute flows.</p>
 
-    <h2>What you can publish</h2>
+    <h2 id="compute">Compute platform</h2>
+    <p class="lead">Beyond static sites, Drop runs container apps and managed databases on Kubernetes
+    (EKS in prod; k3s-on-podman locally), with the same names, auth, and CLI/MCP/console. It's
+    <strong>opt-in</strong> — the API enables it only when it has a cluster; otherwise <code>/v1/apps</code>
+    and <code>/v1/databases</code> return <code>501</code> and Drop is static-only.</p>
+    <ul>
+      <li><strong>Container apps</strong> — declare an <code>app:</code> section in <code>drop.yaml</code> and
+        <code>drop deploy &lt;dir&gt;</code>. The API translates it to a Deployment + Service + KEDA
+        HTTPScaledObject; apps scale to zero when idle and the edge wakes them on first request.</li>
+      <li><strong>Managed databases</strong> — <code>drop db:create</code> provisions a CloudNativePG
+        Postgres in your namespace with Barman backups to S3; <code>drop db:password</code> sets/rotates the
+        role password. The connection ref is returned — never the password.</li>
+      <li><strong>Write-only secrets</strong> — <code>drop secrets set --stdin / ls / rm</code> manage per-app
+        secrets that are never readable back and inject as env vars (backend <code>kube</code> or AWS Secrets
+        Manager via the External Secrets Operator).</li>
+      <li><strong>Lifecycle</strong> — <code>drop restart / stop / start</code> (stop = true offline) from the
+        CLI, MCP, or the console.</li>
+      <li><strong>Per-tenant isolation</strong> — every owner gets a namespace with a default-deny
+        NetworkPolicy and resource quota.</li>
+    </ul>
+    <p>Full walkthrough with two runnable examples (Node + Next.js, each with a DB + secret):
+    <a href="../examples/DATABASE_APPS.md">examples/DATABASE_APPS.md</a>. Command and tool tables:
+    <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>. Cluster topology and the compute-plane diagram:
+    <a href="architecture.html">Architecture</a>. Enabling it in prod: <a href="configuration.html">Configuration</a>
+    and <a href="deployment.html">Deployment</a>.</p>
+
+    <h2>What you can ship</h2>
     <p>Anything that builds to static files: multi-page HTML, single-file reports, reveal.js / slide
     decks, and full client-rendered SPAs (Vite, React, Vue, Svelte, Astro). Route-aware SPA fallback,
     clean URLs, redirects, custom headers, CORS, and HTTP password are all configured per-site with a
     small <a href="configuration.html"><code>drop.yaml</code></a>.</p>
+    <p>And — with the compute plane — anything that runs in a <strong>container</strong>: an HTTP API, a
+    server-rendered app (Next.js, Remix), a worker fronted by HTTP. Add an <code>app:</code> section to the
+    same <a href="configuration.html"><code>drop.yaml</code></a>, give it a <a href="#compute">managed
+    database</a> and <a href="#compute">write-only secrets</a>, and <code>drop deploy</code>.</p>
 
     <h2>30-second tour</h2>
     <ol>
       <li><a href="getting-started.html">Get started</a> — install, run locally, publish your first site.</li>
       <li><a href="configuration.html">Configuration</a> — <code>drop.yaml</code>: SPA fallback,
-        redirects, headers, password, custom site name.</li>
-      <li><a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> — the three ways to drive Drop.</li>
+        redirects, headers, password, custom site name, and the <code>app:</code> section for compute.</li>
+      <li><a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> — the three ways to drive Drop, including
+        <code>deploy</code>, <code>db:create</code>, <code>secrets</code>, and lifecycle.</li>
+      <li><a href="../examples/DATABASE_APPS.md">Database apps</a> — end-to-end: deploy a container app with a
+        managed Postgres and a write-only secret.</li>
       <li><a href="roles-visibility.html">Roles &amp; Visibility</a> — who can manage, who can view.</li>
-      <li><a href="deployment.html">Deployment</a> — EC2 or Kubernetes (Helm), Postgres, S3, OAuth.</li>
+      <li><a href="deployment.html">Deployment</a> — EC2 or Kubernetes (Helm), Postgres, S3, OAuth,
+        and enabling the compute plane.</li>
     </ol>
 
     <div class="next">
       <a href="getting-started.html"><div class="d">Next →</div><div class="t">Getting started</div></a>
+      <a href="cli-mcp.html"><div class="d">Drive it →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
       <a href="architecture.html"><div class="d">Reference →</div><div class="t">Architecture &amp; diagrams</div></a>
     </div>
 
-    <footer class="docfoot">Drop — self-hosted static-site publishing. Built with TypeScript on Node, Hono, Kysely + Postgres, and S3.</footer>
+    <footer class="docfoot">Drop — self-hosted static-site publishing &amp; compute platform. Built with TypeScript on Node, Hono, Kysely + Postgres, S3, and Kubernetes (KEDA, CloudNativePG, External Secrets Operator).</footer>
   </article></main>
 </div>
 </body>
