@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.output
+.nitro
+.tanstack
+dist
+src/routeTree.gen.ts
+drop.yaml
+README.md

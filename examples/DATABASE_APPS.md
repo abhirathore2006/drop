@@ -1,15 +1,19 @@
 # Connecting a Drop app to a managed database
 
-Two runnable examples plus a step-by-step walkthrough of the whole flow: **create a managed
-Postgres → map its connection into your app's environment → build → deploy → verify**.
+Runnable examples across several stacks, plus a step-by-step walkthrough of the whole flow:
+**create a managed Postgres → map its connection into your app's environment → build → deploy → verify**.
 
 | Example | Stack | What it shows |
 |---|---|---|
 | [`guestbook-node/`](./guestbook-node) | Node.js (no framework) + [`pg`](https://node-postgres.com) + server-rendered HTML | the minimal Node → Postgres path |
-| [`notes-next/`](./notes-next) | Next.js (App Router, server actions) + `pg`, standalone output | a real framework app → Postgres |
+| [`tasks-node-ts/`](./tasks-node-ts) | Node.js + **TypeScript** (run via `tsx`, no framework) + `pg` | a typed `node:http` server — list/add/toggle/delete |
+| [`blog-express/`](./blog-express) | **Express 5 + EJS templates** + `pg` | classic server-rendered MVC, multiple views + full CRUD |
+| [`notes-next/`](./notes-next) | **Next.js** (App Router, server actions) + `pg`, standalone output | a real framework app → Postgres, list + detail/edit pages |
+| [`board-tanstack/`](./board-tanstack) | **TanStack Start** (file-based routes, `createServerFn`) + `pg` | a modern full-stack React app → Postgres |
 
-Both read the **standard libpq `PG*` environment variables** and tolerate the DB still coming
-up (a startup retry loop). They're intentionally tiny so the *binding* is the star.
+All read the **standard libpq `PG*` environment variables** and tolerate the DB still coming
+up (a startup retry loop). They're intentionally tiny so the *binding* is the star — same five
+env vars, same write-only `PGPASSWORD` secret, regardless of framework.
 
 ---
 

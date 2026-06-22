@@ -5,9 +5,11 @@ Vite+React SPA. The HTML ones publish as-is; the Vite app builds to `dist/` firs
 
 > **Database-backed container apps:** see **[`DATABASE_APPS.md`](./DATABASE_APPS.md)** for a
 > step-by-step walkthrough of creating a managed Postgres and mapping its connection into an
-> app's env, plus two runnable examples: [`guestbook-node/`](./guestbook-node) (Node + `pg` +
-> HTML) and [`notes-next/`](./notes-next) (Next.js + `pg`). Those are container **apps**
-> (`drop deploy`), not static **sites** (`make publish`) like the ones below.
+> app's env, plus runnable examples across stacks: [`guestbook-node/`](./guestbook-node)
+> (Node + `pg` + HTML), [`tasks-node-ts/`](./tasks-node-ts) (Node + TypeScript via `tsx`),
+> [`blog-express/`](./blog-express) (Express 5 + EJS templates), [`notes-next/`](./notes-next)
+> (Next.js), and [`board-tanstack/`](./board-tanstack) (TanStack Start). Those are container
+> **apps** (`drop deploy`), not static **sites** (`make publish`) like the ones below.
 
 Assumes the local stack is up (`make start` from the repo root → edge on :8474) and
 you're logged in (`make login`, or dev mode auto-logs-in via `make publish`).

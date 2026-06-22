@@ -1,0 +1,23 @@
+<%- include("partials/header", { title: post.title }) %>
+
+<p class="sub"><a href="/">← all posts</a></p>
+
+<article>
+  <h1><%= post.title %></h1>
+  <div class="meta">
+    posted <%= new Date(post.created_at).toISOString().slice(0, 16).replace("T", " ") %>
+    <% if (new Date(post.updated_at).getTime() !== new Date(post.created_at).getTime()) { %>
+      · edited <%= new Date(post.updated_at).toISOString().slice(0, 16).replace("T", " ") %>
+    <% } %>
+  </div>
+  <p><%= post.body %></p>
+</article>
+
+<div class="actions">
+  <a class="btn ghost" href="/posts/<%= post.id %>/edit">edit</a>
+  <form method="post" action="/posts/<%= post.id %>/delete" onsubmit="return confirm('Delete this post?')">
+    <button class="btn danger" type="submit">delete</button>
+  </form>
+</div>
+
+<%- include("partials/footer") %>

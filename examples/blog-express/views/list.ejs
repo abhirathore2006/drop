@@ -1,0 +1,19 @@
+<%- include("partials/header", { title: "Home" }) %>
+
+<p class="sub"><%= posts.length %> post<%= posts.length === 1 ? "" : "s" %> · an Express + EJS Drop app, persisted in a managed Postgres database</p>
+
+<% if (posts.length === 0) { %>
+  <p class="sub">No posts yet — <a href="/posts/new">write the first one</a>.</p>
+<% } else { %>
+  <ul class="posts">
+    <% posts.forEach(function (p) { %>
+      <li>
+        <h2><a href="/posts/<%= p.id %>"><%= p.title %></a></h2>
+        <p class="excerpt"><%= p.body.length > 160 ? p.body.slice(0, 160) + "…" : p.body %></p>
+        <div class="meta"><%= new Date(p.created_at).toISOString().slice(0, 16).replace("T", " ") %></div>
+      </li>
+    <% }) %>
+  </ul>
+<% } %>
+
+<%- include("partials/footer") %>

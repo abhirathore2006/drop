@@ -1,0 +1,24 @@
+{
+  "name": "board-tanstack",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A Postgres-backed link board — a Drop TanStack Start app demonstrating a managed-database binding",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.6",
+    "@tanstack/react-router": "^1.170.16",
+    "@tanstack/react-start": "^1.168.26",
+    "pg": "^8.13.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.2.0",
+    "vite": "^7.3.5"
+  }
+}

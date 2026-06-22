@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { pool, ensureSchema } from "../lib/db";
 import { addNote, deleteNote } from "./actions";
 
@@ -23,7 +24,9 @@ export default async function Page() {
       <ul>
         {rows.map((n) => (
           <li key={n.id}>
-            <span className="body">{n.body}</span>
+            <Link className="body" href={`/notes/${n.id}`} title="edit note">
+              {n.body}
+            </Link>
             <form action={deleteNote}>
               <input type="hidden" name="id" value={n.id} />
               <button className="del" title="delete">

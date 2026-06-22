@@ -1,0 +1,27 @@
+# Deploy with:  drop deploy examples/blog-express
+# Full walkthrough (create the DB + map these env vars):  examples/DATABASE_APPS.md
+app:
+  name: blog
+  # Built locally and imported into k3s (see the guide). NOT a :latest tag, so k8s uses the
+  # imported image instead of trying to pull from a registry.
+  image: blog-express:1
+  services:
+    - internal_port: 8080 # must match the PORT the app listens on
+  scale:
+    min: 1 # set 0 for scale-to-zero (the pod reconnects to the DB on wake)
+    max: 2
+  resources:
+    cpu: "250m"
+    memory: "256Mi"
+  env:
+    # --- non-secret DB connection config (safe to commit) ---
+    PGHOST: blog-db-rw # the `-rw` Service of the DB you create with `drop db:create blog-db`
+    PGPORT: "5432"
+    PGUSER: app # CNPG's application role
+    PGDATABASE: app # CNPG's application database
+    PGSSLMODE: require # encrypt in transit (CNPG self-signed cert; the app does not verify it)
+  # PGPASSWORD is NOT here — it is a SECRET (never committed). After deploying, set it write-only:
+  #   drop db:password blog-db                          # prints the password once
+  #   printf '<that password>' | drop secrets set blog PGPASSWORD --stdin
+  #   drop restart blog                                 # apply it
+  # Secrets are stored in the secret manager and injected as env vars — see ../DATABASE_APPS.md.
