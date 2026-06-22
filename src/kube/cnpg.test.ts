@@ -111,6 +111,17 @@ test("databaseManifests: NetworkPolicy lets cnpg-system manage the DB pods; egre
   expect(has5432ToAll).toBe(false);
 });
 
+test("databaseManifests: objectStoreEgress adds a scoped egress to a non-443 local store (Floci/MinIO)", () => {
+  const m = databaseManifests(base, { ...localCtx, objectStoreEgress: { cidr: "10.88.0.0/16", port: 4566 } });
+  const egress = (m.networkPolicy as any).spec.egress;
+  const store = egress.find((r: any) => (r.ports ?? []).some((p: any) => p.port === 4566));
+  expect(store).toBeDefined();
+  expect(store.to).toEqual([{ ipBlock: { cidr: "10.88.0.0/16" } }]); // scoped to the store CIDR, not 0.0.0.0/0
+  // and it's still absent by default (prod S3 = 443, covered by the tenant policy)
+  const none = (databaseManifests(base, localCtx).networkPolicy as any).spec.egress.some((r: any) => (r.ports ?? []).some((p: any) => p.port === 4566));
+  expect(none).toBe(false);
+});
+
 test("databaseManifests: hibernation:scheduled labels the Cluster for the idle CronJob", () => {
   const off = databaseManifests(base, localCtx).cluster as any;
   expect(off.metadata.labels["drop.dev/hibernation"]).toBe("none");

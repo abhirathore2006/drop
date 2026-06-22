@@ -31,6 +31,10 @@ export interface DatabaseManifestContext {
   // In-cluster/control-plane CIDRs (same value threaded into tenantManifests). The DB
   // egress re-allows ONLY these on 443/6443 (the API server the tenant policy blocks).
   apiServerCidrs?: string[];
+  // LOCAL only: when the object store is an in-cluster/non-443 endpoint (e.g. Floci/MinIO
+  // on :4566), allow the DB pod to egress to it. Prod S3 is public 443 — already allowed by
+  // the tenant policy — so this is omitted in prod.
+  objectStoreEgress?: { cidr: string; port: number };
 }
 
 export interface DatabaseManifests {
@@ -137,6 +141,11 @@ export function databaseManifests(db: DatabaseConfig, ctx: DatabaseManifestConte
         { to: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": CNPG_NAMESPACE } } }] }, // CNPG operator/plugin (CNPG-I)
         // in-cluster API server only — scoped to the control-plane/cluster CIDRs, never 0.0.0.0/0.
         { to: apiCidrs.map((cidr) => ({ ipBlock: { cidr } })), ports: [{ protocol: "TCP", port: 443 }, { protocol: "TCP", port: 6443 }] },
+        // LOCAL only: a non-443 object store (Floci/MinIO) on a specific CIDR. Verified:
+        // CNPG WAL-archive + base backup reach Floci with this rule. Omitted in prod (S3=443).
+        ...(ctx.objectStoreEgress
+          ? [{ to: [{ ipBlock: { cidr: ctx.objectStoreEgress.cidr } }], ports: [{ protocol: "TCP", port: ctx.objectStoreEgress.port }] }]
+          : []),
       ],
     },
   };

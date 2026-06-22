@@ -278,13 +278,22 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const verId = newVersionId(now());
     const ns = tenantNamespace(site.owner);
     await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs }));
+    // CNPG runs IN-CLUSTER, so its object-store endpoint differs from the API's host-side
+    // s3Endpoint: locally Floci is reachable on the pod network via DROP_DB_BACKUP_S3_ENDPOINT,
+    // not the host's localhost:4566. When that endpoint is a non-443 store, also open a scoped
+    // egress to it (DROP_DB_BACKUP_S3_EGRESS_CIDR). Prod omits both → real S3 on 443 (IRSA).
+    const backupEndpoint = d.cfg.dbBackupEndpoint ?? d.cfg.s3Endpoint;
+    const storeEgress =
+      local && d.cfg.dbBackupEgressCidr && backupEndpoint
+        ? { cidr: d.cfg.dbBackupEgressCidr, port: Number(new URL(backupEndpoint).port) || 443 }
+        : undefined;
     const manifests = databaseManifests(dbCfg, {
       name,
       namespace: ns,
       destinationPath: `s3://${d.cfg.s3Bucket}/databases/${ns}/${name}`,
       apiServerCidrs: d.cfg.blockedEgressCidrs, // DB egress re-allows the in-cluster API on these CIDRs only
       ...(local
-        ? { s3: { endpointURL: d.cfg.s3Endpoint, accessKeyId: d.cfg.s3KeyId, secretAccessKey: d.cfg.s3Secret } }
+        ? { s3: { endpointURL: backupEndpoint, accessKeyId: d.cfg.s3KeyId, secretAccessKey: d.cfg.s3Secret }, objectStoreEgress: storeEgress }
         : { iamRoleArn: d.cfg.dbBackupRoleArn }),
     });
     await d.kube.applyDatabase(ns, name, manifests);

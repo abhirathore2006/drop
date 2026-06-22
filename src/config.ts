@@ -20,6 +20,8 @@ export interface Config {
   keepVersions: number;
   blockedEgressCidrs: string[]; // in-cluster/control-plane CIDRs excluded from the tenant HTTPS egress allowlist (MUST cover the live pod+service CIDRs)
   dbBackupRoleArn?: string; // prod: IRSA role for CNPG database backups to S3 (omit locally — Floci uses static creds)
+  dbBackupEndpoint?: string; // in-cluster S3 endpoint for CNPG backups (e.g. local Floci on the pod network). Distinct from s3Endpoint, which is the API's host-side view. Unset in prod → real AWS S3.
+  dbBackupEgressCidr?: string; // CIDR the DB pod may egress to for the object store on its (non-443) port (local only; prod S3 is 443, already allowed by the tenant policy)
   edgeDiskCacheDir?: string; // edge: where to cache asset bytes on disk (off if unset)
   edgeDiskCacheBytes: number; // edge: disk cache budget
   interceptorUrl?: string; // edge: KEDA HTTP interceptor base URL — type=app hostnames proxy here (off if unset)
@@ -70,6 +72,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     edgeDiskCacheBytes: Number(env.DROP_EDGE_DISK_CACHE_BYTES ?? String(5 * 1024 * 1024 * 1024)),
     interceptorUrl: env.DROP_INTERCEPTOR_URL || undefined,
     dbBackupRoleArn: env.DROP_DB_BACKUP_ROLE_ARN || undefined,
+    dbBackupEndpoint: env.DROP_DB_BACKUP_S3_ENDPOINT || undefined,
+    dbBackupEgressCidr: env.DROP_DB_BACKUP_S3_EGRESS_CIDR || undefined,
     docsDir: env.DROP_DOCS_DIR ?? "docs",
     cliDir: env.DROP_CLI_DIR ?? "dist",
   };
