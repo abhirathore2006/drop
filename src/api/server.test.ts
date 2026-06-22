@@ -457,6 +457,16 @@ test("app lifecycle: restart/stop/start (editor+), runtime_state tracked; redepl
   await db.destroy();
 });
 
+test("visibility + rollback are static-site only (409 on an app); no fail-open visibility", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/myapp", "alice", { image: "x:1" });
+  // an app must not be settable to private/password (the edge proxy path can't enforce it → fail-open)
+  expect((await call(app, "POST", "/v1/sites/myapp/visibility", "alice", { visibility: "private" })).status).toBe(409);
+  // rollback is meaningless for an app (no version bytes) — re-deploy instead
+  expect((await call(app, "POST", "/v1/sites/myapp/rollback", "alice", {})).status).toBe(409);
+  await db.destroy();
+});
+
 test("app lifecycle: viewer forbidden; non-app 409", async () => {
   const { app, db } = await mk();
   await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });

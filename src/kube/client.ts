@@ -162,6 +162,7 @@ export class KubeApiClient implements KubeClient {
     await this.call("DELETE", this.objectStorePath(namespace, `${name}-store`));
     await this.call("DELETE", this.netpolPath(namespace, `${name}-db`));
     await this.call("DELETE", this.secretPath(namespace, `${name}-backup-creds`));
+    await this.call("DELETE", this.secretPath(namespace, `${name}-app`)); // platform-owned creds (bootstrap.initdb + password rotation)
     await this.call("DELETE", this.secretPath(namespace, PWSET_SECRET(name))); // reap a crash-orphaned rotation Secret
   }
 

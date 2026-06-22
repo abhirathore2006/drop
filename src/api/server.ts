@@ -466,6 +466,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!can(await actorFor(email, site), "rollback")) return c.json({ error: "not permitted" }, 403);
+    // Rollback restores a previous published-version pointer — meaningful only for static sites.
+    // Apps/databases have no version bytes to flip; "rolling back" would desync metadata from the
+    // running workload. Re-deploy (apps) or restore-from-backup (DBs) is the equivalent.
+    if (site.type !== "site") return c.json({ error: `rollback is for static sites; re-deploy a ${site.type} instead` }, 409);
 
     const body = (await c.req.json().catch(() => ({}))) as { to?: string };
     let target = body.to ?? "";
@@ -569,6 +573,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!can(await actorFor(email, site), "configure")) return c.json({ error: "owner only" }, 403);
+    // Visibility is an EDGE gate that only the static-site path enforces — the app-dispatch path
+    // proxies straight to the interceptor. Reject it on apps/databases so a private/password setting
+    // can't be persisted and then silently served openly (fail-open). (Per-app gating is future work.)
+    if (site.type !== "site") return c.json({ error: `visibility applies to static sites only, not a ${site.type}` }, 409);
     const body = (await c.req.json().catch(() => ({}))) as { visibility?: string; password?: string };
     const vis = body.visibility as Visibility;
     if (vis !== "public" && vis !== "private" && vis !== "password") {

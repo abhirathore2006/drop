@@ -107,7 +107,7 @@ Each site has a `visibility` (set via `POST /v1/sites/:name/visibility`):
 
 - **public** (default) — served openly.
 - **password** — the edge requires HTTP basic-auth against `password_hash`
-  (publishing a `_drop.json` with `basicAuth` also turns this on).
+  (publishing a `drop.yaml` with `site.basicAuth` also turns this on).
 - **private** — only members (+ platform admins) may view. Edge enforcement
   (viewer authentication) is the next feature; **until then a private site
   returns `403` at the edge — fail closed**, never served openly. Owners can still
@@ -119,7 +119,7 @@ Each site has a `visibility` (set via `POST /v1/sites/:name/visibility`):
 `GET /v1/admin/sites?cursor=&limit=&prefix=` pages through **every** site
 (name-prefix filterable) regardless of ownership. The dashboard shows an **all
 sites** tab backed by the same endpoint. Admin status never bypasses per-site
-ownership or `_drop.json` name-ownership.
+ownership or `drop.yaml` `site.name` name-ownership.
 
 ## Compute platform
 
@@ -222,9 +222,9 @@ add-on (scale-to-zero), **CloudNativePG** + the Barman Cloud Plugin (managed Pos
 against Floci's Secrets-Manager emulation):
 
 ```bash
-make compute-up                  # k3s + KEDA + CNPG + ESO (bash .run/cluster-up.sh under the hood)
+make compute-up                  # k3s + KEDA + CNPG + ESO (runs infra/local/compute-up.sh; writes ~/.kube/drop-local.config)
 # run the API with the cluster + the aws-on-Floci secrets backend:
-DROP_KUBECONFIG=~/.kube/drop-k3s.yaml DROP_SECRET_BACKEND=aws \
+DROP_KUBECONFIG=~/.kube/drop-local.config DROP_SECRET_BACKEND=aws \
   DROP_SECRET_MANAGER_ENDPOINT=http://localhost:4566 DROP_SECRET_STORE_NAME=floci ... node dist/api.js
 ```
 
@@ -288,39 +288,39 @@ with **live status**, and a per-workload drawer: roll back versions (sites), ima
 **all-workloads** view with type/owner filters and user suspend. Same `/v1/*` endpoints and
 identity as the CLI/MCP. Publishing/deploying stays in the CLI/MCP.
 
-## Per-site config — `_drop.json`
+## Per-site config — `drop.yaml` (`site:`)
 
-Put a `_drop.json` at the root of your build folder. The API parses it at publish
-time (it is **not** served as a file); the edge applies it per request. It's
-versioned with the deploy — each publish can change it, and rollback restores the
-matching config.
+Put a `drop.yaml` at the root of your build folder with the static config under a `site:`
+key (the same file holds the `app:` section for container apps). The API parses it at publish
+time (it is **not** served as a file); the edge applies it per request. It's versioned with the
+deploy — each publish can change it, and rollback restores the matching config.
 
-```jsonc
-{
-  "name": "myapp",                      // target site — lets `drop publish ./dist` skip the name arg
-  "spaFallback": "index.html",          // doc for navigation misses; false to disable
-  "cleanUrls": true,                    // /about → /about.html
-  "notFound": "404.html",               // custom 404 document
-  "redirects": [
-    { "from": "/old", "to": "/new", "status": 301 },
-    { "from": "/docs/*", "to": "/help/:splat", "status": 302 }
-  ],
-  "headers": [
-    { "source": "/assets/*", "headers": { "cache-control": "public, max-age=31536000, immutable" } },
-    { "source": "/*",        "headers": { "x-frame-options": "DENY" } }
-  ],
-  "cors": { "allowOrigins": ["https://app.example.com"], "allowMethods": ["GET", "HEAD"] },
-  "basicAuth": { "realm": "Staging", "users": { "team": "sha256:<hex-of-password>" } }
-}
+```yaml
+site:
+  name: myapp                 # target site — lets `drop publish ./dist` skip the name arg
+  spaFallback: index.html     # doc for navigation misses; false to disable
+  cleanUrls: true             # /about → /about.html
+  notFound: 404.html          # custom 404 document
+  redirects:
+    - { from: /old, to: /new, status: 301 }
+    - { from: /docs/*, to: /help/:splat, status: 302 }
+  headers:
+    - source: /assets/*
+      headers: { cache-control: "public, max-age=31536000, immutable" }
+    - source: /*
+      headers: { x-frame-options: DENY }
+  cors: { allowOrigins: ["https://app.example.com"], allowMethods: [GET, HEAD] }
+  basicAuth: { realm: Staging, users: { team: "sha256:<hex-of-password>" } }
 ```
 
 - **cache-control** is just a `headers` rule. **HTTP password** is `basicAuth` (passwords
   plain or `sha256:<hex>`). **redirects** support a trailing `*` glob with `:splat`.
 - **`name`** lets the bundle identify itself: `drop publish ./dist` (no name) uses
-  `_drop.json`'s `name`; with neither, a friendly name is generated (e.g. `twilight-cherry-8f3a`).
+  `drop.yaml`'s `site.name`; with neither, a friendly name is generated (e.g. `twilight-cherry-8f3a`).
   The server still validates **you own** that name (and rejects a bundle whose `name`
   contradicts the publish target).
 - It's a static-site config in the spirit of `vercel.json` / Netlify `_redirects`+`_headers`.
+  See [`examples/`](examples/) for runnable `drop.yaml` site samples.
 
 ## Use it from an AI client (MCP — no CLI needed)
 

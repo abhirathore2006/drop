@@ -37,7 +37,7 @@ flowchart TB
     end
 
     subgraph stores["State"]
-        pg[("Postgres<br/>users · sites · site_members<br/>versions · auth_handles")]
+        pg[("Postgres<br/>users · sites (site/app/db) · site_members<br/>versions · app_secret_keys · auth_handles")]
         s3[("S3 / Floci<br/>sites/&lt;name&gt;/files/&lt;verId&gt;/…")]
     end
 
@@ -152,6 +152,7 @@ erDiagram
     users ||--o{ site_members : "is"
     sites ||--o{ site_members : "has"
     sites ||--o{ versions : "has"
+    sites ||--o{ app_secret_keys : "has"
 
     users {
         text email PK
@@ -162,10 +163,19 @@ erDiagram
     }
     sites {
         text name PK
+        text type "site | app | database"
         text current_version "nullable"
         text visibility "public | private | password"
         text password_hash "nullable"
+        text runtime_state "running | stopped (apps)"
         jsonb config "current drop.yaml"
+    }
+    app_secret_keys {
+        text app PK "FK → sites.name (cascade); PK is (app, key)"
+        text key PK "env-var name — NAMES only, never values"
+        text fingerprint
+        text updated_by
+        timestamptz updated_at
     }
     site_members {
         text site_name PK "FK → sites; PK is (site_name, email)"
