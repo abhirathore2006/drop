@@ -78,12 +78,13 @@ export function buildProgram(): Command {
   program
     .command("publish <dir> [name]")
     .description("Publish a built folder (name optional — taken from drop.yaml, else generated)")
-    .action(async (dir: string, nameArg?: string) => {
+    .option("--org <slug>", "create in this organisation (default: your personal org)")
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string }) => {
       const { name, source } = await resolveSiteName(dir, nameArg);
       console.log(`  ▸ packing ${dir}`);
       const tarball = await packDir(dir);
       console.log(`  ▸ dropping to ${name}…`);
-      const res = await (await client()).publish(name, tarball);
+      const res = await (await client()).publish(name, tarball, opts.org);
       console.log(`  ✓ live at ${res.url}`);
       if (source === "generated") {
         console.log(`  tip: add  name: ${name}  under site: in drop.yaml to keep this URL across deploys.`);
@@ -93,10 +94,11 @@ export function buildProgram(): Command {
   program
     .command("deploy <dir> [name]")
     .description("Deploy a container app (reads the app: section from drop.yaml)")
-    .action(async (dir: string, nameArg?: string) => {
+    .option("--org <slug>", "create in this organisation (default: your personal org)")
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string }) => {
       const { name, source, app } = await loadAppDeploy(dir, nameArg);
       console.log(`  ▸ deploying ${name}  (${app.image})…`);
-      const res = await (await client()).deploy(name, app);
+      const res = await (await client()).deploy(name, app, opts.org);
       console.log(`  ✓ live at ${res.url}`);
       if (source === "generated") {
         console.log(`  tip: add  name: ${name}  under app: in drop.yaml to keep this URL across deploys.`);
@@ -106,16 +108,30 @@ export function buildProgram(): Command {
   program
     .command("db:create <name> [dir]")
     .description("Create a managed Postgres database (reads the database: section from dir/drop.yaml if present)")
-    .action(async (name: string, dir?: string) => {
+    .option("--org <slug>", "create in this organisation (default: your personal org)")
+    .action(async (name: string, dir: string | undefined, opts: { org?: string }) => {
       const err = validateName(name);
       if (err) throw new Error(err);
       const db = await loadDatabaseCreate(dir ?? ".");
       console.log(`  ▸ creating database ${name}…`);
-      const res = await (await client()).dbCreate(name, db);
+      const res = await (await client()).dbCreate(name, db, opts.org);
       console.log(`  ✓ ${res.engine} ready`);
       console.log(`     host: ${res.host}:${res.port}  db: ${res.database}  user: ${res.user}`);
       console.log(`     credentials: read Secret '${res.credentialsSecret}' (keys username/password) in your app's namespace (envFrom) — the password is never printed.`);
     });
+
+  const org = program.command("org").description("Manage organisations (group resources + org-level permissions)");
+  org
+    .command("create <slug> [name]")
+    .description("Create a team organisation (you become owner). Deploy into it with --org <slug>.")
+    .action(async (slug: string, name?: string) => show(await (await client()).createOrg(slug, name)));
+  org.command("ls").description("List your organisations + your role in each").action(async () => show(await (await client()).listOrgs()));
+  org.command("members <slug>").description("Show an org's members").action(async (slug: string) => show(await (await client()).orgInfo(slug)));
+  org
+    .command("add <slug> <email> [role]")
+    .description("Add/update a member (owner|admin|member|viewer; default member)")
+    .action(async (slug: string, email: string, role?: string) => show(await (await client()).addOrgMember(slug, email, role)));
+  org.command("rm <slug> <email>").description("Remove a member").action(async (slug: string, email: string) => show(await (await client()).removeOrgMember(slug, email)));
 
   program
     .command("db:password <name> [password]")

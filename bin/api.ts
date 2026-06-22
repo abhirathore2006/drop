@@ -5,6 +5,7 @@ import { makeDb } from "../src/db/db.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { MetaStore } from "../src/metastore/store.ts";
 import { UserStore } from "../src/users/store.ts";
+import { OrgStore } from "../src/orgs/store.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
 import { createApp } from "../src/api/server.ts";
@@ -77,7 +78,8 @@ if (process.env.DROP_KUBECONFIG) {
 
 const secrets = makeSecretStore(cfg, kubeApi);
 if (kube) console.log(`drop-api secrets backend: ${cfg.secretBackend}`);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets });
+const orgs = new OrgStore(db);
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, orgs });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });

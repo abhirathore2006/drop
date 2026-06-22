@@ -4,6 +4,7 @@ import { createEdge } from "./server.ts";
 import { FakeBlob } from "../blob/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { UserStore } from "../users/store.ts";
+import { OrgStore } from "../orgs/store.ts";
 import { makeTestDb } from "../db/testdb.ts";
 
 /** A throwaway local HTTP server standing in for the in-cluster KEDA interceptor. */
@@ -18,12 +19,18 @@ async function fakeInterceptor(handler: http.RequestListener): Promise<{ url: st
 async function base() {
   const db = await makeTestDb();
   await new UserStore(db).upsertOnLogin("alice@example.com", null);
-  return { db, meta: new MetaStore(db), blob: new FakeBlob() };
+  return { db, meta: new MetaStore(db), blob: new FakeBlob(), orgs: new OrgStore(db) };
+}
+
+// claim into the owner's personal org (the FK chain needs the org to exist first).
+async function claim(meta: MetaStore, orgs: OrgStore, name: string, owner: string, type: "site" | "app" | "database" = "site") {
+  const o = await orgs.ensurePersonalOrg(owner);
+  return meta.claimSite(name, owner, type, { id: o.id, namespace: o.namespace });
 }
 
 async function setup() {
-  const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@example.com");
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "myapp", "alice@example.com");
   const prefix = meta.filesPrefix("myapp", "v1");
   await blob.put(prefix + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
   await blob.put(prefix + "assets/app.js", Buffer.from("console.log(1)"), 14, "application/javascript");
@@ -73,8 +80,8 @@ test("unknown site -> 404", async () => {
 });
 
 async function setupCfg(config: any) {
-  const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@example.com");
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "myapp", "alice@example.com");
   const p = meta.filesPrefix("myapp", "v1");
   await blob.put(p + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
   await blob.put(p + "app.html", Buffer.from("<html>spa</html>"), 16, "text/html");
@@ -96,8 +103,8 @@ test("config: basic auth gates the site", async () => {
 });
 
 test("visibility: private fails closed with 403", async () => {
-  const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@example.com");
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "myapp", "alice@example.com");
   const p = meta.filesPrefix("myapp", "v1");
   await blob.put(p + "index.html", Buffer.from("<html>secret</html>"), 19, "text/html");
   await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
@@ -109,8 +116,8 @@ test("visibility: private fails closed with 403", async () => {
 });
 
 test("visibility: password (API-set hash) requires basic auth", async () => {
-  const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@example.com");
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "myapp", "alice@example.com");
   const p = meta.filesPrefix("myapp", "v1");
   await blob.put(p + "index.html", Buffer.from("<html>app</html>"), 16, "text/html");
   await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
@@ -159,8 +166,8 @@ test("config: custom 404 document", async () => {
 // ---- Phase B: type=app dispatch → reverse-proxy to the KEDA interceptor ----
 
 test("type=app reverse-proxies to the interceptor with the reconstructed Host; path+query preserved", async () => {
-  const { meta, blob } = await base();
-  await meta.claimSite("billing", "alice@example.com", "app");
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "billing", "alice@example.com", "app");
   await meta.updateSite("billing", (s) => ({ ...s, currentVersion: "v1" }));
   const seen: { host?: string; path?: string; method?: string } = {};
   const icept = await fakeInterceptor((req, res) => {
@@ -181,8 +188,8 @@ test("type=app reverse-proxies to the interceptor with the reconstructed Host; p
 });
 
 test("type=app forwards the request body + method (POST)", async () => {
-  const { meta, blob } = await base();
-  await meta.claimSite("ingest", "alice@example.com", "app");
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "ingest", "alice@example.com", "app");
   await meta.updateSite("ingest", (s) => ({ ...s, currentVersion: "v1" }));
   const icept = await fakeInterceptor((req, res) => {
     let body = "";
@@ -207,8 +214,8 @@ test("type=app forwards the request body + method (POST)", async () => {
 // layer). The fix is reasoned + review-validated.
 
 test("type=app returns 503 when the interceptor is not configured", async () => {
-  const { meta, blob } = await base();
-  await meta.claimSite("noroute", "alice@example.com", "app");
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "noroute", "alice@example.com", "app");
   await meta.updateSite("noroute", (s) => ({ ...s, currentVersion: "v1" }));
   const edge = createEdge({ meta, blob, baseDomain: "drop.example.com" }); // no interceptorUrl
   const res = await edge.request("/", { headers: { host: "noroute.drop.example.com" } });
@@ -216,8 +223,8 @@ test("type=app returns 503 when the interceptor is not configured", async () => 
 });
 
 test("type=app not yet deployed (no current version) → 404", async () => {
-  const { meta, blob } = await base();
-  await meta.claimSite("pending", "alice@example.com", "app"); // claimed, never deployed
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "pending", "alice@example.com", "app"); // claimed, never deployed
   const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", interceptorUrl: "http://127.0.0.1:9" });
   const res = await edge.request("/", { headers: { host: "pending.drop.example.com" } });
   expect(res.status).toBe(404);
@@ -229,8 +236,8 @@ test("disk cache: second request (even a fresh instance) skips S3", async () => 
   const { join } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "drop-edge-cache-"));
 
-  const { meta, blob } = await base();
-  await meta.claimSite("myapp", "alice@example.com");
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "myapp", "alice@example.com");
   const prefix = meta.filesPrefix("myapp", "v1");
   await blob.put(prefix + "app.js", Buffer.from("console.log(1)"), 14, "application/javascript");
   await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));

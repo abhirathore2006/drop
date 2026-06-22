@@ -23,23 +23,42 @@ export class Client {
     return json;
   }
 
-  publish(name: string, tarball: Buffer | Uint8Array) {
-    return this.req("POST", `/v1/sites/${name}/versions`, {
+  private orgQ(org?: string) {
+    return org ? `?org=${encodeURIComponent(org)}` : "";
+  }
+  publish(name: string, tarball: Buffer | Uint8Array, org?: string) {
+    return this.req("POST", `/v1/sites/${name}/versions${this.orgQ(org)}`, {
       contentType: "application/gzip",
       body: tarball,
     });
   }
-  deploy(name: string, app: AppConfig) {
-    return this.req("POST", `/v1/apps/${name}`, {
+  deploy(name: string, app: AppConfig, org?: string) {
+    return this.req("POST", `/v1/apps/${name}${this.orgQ(org)}`, {
       contentType: "application/json",
       body: JSON.stringify(app),
     });
   }
-  dbCreate(name: string, db: DatabaseConfig | Record<string, never>) {
-    return this.req("POST", `/v1/databases/${name}`, {
+  dbCreate(name: string, db: DatabaseConfig | Record<string, never>, org?: string) {
+    return this.req("POST", `/v1/databases/${name}${this.orgQ(org)}`, {
       contentType: "application/json",
       body: JSON.stringify(db),
     });
+  }
+  // organisations
+  createOrg(slug: string, name?: string) {
+    return this.req("POST", `/v1/orgs`, { contentType: "application/json", body: JSON.stringify({ slug, name }) });
+  }
+  listOrgs() {
+    return this.req("GET", `/v1/orgs`);
+  }
+  orgInfo(slug: string) {
+    return this.req("GET", `/v1/orgs/${slug}`);
+  }
+  addOrgMember(slug: string, email: string, role?: string) {
+    return this.req("POST", `/v1/orgs/${slug}/members`, { contentType: "application/json", body: JSON.stringify({ email, role }) });
+  }
+  removeOrgMember(slug: string, email: string) {
+    return this.req("DELETE", `/v1/orgs/${slug}/members/${encodeURIComponent(email)}`);
   }
   dbPassword(name: string, password?: string) {
     return this.req("POST", `/v1/databases/${name}/password`, {

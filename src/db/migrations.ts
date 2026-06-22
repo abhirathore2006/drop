@@ -1,5 +1,7 @@
 import { type Kysely, sql } from "kysely";
 import type { Migration, MigrationProvider } from "kysely/migration";
+import { createHash } from "node:crypto";
+import { tenantNamespace } from "../api/tenant.ts";
 
 const m0001_init: Migration = {
   async up(db: Kysely<any>) {
@@ -97,9 +99,79 @@ const m0003_app_secrets: Migration = {
   },
 };
 
+// Organisations: a logical group that OWNS resources, with org-level roles. Each user gets a
+// PERSONAL org whose `namespace` is the LITERAL existing per-owner namespace (stored, not
+// re-derived — the namespace hash is keyed on the full email and isn't recoverable from a slug),
+// so backfill moves NO running workload. Teams are new orgs with their own namespace. Per-resource
+// site_members survive as an ADDITIVE grant layer (no over-grant on migration).
+const m0004_organisations: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("organisations")
+      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn("slug", "text", (c) => c.notNull().unique())
+      .addColumn("name", "text", (c) => c.notNull())
+      .addColumn("kind", "text", (c) => c.notNull()) // 'personal' | 'team'
+      .addColumn("namespace", "text", (c) => c.notNull()) // the LITERAL k8s tenant namespace (data, not derived)
+      .addColumn("created_by", "text", (c) => c.notNull().references("users.email"))
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    // one personal org per user (the idempotent first-login bridge can't race two into existence)
+    await sql`create unique index one_personal_org_per_user on organisations(created_by) where kind = 'personal'`.execute(db);
+
+    await db.schema
+      .createTable("org_members")
+      .addColumn("org_id", "text", (c) => c.notNull().references("organisations.id").onDelete("cascade"))
+      .addColumn("email", "text", (c) => c.notNull().references("users.email"))
+      .addColumn("role", "text", (c) => c.notNull()) // owner | admin | member | viewer
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addPrimaryKeyConstraint("org_members_pk", ["org_id", "email"])
+      .execute();
+    await sql`create unique index one_owner_per_org on org_members(org_id) where role = 'owner'`.execute(db);
+    await db.schema.createIndex("org_members_email_idx").on("org_members").column("email").execute();
+
+    // sites.org_id — nullable through the migration window; claimSite sets it going forward, and
+    // can()/namespace resolution fall back to site_members + tenantNamespace(owner) when it's null.
+    // ON DELETE RESTRICT (default) — deleting an org with live resources is blocked at the app layer.
+    await db.schema.alterTable("sites").addColumn("org_id", "text", (c) => c.references("organisations.id")).execute();
+
+    // Backfill: a personal org per existing site OWNER; namespace = the literal current namespace.
+    const owners = await db.selectFrom("site_members").select("email").where("role", "=", "owner").distinct().execute();
+    for (const { email } of owners as { email: string }[]) {
+      const ns = tenantNamespace(email); // the EXACT existing namespace
+      const slug = ns.replace(/^drop-t-/, ""); // unique (carries the email hash)
+      const id = "org_" + createHash("sha256").update("personal:" + email).digest("hex").slice(0, 20);
+      await db
+        .insertInto("organisations")
+        .values({ id, slug, name: email, kind: "personal", namespace: ns, created_by: email })
+        .onConflict((oc: any) => oc.column("slug").doNothing())
+        .execute();
+      await db
+        .insertInto("org_members")
+        .values({ org_id: id, email, role: "owner" })
+        .onConflict((oc: any) => oc.columns(["org_id", "email"]).doNothing())
+        .execute();
+      await db
+        .updateTable("sites")
+        .set({ org_id: id })
+        .where("org_id", "is", null)
+        .where("name", "in", (eb: any) => eb.selectFrom("site_members").select("site_name").where("email", "=", email).where("role", "=", "owner"))
+        .execute();
+    }
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
-    return { "0001_init": m0001_init, "0002_workload_type": m0002_workload_type, "0003_app_secrets": m0003_app_secrets };
+    return {
+      "0001_init": m0001_init,
+      "0002_workload_type": m0002_workload_type,
+      "0003_app_secrets": m0003_app_secrets,
+      "0004_organisations": m0004_organisations,
+    };
   }
 }

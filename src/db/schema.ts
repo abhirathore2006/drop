@@ -26,8 +26,29 @@ export interface SitesTable {
   password_hash: string | null;
   config: JsonConfig;
   runtime_state: ColumnType<RuntimeState, RuntimeState | undefined, RuntimeState>;
+  org_id: string | null; // owning organisation (nullable through the orgs migration window)
   created_at: Generated<Ts>;
   updated_at: Ts;
+}
+
+export type OrgRole = "owner" | "admin" | "member" | "viewer";
+export type OrgKind = "personal" | "team";
+
+export interface OrganisationsTable {
+  id: string;
+  slug: string;
+  name: string;
+  kind: ColumnType<OrgKind, OrgKind, OrgKind>;
+  namespace: string; // the literal k8s tenant namespace (stored, not re-derived)
+  created_by: string;
+  created_at: Generated<Ts>;
+}
+
+export interface OrgMembersTable {
+  org_id: string;
+  email: string;
+  role: OrgRole;
+  created_at: Generated<Ts>;
 }
 
 export type RuntimeState = "running" | "stopped";
@@ -79,4 +100,6 @@ export interface Database {
   versions: VersionsTable;
   auth_handles: AuthHandlesTable;
   app_secret_keys: AppSecretKeysTable;
+  organisations: OrganisationsTable;
+  org_members: OrgMembersTable;
 }

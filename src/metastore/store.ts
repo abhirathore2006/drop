@@ -1,6 +1,7 @@
 import { sql } from "kysely";
 import type { Db } from "../db/db.ts";
 import type { SiteConfig } from "../site-config.ts";
+import { tenantNamespace } from "../api/tenant.ts";
 import {
   type Member,
   type Site,
@@ -41,6 +42,10 @@ export class MetaStore {
       currentVersion: (row.current_version as string | null) ?? null,
       visibility: row.visibility as Visibility,
       runtimeState: (row.runtime_state as "running" | "stopped") ?? "running",
+      orgId: (row.org_id as string | null) ?? null,
+      // org's stored namespace (joined as org_namespace); fallback to the owner-derived namespace
+      // for any pre-orgs row whose org_id is still null (migration window).
+      namespace: (row.org_namespace as string | undefined) ?? tenantNamespace(owner),
       config: parseCfg(row.config),
       createdAt: iso(row.created_at),
       updatedAt: iso(row.updated_at),
@@ -56,24 +61,30 @@ export class MetaStore {
     return rows.map((r) => ({ email: r.email, role: r.role }));
   }
 
-  /** Atomic claim: insert workload + owner membership in one tx. Null if name taken
-   *  (by a site OR an app — one shared name namespace). Defaults to a static site. */
-  async claimSite(name: string, owner: string, type: WorkloadType = "site"): Promise<Site | null> {
+  /** Atomic claim: insert workload (in the given org) + owner membership in one tx. Null if the name
+   *  is taken (by a site OR an app — one shared name namespace). The caller authorizes the org first. */
+  async claimSite(name: string, owner: string, type: WorkloadType, org: { id: string; namespace: string }): Promise<Site | null> {
     return await this.db.transaction().execute(async (tx) => {
       const site = await tx
         .insertInto("sites")
-        .values({ name, type, updated_at: sql`now()` })
+        .values({ name, type, org_id: org.id, updated_at: sql`now()` })
         .onConflict((oc) => oc.column("name").doNothing())
         .returningAll()
         .executeTakeFirst();
       if (!site) return null; // already claimed
       await tx.insertInto("site_members").values({ site_name: name, email: owner, role: "owner" }).execute();
-      return this.toSite(site, [{ email: owner, role: "owner" }]);
+      return this.toSite({ ...site, org_namespace: org.namespace }, [{ email: owner, role: "owner" }]);
     });
   }
 
   async getSitePlain(name: string): Promise<Site | null> {
-    const row = await this.db.selectFrom("sites").selectAll().where("name", "=", name).executeTakeFirst();
+    const row = await this.db
+      .selectFrom("sites")
+      .leftJoin("organisations", "organisations.id", "sites.org_id")
+      .selectAll("sites")
+      .select("organisations.namespace as org_namespace")
+      .where("sites.name", "=", name)
+      .executeTakeFirst();
     if (!row) return null;
     return this.toSite(row, await this.membersOf(name));
   }
@@ -275,5 +286,10 @@ export class MetaStore {
   /** Set an app's runtime state (stop/start lifecycle). */
   async setRuntimeState(name: string, state: RuntimeState): Promise<void> {
     await this.db.updateTable("sites").set({ runtime_state: state, updated_at: sql`now()` }).where("name", "=", name).execute();
+  }
+
+  /** Move a resource to a different organisation (e.g. on ownership transfer). */
+  async setSiteOrg(name: string, orgId: string): Promise<void> {
+    await this.db.updateTable("sites").set({ org_id: orgId, updated_at: sql`now()` }).where("name", "=", name).execute();
   }
 }

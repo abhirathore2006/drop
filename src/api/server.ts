@@ -14,7 +14,8 @@ import { authMiddleware, type AuthEnv } from "../auth/middleware.ts";
 import { MetaStore } from "../metastore/store.ts";
 import type { Site, Visibility } from "../metastore/types.ts";
 import { UserStore } from "../users/store.ts";
-import { can, type Action, type Actor } from "../authz/permissions.ts";
+import { can, canCreateInOrg, canManageOrg, type Action, type Actor } from "../authz/permissions.ts";
+import { OrgStore, validateOrgSlug, type Org } from "../orgs/store.ts";
 import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
@@ -22,7 +23,6 @@ import { sanitizeAppConfig, assertHttpOnly } from "../app-config.ts";
 import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword } from "../db-config.ts";
 import { appManifests, tenantManifests } from "../kube/manifests.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
-import { tenantNamespace } from "./tenant.ts";
 import { PasswordSyncError, type KubeClient } from "../kube/types.ts";
 import type { SecretStore } from "../secrets/types.ts";
 import { fingerprint, validateSecretKey } from "../secrets/secrets.ts";
@@ -38,6 +38,7 @@ export interface Deps {
   verifier: Verifier;
   kube?: KubeClient; // optional: when absent, /v1/apps returns 501 (static-only instance)
   secrets: SecretStore; // app-secrets backend (kube locally, AWS Secrets Manager / etc. in prod)
+  orgs: OrgStore; // organisations (resource grouping + org-level permissions)
   now?: () => Date;
 }
 
@@ -116,18 +117,100 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     authMiddleware(d.verifier, { isSuspended: async (email) => (await d.users.getUser(email))?.status === "suspended" }),
   );
 
-  const ensureUser = (email: string) => d.users.upsertOnLogin(email, null);
+  // First touch provisions the user AND their personal org (idempotent), so resources always have an
+  // org to belong to and single-user flows keep working with no explicit org.
+  const ensureUser = async (email: string) => {
+    await d.users.upsertOnLogin(email, null);
+    await d.orgs.ensurePersonalOrg(email);
+  };
 
   async function actorFor(email: string, site: Site | null): Promise<Actor> {
     const u = await d.users.getUser(email);
     const siteRole = site ? (site.members.find((m) => m.email === email)?.role ?? null) : null;
-    return { email, platformRole: u?.role ?? "member", siteRole };
+    const orgRole = await d.orgs.roleOf(site?.orgId ?? null, email); // org-wide role on the resource's org
+    return { email, platformRole: u?.role ?? "member", siteRole, orgRole };
   }
+
+  // Resolve the target org for a CREATE (explicit ?org=<slug> or the caller's personal org) +
+  // authorize it. Uses ONLY the query param — never reads the body (publish streams a tarball).
+  const resolveCreateOrg = async (c: any, email: string): Promise<{ org: Org } | { err: Response }> => {
+    const orgSlug = c.req.query("org");
+    if (!orgSlug) return { org: await d.orgs.ensurePersonalOrg(email) };
+    const org = await d.orgs.getOrgBySlug(String(orgSlug));
+    if (!org) return { err: c.json({ error: `no such org: ${orgSlug}` }, 404) };
+    const role = await d.orgs.roleOf(org.id, email);
+    const platformRole = (await d.users.getUser(email))?.role ?? "member";
+    if (!canCreateInOrg(role, platformRole)) return { err: c.json({ error: `not a member of org ${orgSlug} with create rights` }, 403) };
+    return { org };
+  };
   const isPlatformAdmin = async (email: string) => (await d.users.getUser(email))?.role === "admin";
 
   app.get("/v1/me", async (c) => {
     const email = c.get("identity").email;
+    await ensureUser(email); // ensure the personal org exists on first console/CLI touch
     return c.json({ email, admin: await isPlatformAdmin(email) });
+  });
+
+  // ---- organisations (logical resource grouping + org-level permissions) ----
+  app.get("/v1/orgs", async (c) => {
+    const email = c.get("identity").email;
+    await ensureUser(email);
+    const orgs = await d.orgs.listUserOrgs(email);
+    return c.json({ orgs: orgs.map((o) => ({ slug: o.slug, name: o.name, kind: o.kind, role: o.role })) });
+  });
+
+  app.post("/v1/orgs", async (c) => {
+    const email = c.get("identity").email;
+    const body = (await c.req.json().catch(() => ({}))) as { slug?: string; name?: string };
+    const slugErr = validateOrgSlug(body.slug);
+    if (slugErr) return c.json({ error: slugErr }, 400);
+    await ensureUser(email);
+    if (await d.orgs.getOrgBySlug(body.slug!)) return c.json({ error: `org slug "${body.slug}" is taken` }, 409);
+    const org = await d.orgs.createOrg(body.slug!, body.name ?? body.slug!, email);
+    return c.json({ slug: org.slug, name: org.name, kind: org.kind, role: "owner" });
+  });
+
+  // resolve an org by slug + the caller's role; 404/403 helper for the org sub-routes.
+  const resolveOrg = async (c: any, email: string) => {
+    const slug = c.req.param("slug");
+    const org = await d.orgs.getOrgBySlug(slug);
+    if (!org) return { err: c.json({ error: "no such org" }, 404) };
+    const role = await d.orgs.roleOf(org.id, email);
+    const platformRole = (await d.users.getUser(email))?.role ?? "member";
+    if (!role && platformRole !== "admin") return { err: c.json({ error: "not a member" }, 403) };
+    return { org, role, platformRole };
+  };
+
+  app.get("/v1/orgs/:slug", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    return c.json({ slug: r.org.slug, name: r.org.name, kind: r.org.kind, members: await d.orgs.members(r.org.id) });
+  });
+
+  app.post("/v1/orgs/:slug/members", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    if (!canManageOrg(r.role, r.platformRole)) return c.json({ error: "owner/admin only" }, 403);
+    if (r.org.kind === "personal") return c.json({ error: "the personal org can't take members; create a team org" }, 409);
+    const body = (await c.req.json().catch(() => ({}))) as { email?: string; role?: string };
+    const role = (["owner", "admin", "member", "viewer"].includes(String(body.role)) ? body.role : "member") as "owner" | "admin" | "member" | "viewer";
+    if (!body.email) return c.json({ error: "email required" }, 400);
+    await ensureUser(body.email.toLowerCase());
+    await d.orgs.addMember(r.org.id, body.email, role);
+    return c.json({ slug: r.org.slug, email: body.email.toLowerCase(), role });
+  });
+
+  app.delete("/v1/orgs/:slug/members/:email", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    if (!canManageOrg(r.role, r.platformRole)) return c.json({ error: "owner/admin only" }, 403);
+    const target = decodeURIComponent(c.req.param("email")).toLowerCase();
+    if (target === r.org.createdBy) return c.json({ error: "can't remove the org's founding owner" }, 409);
+    await d.orgs.removeMember(r.org.id, target);
+    return c.json({ removed: target });
   });
 
   // ---- publish ----
@@ -141,7 +224,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     let site = await d.meta.getSitePlain(name);
     if (!site) {
       await ensureUser(email); // FK: owner membership references users
-      const claimed = await d.meta.claimSite(name, email);
+      const orgRes = await resolveCreateOrg(c, email);
+      if ("err" in orgRes) return orgRes.err;
+      const claimed = await d.meta.claimSite(name, email, "site", { id: orgRes.org.id, namespace: orgRes.org.namespace });
       site = claimed ?? (await d.meta.getSitePlain(name));
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
@@ -236,7 +321,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     let site = await d.meta.getSitePlain(name);
     if (!site) {
       await ensureUser(email);
-      const claimed = await d.meta.claimSite(name, email, "app");
+      const orgRes = await resolveCreateOrg(c, email);
+      if ("err" in orgRes) return orgRes.err;
+      const claimed = await d.meta.claimSite(name, email, "app", { id: orgRes.org.id, namespace: orgRes.org.namespace });
       site = claimed ?? (await d.meta.getSitePlain(name));
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
@@ -245,7 +332,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!can(actor, "deploy")) return c.json({ error: `app is owned by ${site.owner}` }, 403);
 
     const verId = newVersionId(now());
-    const ns = tenantNamespace(site.owner); // per-owner tenant namespace (isolation)
+    const ns = site.namespace; // per-owner tenant namespace (isolation)
     await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs })); // namespace + NetworkPolicy + quota + LimitRange
     const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox: !appCfg.trusted });
     await d.kube.applyApp(ns, name, manifests);
@@ -284,7 +371,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const body = (await c.req.json().catch(() => ({}))) as { value?: unknown };
     if (typeof body.value !== "string" || body.value.length === 0) return c.json({ error: "value required (non-empty string)" }, 400);
     if (body.value.length > 64 * 1024) return c.json({ error: "value too large (max 64KiB)" }, 400);
-    const scope = { owner: r.site.owner, app: r.site.name, namespace: tenantNamespace(r.site.owner) };
+    const scope = { owner: r.site.owner, app: r.site.name, namespace: r.site.namespace };
     await d.secrets.setSecret(scope, key, body.value);
     const fp = fingerprint(body.value);
     await d.meta.upsertSecretKey(r.site.name, key, fp, r.email);
@@ -308,7 +395,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (keyErr) return c.json({ error: keyErr }, 400);
     const r = await resolveAppForSecrets(c);
     if ("err" in r) return r.err;
-    const scope = { owner: r.site.owner, app: r.site.name, namespace: tenantNamespace(r.site.owner) };
+    const scope = { owner: r.site.owner, app: r.site.name, namespace: r.site.namespace };
     await d.secrets.deleteSecret(scope, key);
     await d.meta.deleteSecretKey(r.site.name, key);
     await d.secrets.ensureBinding(scope, (await d.meta.listSecretKeys(r.site.name)).map((k) => k.key));
@@ -324,7 +411,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!site) return c.json({ error: "no such app" }, 404);
     if (site.type !== "app") return c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409);
     if (!can(await actorFor(email, site), "deploy")) return c.json({ error: "not permitted" }, 403);
-    const ns = tenantNamespace(site.owner);
+    const ns = site.namespace;
     if (action === "restart") {
       // A restart while stopped would silently no-op (the pods are pinned to 0) — be explicit.
       if (site.runtimeState === "stopped") return c.json({ error: "app is stopped — `start` it first" }, 409);
@@ -369,7 +456,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const isCreate = !site; // first claim → generate the app password; a re-apply must NOT rotate it
     if (!site) {
       await ensureUser(email);
-      const claimed = await d.meta.claimSite(name, email, "database");
+      const orgRes = await resolveCreateOrg(c, email);
+      if ("err" in orgRes) return orgRes.err;
+      const claimed = await d.meta.claimSite(name, email, "database", { id: orgRes.org.id, namespace: orgRes.org.namespace });
       site = claimed ?? (await d.meta.getSitePlain(name));
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
@@ -386,7 +475,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
 
     const verId = newVersionId(now());
-    const ns = tenantNamespace(site.owner);
+    const ns = site.namespace;
     await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs }));
     // CNPG runs IN-CLUSTER, so its object-store endpoint differs from the API's host-side
     // s3Endpoint: locally Floci is reachable on the pod network via DROP_DB_BACKUP_S3_ENDPOINT,
@@ -452,7 +541,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
     if (rotatingPasswords.has(name)) return c.json({ error: "a password rotation is already in progress for this database" }, 409);
     rotatingPasswords.add(name);
-    const ns = tenantNamespace(site.owner);
+    const ns = site.namespace;
     try {
       await d.kube.setDatabasePassword(ns, name, password);
     } catch (e) {
@@ -514,7 +603,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // Per-type live detail — best-effort: a cluster read failure (compute off / object gone)
     // must never fail the metadata read, so it's wrapped and simply omitted on error.
     if (d.kube && site.type === "app") {
-      const ns = tenantNamespace(site.owner);
+      const ns = site.namespace;
       const a: Record<string, unknown> = { image: null, scale: null, resources: null, status: null };
       try {
         const m = await d.kube.getApp(ns, name);
@@ -534,7 +623,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       if (site.runtimeState === "stopped" && a.status) (a.status as Record<string, unknown>).reason = "Stopped";
       out.app = a;
     } else if (d.kube && site.type === "database") {
-      const ns = tenantNamespace(site.owner);
+      const ns = site.namespace;
       // Static connection metadata (derived from name+namespace, no cluster call) is ALWAYS
       // returned; only the live status depends on a cluster read and degrades on its own.
       const dbInfo: Record<string, unknown> = {
@@ -567,7 +656,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const tail = Math.min(Number(c.req.query("tail") ?? "100") || 100, 1000);
     let logs = "";
     try {
-      logs = await d.kube.getWorkloadLogs(tenantNamespace(site.owner), name, tail);
+      logs = await d.kube.getWorkloadLogs(site.namespace, name, tail);
     } catch {
       /* best-effort — never fail the call on a transient cluster error */
     }
@@ -607,13 +696,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // orphan in the tenant namespace. Apps: Deployment/Service/Secret/NetworkPolicy/HSO.
     // Databases: the CNPG Cluster (cascades to pods) + ObjectStore/ScheduledBackup/policy.
     if (site.type === "app" && d.kube) {
-      await d.kube.deleteApp(tenantNamespace(site.owner), name);
+      await d.kube.deleteApp(site.namespace, name);
       // Remove the app's secret material (the <app>-secret Secret + any SM secrets/ExternalSecret).
       // Log (don't swallow) a teardown failure — otherwise SM secrets orphan with no record.
       await d.secrets
-        .destroy({ owner: site.owner, app: name, namespace: tenantNamespace(site.owner) })
+        .destroy({ owner: site.owner, app: name, namespace: site.namespace })
         .catch((e) => console.error(`delete ${name}: secrets.destroy failed (possible orphaned secret material): ${(e as Error).message}`));
-    } else if (site.type === "database" && d.kube) await d.kube.deleteDatabase(tenantNamespace(site.owner), name);
+    } else if (site.type === "database" && d.kube) await d.kube.deleteDatabase(site.namespace, name);
     await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);
     return c.json({ deleted: name });
@@ -724,6 +813,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await ensureUser(newOwner); // FK
     const oldOwner = site.owner;
     await d.meta.transferOwner(name, newOwner);
+    // Move the resource into the new owner's (personal) org — otherwise the OLD owner keeps
+    // org-owner rights over it (the org grants org-wide access). site.namespace below is still the
+    // OLD namespace (captured before this move), so teardown targets the right place.
+    const newOwnerOrg = await d.orgs.ensurePersonalOrg(newOwner);
+    await d.meta.setSiteOrg(name, newOwnerOrg.id);
     // An app's workload lives in the OLD owner's tenant namespace; the namespace is
     // owner-derived, so a transfer must remove it there. The new owner redeploys to
     // provision it in their own namespace (avoids cross-tenant objects + a dangling Secret).
@@ -731,8 +825,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // namespace AND the registry would advertise keys whose values now live nowhere the new owner
     // can reach). Transfer DROPS secrets — the new owner re-sets them, then redeploys.
     if (site.type === "app" && d.kube) {
-      await d.kube.deleteApp(tenantNamespace(oldOwner), name);
-      await d.secrets.destroy({ owner: oldOwner, app: name, namespace: tenantNamespace(oldOwner) }).catch((e) => console.error(`transfer ${name}: secrets.destroy failed (orphaned secret material in ${oldOwner}'s namespace): ${(e as Error).message}`));
+      await d.kube.deleteApp(site.namespace, name);
+      await d.secrets.destroy({ owner: oldOwner, app: name, namespace: site.namespace }).catch((e) => console.error(`transfer ${name}: secrets.destroy failed (orphaned secret material in ${oldOwner}'s namespace): ${(e as Error).message}`));
       await d.meta.clearSecretKeys(name); // the new owner re-sets secrets under their namespace
     }
     return c.json({ owner: newOwner, secretsDropped: site.type === "app" });

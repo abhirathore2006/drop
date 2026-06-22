@@ -197,5 +197,22 @@ export function buildMcp(): McpServer {
     async ({ app }) => run(() => getClient().then((c) => c.startApp(app))),
   );
 
+  // ---- organisations (group resources + org-level permissions) ----
+  server.registerTool(
+    "org_create",
+    { description: "Create a team organisation (you become owner). Deploy into it with the `org` arg on deploy/db_create.", inputSchema: { slug: z.string(), name: z.string().optional() } },
+    async ({ slug, name }) => run(() => getClient().then((c) => c.createOrg(slug, name))),
+  );
+  server.registerTool(
+    "org_list",
+    { description: "List the organisations you belong to + your role in each.", inputSchema: {} },
+    async () => run(() => getClient().then((c) => c.listOrgs())),
+  );
+  server.registerTool(
+    "org_add_member",
+    { description: "Add/update an org member (role: owner|admin|member|viewer; default member). Owner/admin only.", inputSchema: { slug: z.string(), email: z.string(), role: z.string().optional() } },
+    async ({ slug, email, role }) => run(() => getClient().then((c) => c.addOrgMember(slug, email, role))),
+  );
+
   return server;
 }

@@ -18,6 +18,8 @@ export interface Site {
   currentVersion: string | null;
   visibility: Visibility;
   runtimeState: RuntimeState; // "running" | "stopped" (apps; stop/start lifecycle)
+  orgId: string | null; // owning organisation (null only in the migration window)
+  namespace: string; // the resolved tenant namespace (org's namespace, or owner-derived fallback)
   config?: SiteConfig; // current version's parsed drop.yaml (denormalized for the edge)
   createdAt: string; // ISO
   updatedAt: string; // ISO
