@@ -23,6 +23,7 @@ const app = createEdge({
   baseDomain: cfg.baseDomain,
   diskCacheDir: cfg.edgeDiskCacheDir,
   diskCacheBytes: cfg.edgeDiskCacheBytes,
+  interceptorUrl: cfg.interceptorUrl,
 });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-edge listening on :${cfg.httpPort} for *.${cfg.baseDomain}`);

@@ -1,10 +1,13 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { posix } from "node:path";
+import { request as httpRequest } from "node:http";
+import { Readable } from "node:stream";
 import type { BlobStore } from "../blob/types.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { DiskCache } from "./disk-cache.ts";
 import type { SiteConfig } from "../site-config.ts";
-import type { Visibility } from "../metastore/types.ts";
+import type { Visibility, WorkloadType } from "../metastore/types.ts";
 import { basicAuthOk, corsHeaders, headersForPath, matchRedirect, passwordHashOk } from "../site-config.ts";
 
 export interface EdgeDeps {
@@ -19,9 +22,13 @@ export interface EdgeDeps {
   diskCacheDir?: string;
   /** Disk cache budget in bytes (default 5 GiB). */
   diskCacheBytes?: number;
+  /** KEDA HTTP interceptor base URL (e.g. http://keda-add-ons-http-interceptor-proxy.keda:8080).
+   *  type=app hostnames reverse-proxy here; the interceptor routes by Host and wakes the pod. */
+  interceptorUrl?: string;
 }
 
 interface CacheEntry {
+  type: WorkloadType;
   version: string | null;
   config?: SiteConfig;
   visibility: Visibility;
@@ -44,12 +51,69 @@ export function createEdge(d: EdgeDeps) {
   const cache = new Map<string, CacheEntry>();
   const maxObjectBytes = d.maxObjectBytes ?? 25 * 1024 * 1024;
   const disk = d.diskCacheDir ? new DiskCache(d.diskCacheDir, d.diskCacheBytes ?? 5 * 1024 * 1024 * 1024) : null;
+  const interceptor = d.interceptorUrl ? new URL(d.interceptorUrl) : null;
+
+  // Hop-by-hop headers (RFC 7230 §6.1) — never forwarded across a proxy hop.
+  const HOP_BY_HOP = new Set(["host", "connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailer", "proxy-authorization", "proxy-authenticate"]);
+
+  /** Reverse-proxy a type=app request to the in-cluster KEDA interceptor, which
+   *  routes by Host to the tenant's HTTPScaledObject and wakes the pod from zero.
+   *  Uses node:http.request (NOT fetch — fetch forbids overriding the Host header,
+   *  which KEDA routes on). Streams request + response bodies; generous cold-start timeout. */
+  function proxyToApp(c: Context, name: string): Promise<Response> {
+    if (!interceptor) return Promise.resolve(new Response("app routing not configured", { status: 503 }));
+    const host = `${name}.${d.baseDomain}`; // the registered HTTPScaledObject host (NOT a raw pass-through)
+    const src = new URL(c.req.url);
+    const headers: Record<string, string> = {};
+    c.req.raw.headers.forEach((v, k) => {
+      if (!HOP_BY_HOP.has(k.toLowerCase())) headers[k] = v;
+    });
+    headers.host = host; // override: KEDA matches this against HTTPScaledObject.spec.hosts
+    return new Promise<Response>((resolve) => {
+      const upstream = httpRequest(
+        {
+          protocol: interceptor.protocol,
+          hostname: interceptor.hostname,
+          port: interceptor.port,
+          method: c.req.method,
+          path: src.pathname + src.search,
+          headers,
+          timeout: 120_000, // KEDA scale-from-zero cold start can take many seconds
+        },
+        (res) => {
+          const rh = new Headers();
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (v === undefined || HOP_BY_HOP.has(k.toLowerCase())) continue;
+            rh.set(k, Array.isArray(v) ? v.join(", ") : String(v));
+          }
+          resolve(new Response(Readable.toWeb(res) as ReadableStream, { status: res.statusCode ?? 502, headers: rh }));
+        },
+      );
+      upstream.on("timeout", () => {
+        upstream.destroy();
+        resolve(new Response("upstream timeout", { status: 504 }));
+      });
+      upstream.on("error", () => resolve(new Response("bad gateway", { status: 502 })));
+      const body = c.req.raw.body;
+      if (body) {
+        const rs = Readable.fromWeb(body as Parameters<typeof Readable.fromWeb>[0]);
+        // A client that aborts mid-upload makes `rs` emit 'error'. Without a listener that
+        // becomes an uncaughtException that crashes the whole edge replica (cross-tenant
+        // DoS). Forward the failure to the upstream socket → it tears down and resolves 502.
+        rs.on("error", (e) => upstream.destroy(e instanceof Error ? e : new Error(String(e))));
+        rs.pipe(upstream);
+      } else {
+        upstream.end();
+      }
+    });
+  }
 
   async function current(name: string): Promise<CacheEntry> {
     const hit = cache.get(name);
     if (hit && now() < hit.exp) return hit;
     const ptr = await d.meta.getPointer(name);
     const entry: CacheEntry = {
+      type: ptr?.type ?? "site",
       version: ptr?.currentVersion ?? null,
       config: ptr?.config,
       visibility: ptr?.visibility ?? "public",
@@ -118,8 +182,14 @@ export function createEdge(d: EdgeDeps) {
     const name = siteFromHost(c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "");
     if (!name) return notFound("site not found");
 
-    const { version, config: cfg, visibility, passwordHash } = await current(name);
+    const { type, version, config: cfg, visibility, passwordHash } = await current(name);
     const config = cfg ?? {};
+    // type=app: reverse-proxy to the interceptor (KEDA wakes + routes by Host). Apps
+    // don't use the static-site machinery below (S3 bytes, redirects, SPA fallback).
+    if (type === "app") {
+      if (!version) return notFound("app not found or not deployed");
+      return proxyToApp(c, name);
+    }
     if (!version) return notFound("site not found or nothing published");
     const prefix = d.meta.filesPrefix(name, version);
 

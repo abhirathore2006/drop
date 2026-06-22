@@ -1,9 +1,18 @@
 import { test, expect } from "bun:test";
+import * as http from "node:http";
 import { createEdge } from "./server.ts";
 import { FakeBlob } from "../blob/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { UserStore } from "../users/store.ts";
 import { makeTestDb } from "../db/testdb.ts";
+
+/** A throwaway local HTTP server standing in for the in-cluster KEDA interceptor. */
+async function fakeInterceptor(handler: http.RequestListener): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = http.createServer(handler);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  return { url: `http://127.0.0.1:${port}`, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
 
 /** db + meta + blob with the owner user seeded (FK for claim). */
 async function base() {
@@ -145,6 +154,73 @@ test("config: custom 404 document", async () => {
   const r = await creq(app, "/assets/missing.js");
   expect(r.status).toBe(404);
   expect(await r.text()).toBe("<html>nope</html>");
+});
+
+// ---- Phase B: type=app dispatch → reverse-proxy to the KEDA interceptor ----
+
+test("type=app reverse-proxies to the interceptor with the reconstructed Host; path+query preserved", async () => {
+  const { meta, blob } = await base();
+  await meta.claimSite("billing", "alice@example.com", "app");
+  await meta.updateSite("billing", (s) => ({ ...s, currentVersion: "v1" }));
+  const seen: { host?: string; path?: string; method?: string } = {};
+  const icept = await fakeInterceptor((req, res) => {
+    seen.host = req.headers.host;
+    seen.path = req.url;
+    seen.method = req.method;
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("hello-from-app");
+  });
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", interceptorUrl: icept.url });
+  const res = await edge.request("/dashboard/x?q=1", { headers: { host: "billing.drop.example.com" } });
+  expect(res.status).toBe(200);
+  expect(await res.text()).toBe("hello-from-app");
+  expect(seen.host).toBe("billing.drop.example.com"); // KEDA routes (and wakes) by the registered HSO host
+  expect(seen.path).toBe("/dashboard/x?q=1"); // path + query preserved
+  expect(seen.method).toBe("GET");
+  await icept.close();
+});
+
+test("type=app forwards the request body + method (POST)", async () => {
+  const { meta, blob } = await base();
+  await meta.claimSite("ingest", "alice@example.com", "app");
+  await meta.updateSite("ingest", (s) => ({ ...s, currentVersion: "v1" }));
+  const icept = await fakeInterceptor((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      res.writeHead(201);
+      res.end(`${req.method}:${body}`);
+    });
+  });
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", interceptorUrl: icept.url });
+  const res = await edge.request("/api", { method: "POST", headers: { host: "ingest.drop.example.com" }, body: "ping" });
+  expect(res.status).toBe(201);
+  expect(await res.text()).toBe("POST:ping");
+  await icept.close();
+});
+
+// NOTE: the client-abort-mid-upload crash (a missing 'error' listener on the piped
+// request-body source → uncaughtException → whole-replica DoS) is guarded by the
+// rs.on("error") handler in proxyToApp. It isn't unit-tested here: faithfully
+// reproducing it needs a real node http server + a raw socket that RSTs mid-body
+// (bun's in-memory app.request rejects on the CLIENT side instead, testing the wrong
+// layer). The fix is reasoned + review-validated.
+
+test("type=app returns 503 when the interceptor is not configured", async () => {
+  const { meta, blob } = await base();
+  await meta.claimSite("noroute", "alice@example.com", "app");
+  await meta.updateSite("noroute", (s) => ({ ...s, currentVersion: "v1" }));
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com" }); // no interceptorUrl
+  const res = await edge.request("/", { headers: { host: "noroute.drop.example.com" } });
+  expect(res.status).toBe(503);
+});
+
+test("type=app not yet deployed (no current version) → 404", async () => {
+  const { meta, blob } = await base();
+  await meta.claimSite("pending", "alice@example.com", "app"); // claimed, never deployed
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", interceptorUrl: "http://127.0.0.1:9" });
+  const res = await edge.request("/", { headers: { host: "pending.drop.example.com" } });
+  expect(res.status).toBe(404);
 });
 
 test("disk cache: second request (even a fresh instance) skips S3", async () => {
