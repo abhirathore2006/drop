@@ -325,3 +325,73 @@ test("deploy: 501 when compute is not enabled (no kube)", async () => {
   expect((await call(app, "POST", "/v1/apps/x", "alice", { image: "x:1" })).status).toBe(501);
   await db.destroy();
 });
+
+test("deploy provisions a per-owner tenant namespace with isolation objects + env Secret", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1", env: { K: "v" } });
+  const ns = kube.tenantApplies[0]!.namespace;
+  expect(ns).toMatch(/^drop-t-/); // per-owner namespace, not a shared one
+  expect(kube.applies[0]!.namespace).toBe(ns); // app applied into the tenant ns
+  const t = kube.tenantApplies[0]!.manifests;
+  expect((t.resourceQuota as any).spec.hard["count/pods"]).toBeDefined();
+  expect((t.networkPolicy as any).spec.policyTypes).toContain("Egress");
+  expect((kube.applies[0]!.manifests.secret as any).stringData.K).toBe("v"); // env in a Secret, not the pod spec
+  await db.destroy();
+});
+
+test("delete: app deletion tears down the k8s workload (no orphan)", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1", env: { K: "v" } });
+  const ns = kube.applies[0]!.namespace;
+  expect((await call(app, "DELETE", "/v1/sites/billing", "alice")).status).toBe(200);
+  expect(kube.deletes).toContainEqual({ namespace: ns, name: "billing" });
+  await db.destroy();
+});
+
+test("transfer: app workload is removed from the OLD owner's namespace", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
+  const oldNs = kube.applies[0]!.namespace;
+  expect((await call(app, "POST", "/v1/sites/billing/transfer", "alice", { email: "bob@example.com" })).status).toBe(200);
+  expect(kube.deletes).toContainEqual({ namespace: oldNs, name: "billing" }); // not orphaned under the prior owner
+  await db.destroy();
+});
+
+test("auth: principal email is canonicalized to lowercase (no case-fold tenant collision)", async () => {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  const meta = new MetaStore(db);
+  const kube = new FakeKube();
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
+  const verifier = new FakeVerifier({
+    upper: { sub: "Alice@Example.com", email: "Alice@Example.com" },
+    lower: { sub: "alice@example.com", email: "alice@example.com" },
+  });
+  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube });
+  expect((await call(app, "POST", "/v1/apps/billing", "upper", { image: "x:1" })).status).toBe(200);
+  const site = (await meta.getSitePlain("billing"))!;
+  expect(site.owner).toBe("alice@example.com"); // owner stored canonical (not "Alice@Example.com")
+  // the lowercase variant is the SAME principal → owner, not a foreign 403
+  expect((await call(app, "POST", "/v1/apps/billing", "lower", { image: "x:2" })).status).toBe(200);
+  await db.destroy();
+});
+
+test("deploy: tenant egress except is sourced from config (DROP_BLOCKED_EGRESS_CIDRS)", async () => {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  const meta = new MetaStore(db);
+  const kube = new FakeKube();
+  const cfg = loadConfig({
+    DROP_S3_BUCKET: "b",
+    DROP_DATABASE_URL: "postgres://x/y",
+    DROP_BASE_DOMAIN: "drop.example.com",
+    DROP_BLOCKED_EGRESS_CIDRS: "100.64.0.0/10,172.16.0.0/12",
+  });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube });
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
+  const np = kube.tenantApplies[0]!.manifests.networkPolicy as any;
+  const https = np.spec.egress.find((e: any) => (e.ports ?? []).some((p: any) => p.port === 443));
+  expect(https.to[0].ipBlock.except).toEqual(["169.254.169.254/32", "100.64.0.0/10", "172.16.0.0/12"]);
+  await db.destroy();
+});

@@ -74,6 +74,19 @@ helm upgrade --install keda kedacore/keda --namespace keda --create-namespace --
 helm upgrade --install keda-http-add-on kedacore/keda-add-ons-http --namespace keda --wait
 helm upgrade --install cnpg cnpg/cloudnative-pg --namespace cnpg-system --create-namespace --wait
 
+say "Register the gvisor RuntimeClass (PROD sandbox for untrusted images)"
+# Note: runsc is NOT installed on the locally-nested k3s — it needs nested virt/ptrace
+# that this stack lacks. So locally PSA(baseline)+NetworkPolicy+ResourceQuota are the
+# isolation guard, and v1 apps default to trusted:true (no runtimeClassName). We still
+# register the object so the API can reference it and prod (EKS sandboxed nodes) works.
+kubectl apply -f - >/dev/null 2>&1 <<'YAML' || true
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata: { name: gvisor }
+handler: runsc
+YAML
+echo "✓ gvisor RuntimeClass registered (untrusted-tenant sandbox; prod-only runtime)"
+
 say "Done — compute plane is up"
 echo "  KUBECONFIG=$KUBECONFIG"
 echo "  point the API at it:  DROP_KUBECONFIG=$KUBECONFIG  (and DROP_COMPUTE=1)"

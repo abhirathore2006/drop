@@ -19,7 +19,8 @@ import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
 import { sanitizeAppConfig, assertHttpOnly } from "../app-config.ts";
-import { appManifests } from "../kube/manifests.ts";
+import { appManifests, tenantManifests } from "../kube/manifests.ts";
+import { tenantNamespace } from "./tenant.ts";
 import type { KubeClient } from "../kube/types.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { dashboardHtml } from "./dashboard.ts";
@@ -38,8 +39,6 @@ export interface Deps {
 export function createApp(d: Deps): Hono<AuthEnv> {
   const now = d.now ?? (() => new Date());
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
-  // v1: a single namespace for all apps. Namespace-per-tenant is a later slice.
-  const APP_NAMESPACE = "drop-apps";
   const app = new Hono<AuthEnv>();
 
   app.get("/healthz", (c) => c.text("ok"));
@@ -224,8 +223,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!can(actor, "deploy")) return c.json({ error: `app is owned by ${site.owner}` }, 403);
 
     const verId = newVersionId(now());
-    const manifests = appManifests(appCfg, { name, namespace: APP_NAMESPACE, host: `${name}.${d.cfg.baseDomain}` });
-    await d.kube.applyApp(APP_NAMESPACE, name, manifests);
+    const ns = tenantNamespace(site.owner); // per-owner tenant namespace (isolation)
+    await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs })); // namespace + NetworkPolicy + quota + LimitRange
+    const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox: !appCfg.trusted });
+    await d.kube.applyApp(ns, name, manifests);
 
     await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
     await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
@@ -299,6 +300,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!can(await actorFor(email, site), "delete")) return c.json({ error: "owner only" }, 403);
+    // Tear down the running workload + env Secret BEFORE dropping metadata — otherwise
+    // the Deployment/Service/Secret/NetworkPolicy/HSO orphan in the tenant namespace.
+    if (site.type === "app" && d.kube) await d.kube.deleteApp(tenantNamespace(site.owner), name);
     await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);
     return c.json({ deleted: name });
@@ -376,7 +380,12 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const body = (await c.req.json().catch(() => ({}))) as { email?: string };
     if (!body.email) return c.json({ error: "email required" }, 400);
     await ensureUser(body.email); // FK
+    const oldOwner = site.owner;
     await d.meta.transferOwner(name, body.email);
+    // An app's workload lives in the OLD owner's tenant namespace; the namespace is
+    // owner-derived, so a transfer must remove it there. The new owner redeploys to
+    // provision it in their own namespace (avoids cross-tenant objects + a dangling Secret).
+    if (site.type === "app" && d.kube) await d.kube.deleteApp(tenantNamespace(oldOwner), name);
     return c.json({ owner: body.email });
   });
 

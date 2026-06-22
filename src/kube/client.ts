@@ -7,7 +7,7 @@ import { request } from "node:https";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { KubeClient } from "./types.ts";
-import type { AppManifests } from "./manifests.ts";
+import type { AppManifests, TenantManifests } from "./manifests.ts";
 
 interface KubeConn {
   server: string;
@@ -78,20 +78,46 @@ export class KubeApiClient implements KubeClient {
     if (res.status >= 300) throw new Error(`apply ${path} -> ${res.status}: ${res.body.slice(0, 300)}`);
   }
 
+  private nsPath = (ns: string) => `/api/v1/namespaces/${ns}`;
   private deploymentPath = (ns: string, n: string) => `/apis/apps/v1/namespaces/${ns}/deployments/${n}`;
   private servicePath = (ns: string, n: string) => `/api/v1/namespaces/${ns}/services/${n}`;
   private hsoPath = (ns: string, n: string) => `/apis/http.keda.sh/v1alpha1/namespaces/${ns}/httpscaledobjects/${n}`;
+  private secretPath = (ns: string, n: string) => `/api/v1/namespaces/${ns}/secrets/${n}`;
+  private netpolPath = (ns: string, n: string) => `/apis/networking.k8s.io/v1/namespaces/${ns}/networkpolicies/${n}`;
+  private quotaPath = (ns: string, n: string) => `/api/v1/namespaces/${ns}/resourcequotas/${n}`;
+  private limitRangePath = (ns: string, n: string) => `/api/v1/namespaces/${ns}/limitranges/${n}`;
+  private objName = (o: Record<string, unknown>) => (o.metadata as { name: string }).name;
+
+  /** Fail fast if a CRD's API group isn't served yet (SSA returns a bare 404 otherwise). */
+  private async assertCrd(group: string): Promise<void> {
+    const r = await this.call("GET", `/apis/${group}`);
+    if (r.status >= 300) throw new Error(`compute not ready: ${group} CRD not installed (run make compute-up)`);
+  }
+
+  async applyTenant(namespace: string, t: TenantManifests): Promise<void> {
+    await this.apply(this.nsPath(namespace), t.namespace as Record<string, unknown>);
+    await this.apply(this.netpolPath(namespace, this.objName(t.networkPolicy)), t.networkPolicy as Record<string, unknown>);
+    await this.apply(this.quotaPath(namespace, this.objName(t.resourceQuota)), t.resourceQuota as Record<string, unknown>);
+    await this.apply(this.limitRangePath(namespace, this.objName(t.limitRange)), t.limitRange as Record<string, unknown>);
+  }
 
   async applyApp(namespace: string, name: string, m: AppManifests): Promise<void> {
-    await this.apply(`/api/v1/namespaces/${namespace}`, { apiVersion: "v1", kind: "Namespace", metadata: { name: namespace } });
+    // Fail fast BEFORE creating any app object: on a cluster without the KEDA HTTP
+    // add-on, applying then throwing would orphan the Deployment/Service/NetworkPolicy.
+    await this.assertCrd("http.keda.sh");
+    // namespace is provisioned (PSA-labeled) by applyTenant — don't re-apply a bare one here.
+    if (m.secret) await this.apply(this.secretPath(namespace, this.objName(m.secret)), m.secret as Record<string, unknown>);
     await this.apply(this.deploymentPath(namespace, name), m.deployment as Record<string, unknown>);
     await this.apply(this.servicePath(namespace, name), m.service as Record<string, unknown>);
+    await this.apply(this.netpolPath(namespace, this.objName(m.ingressPolicy)), m.ingressPolicy as Record<string, unknown>);
     await this.apply(this.hsoPath(namespace, name), m.httpScaledObject as Record<string, unknown>);
   }
 
   async deleteApp(namespace: string, name: string): Promise<void> {
     await this.call("DELETE", this.hsoPath(namespace, name));
+    await this.call("DELETE", this.netpolPath(namespace, `${name}-allow-interceptor`));
     await this.call("DELETE", this.servicePath(namespace, name));
+    await this.call("DELETE", this.secretPath(namespace, `${name}-env`));
     await this.call("DELETE", this.deploymentPath(namespace, name));
   }
 
@@ -101,10 +127,12 @@ export class KubeApiClient implements KubeClient {
     if (d.status >= 300) throw new Error(`getApp ${name} -> ${d.status}`);
     const s = await this.call("GET", this.servicePath(namespace, name));
     const h = await this.call("GET", this.hsoPath(namespace, name));
+    const ip = await this.call("GET", this.netpolPath(namespace, `${name}-allow-interceptor`));
     return {
       deployment: JSON.parse(d.body),
       service: s.status < 300 ? JSON.parse(s.body) : {},
       httpScaledObject: h.status < 300 ? JSON.parse(h.body) : {},
+      ingressPolicy: ip.status < 300 ? JSON.parse(ip.body) : {},
     };
   }
 }

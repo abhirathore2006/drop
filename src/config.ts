@@ -18,6 +18,7 @@ export interface Config {
   maxUploadBytes: number;
   maxFiles: number;
   keepVersions: number;
+  blockedEgressCidrs: string[]; // in-cluster/control-plane CIDRs excluded from the tenant HTTPS egress allowlist (MUST cover the live pod+service CIDRs)
   edgeDiskCacheDir?: string; // edge: where to cache asset bytes on disk (off if unset)
   edgeDiskCacheBytes: number; // edge: disk cache budget
   docsDir: string; // api: static docs site served at /docs (relative to cwd)
@@ -58,6 +59,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxUploadBytes: Number(env.DROP_MAX_UPLOAD_BYTES ?? String(100 * 1024 * 1024)),
     maxFiles: Number(env.DROP_MAX_FILES ?? "5000"),
     keepVersions: Number(env.DROP_KEEP_VERSIONS ?? "10"),
+    // Local k3s pod/service CIDRs live in 10/8; PROD EKS must set the real ones.
+    blockedEgressCidrs: (env.DROP_BLOCKED_EGRESS_CIDRS ?? "10.0.0.0/8")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
     edgeDiskCacheDir: env.DROP_EDGE_DISK_CACHE || undefined,
     edgeDiskCacheBytes: Number(env.DROP_EDGE_DISK_CACHE_BYTES ?? String(5 * 1024 * 1024 * 1024)),
     docsDir: env.DROP_DOCS_DIR ?? "docs",

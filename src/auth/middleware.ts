@@ -15,7 +15,11 @@ export function authMiddleware(v: Verifier) {
     if (!token) return c.json({ error: "not authenticated" }, 401);
     const id = await v.verify(token);
     if (!id) return c.json({ error: "invalid token" }, 401);
-    c.set("identity", id);
+    // Canonicalize the principal to lowercase: email is case-insensitive, and ownership
+    // (site.owner) + the derived tenant namespace must agree. Without this, "Alice@x"
+    // and "alice@x" become distinct DB owners that hash to the SAME tenant namespace —
+    // two "tenants" sharing one isolation boundary.
+    c.set("identity", { ...id, email: id.email.toLowerCase() });
     await next();
   });
 }

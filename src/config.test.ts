@@ -12,6 +12,12 @@ test("loadConfig reads env and applies defaults", () => {
   expect(c.keepVersions).toBe(10);
   expect(c.allowedDomains).toEqual([]);
   expect(c.devAuth).toBe(false);
+  expect(c.blockedEgressCidrs).toEqual(["10.0.0.0/8"]); // local k3s default
+});
+
+test("loadConfig parses config-driven blocked egress CIDRs (prod EKS)", () => {
+  const c = loadConfig({ ...BASE, DROP_BLOCKED_EGRESS_CIDRS: "172.16.0.0/12, 100.64.0.0/10 ,10.100.0.0/16" });
+  expect(c.blockedEgressCidrs).toEqual(["172.16.0.0/12", "100.64.0.0/10", "10.100.0.0/16"]);
 });
 
 test("loadConfig parses allowed domains and dev auth", () => {

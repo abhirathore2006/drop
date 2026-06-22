@@ -61,6 +61,15 @@ let kube: KubeClient | undefined;
 if (process.env.DROP_KUBECONFIG) {
   kube = new KubeApiClient(process.env.DROP_KUBECONFIG);
   console.log(`drop-api compute plane enabled (kubeconfig: ${process.env.DROP_KUBECONFIG})`);
+  // The tenant egress allowlist blocks cross-tenant + platform-DB traffic by excluding
+  // the in-cluster pod/service CIDRs from outbound 443. The default (10.0.0.0/8) only
+  // covers LOCAL k3s — on EKS the pod/service CIDRs are often outside 10/8, which would
+  // SILENTLY leave cross-tenant 443 egress open. Fail loud-ish: insist it's set in prod.
+  if (!process.env.DROP_BLOCKED_EGRESS_CIDRS) {
+    console.warn(
+      "WARNING: DROP_BLOCKED_EGRESS_CIDRS unset — tenant egress isolation assumes the cluster pod/service CIDRs are inside 10.0.0.0/8 (local k3s only). Set it to the real pod+service CIDRs on EKS/any non-10.x cluster.",
+    );
+  }
 }
 
 const app = createApp({ cfg, meta, blob, db, users, verifier, kube });

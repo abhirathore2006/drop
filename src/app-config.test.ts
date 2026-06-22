@@ -64,3 +64,10 @@ test("sanitizeAppConfig is round-trip safe (CLI sanitizes -> JSON -> API re-sani
   const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!; // feed the sanitized object back in
   expect(twice.services).toEqual([{ internalPort: 80, protocol: "http" }]); // port survives, not defaulted to 8080
 });
+
+test("sanitizeAppConfig defaults resources (never unbounded) and trusted=true by default", () => {
+  const c = sanitizeAppConfig({ image: "x:1" })!;
+  expect(c.resources).toEqual({ cpu: "0.5", memory: "512Mi" }); // LIM-1: never unbounded
+  expect(c.trusted).toBe(true); // internal-trusted default (no sandbox dependency)
+  expect(sanitizeAppConfig({ image: "x:1", trusted: false })!.trusted).toBe(false); // opt into sandbox
+});

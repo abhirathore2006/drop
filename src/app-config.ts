@@ -24,9 +24,11 @@ export interface AppConfig {
   env?: Record<string, string>;
   services: AppService[];
   scale?: AppScale;
+  trusted?: boolean; // default true (no sandbox); false opts into the gVisor RuntimeClass (prod)
 }
 
 const DEFAULT_SERVICE: AppService = { internalPort: 8080, protocol: "http" };
+const DEFAULT_RESOURCES: AppResources = { cpu: "0.5", memory: "512Mi" };
 
 function str(v: unknown, max = 2048): string | undefined {
   return typeof v === "string" && v.length > 0 && v.length <= max ? v : undefined;
@@ -49,6 +51,8 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
     const memory = str(r.memory, 32);
     if (cpu || memory) cfg.resources = { ...(cpu ? { cpu } : {}), ...(memory ? { memory } : {}) };
   }
+  if (!cfg.resources) cfg.resources = { ...DEFAULT_RESOURCES }; // never unbounded (LIM-1)
+  cfg.trusted = raw.trusted !== false; // default true; explicit false opts into the sandbox
 
   if (raw.env && typeof raw.env === "object") {
     const env: Record<string, string> = {};
