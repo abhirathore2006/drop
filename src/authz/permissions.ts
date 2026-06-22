@@ -1,6 +1,6 @@
 import type { SiteRole } from "../db/schema.ts";
 
-export type Action = "read" | "publish" | "deploy" | "db:create" | "rollback" | "configure" | "share" | "transfer" | "delete";
+export type Action = "read" | "logs" | "publish" | "deploy" | "db:create" | "rollback" | "configure" | "share" | "transfer" | "delete";
 
 export interface Actor {
   email: string;
@@ -9,11 +9,13 @@ export interface Actor {
 }
 
 // read = see the workload in the dashboard / its versions & settings.
+// logs = read pod logs — gated ABOVE viewer: logs can contain env-injected secrets, and a
+//   viewer is deliberately metadata-only (it never sees the credentials Secret).
 // publish = ship a static-site version; deploy = ship a container-app revision.
 // db:create = provision/update a managed database. configure = set visibility / password.
 const MAP: Record<SiteRole, Action[]> = {
-  owner: ["read", "publish", "deploy", "db:create", "rollback", "configure", "share", "transfer", "delete"],
-  editor: ["read", "publish", "deploy", "db:create", "rollback"],
+  owner: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "share", "transfer", "delete"],
+  editor: ["read", "logs", "publish", "deploy", "db:create", "rollback"],
   viewer: ["read"],
 };
 

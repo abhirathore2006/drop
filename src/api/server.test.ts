@@ -518,6 +518,21 @@ test("app detail surfaces crash diagnostics (restarts + reason); logs endpoint r
   await db.destroy();
 });
 
+test("logs endpoint is gated above viewer (viewer 403 — logs may leak secrets; editor 200)", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
+  const ns = kube.applies[0]!.namespace;
+  kube.logsByName.set(`${ns}/billing`, "boot env: DATABASE_URL=postgres://app:s3cr3t@db\n");
+  // bob as VIEWER: can read metadata, but NOT logs (a viewer is metadata-only)
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "viewer" });
+  expect((await call(app, "GET", "/v1/sites/billing", "bob")).status).toBe(200);
+  expect((await call(app, "GET", "/v1/sites/billing/logs", "bob")).status).toBe(403);
+  // promote to EDITOR → logs allowed
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "editor" });
+  expect((await call(app, "GET", "/v1/sites/billing/logs", "bob")).status).toBe(200);
+  await db.destroy();
+});
+
 test("database detail: GET /v1/sites/:name returns connection ref (no password) + live status", async () => {
   const { app, db } = await mk();
   await call(app, "POST", "/v1/databases/bills", "alice", {});

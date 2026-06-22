@@ -406,7 +406,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "read")) return c.json({ error: "not permitted" }, 403);
+    // logs (not read): a viewer is metadata-only — pod logs can leak env-injected secrets.
+    if (!can(await actorFor(email, site), "logs")) return c.json({ error: "not permitted" }, 403);
     if (!d.kube || site.type === "site") return c.json({ logs: "" }); // static sites have no pods
     const tail = Math.min(Number(c.req.query("tail") ?? "100") || 100, 1000);
     let logs = "";

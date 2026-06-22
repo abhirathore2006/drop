@@ -114,14 +114,12 @@ export class KubeApiClient implements KubeClient {
     // add-on, applying then throwing would orphan the Deployment/Service/NetworkPolicy.
     await this.assertCrd("http.keda.sh");
     // namespace is provisioned (PSA-labeled) by applyTenant — don't re-apply a bare one here.
-    // The env Secret is REPLACED (delete then create), not server-side-merged: SSA on a
-    // Secret's stringData does NOT prune keys removed since the last deploy, so a removed env
-    // var (e.g. a stale DATABASE_URL) would otherwise linger and silently poison the app.
-    if (m.secret) {
-      const sp = this.secretPath(namespace, this.objName(m.secret));
-      await this.call("DELETE", sp); // 404 if absent — harmless (call() doesn't throw on non-2xx)
-      await this.apply(sp, m.secret as Record<string, unknown>);
-    }
+    // The env Secret is REPLACED, not server-side-merged: SSA on a Secret's stringData does
+    // NOT prune keys removed since the last deploy. DELETE unconditionally (404 if absent —
+    // harmless) so a removed env var, OR an env block removed ENTIRELY (m.secret undefined),
+    // never leaves a stale Secret behind; then re-create only if the app still has env.
+    await this.call("DELETE", this.secretPath(namespace, `${name}-env`));
+    if (m.secret) await this.apply(this.secretPath(namespace, this.objName(m.secret)), m.secret as Record<string, unknown>);
     await this.apply(this.deploymentPath(namespace, name), m.deployment as Record<string, unknown>);
     await this.apply(this.servicePath(namespace, name), m.service as Record<string, unknown>);
     await this.apply(this.netpolPath(namespace, this.objName(m.ingressPolicy)), m.ingressPolicy as Record<string, unknown>);
@@ -191,8 +189,9 @@ export class KubeApiClient implements KubeClient {
   }
 
   async getWorkloadLogs(namespace: string, name: string, tailLines = 100): Promise<string> {
-    // find a pod for this workload — apps label app.kubernetes.io/name; CNPG uses cnpg.io/cluster.
-    for (const sel of [`app.kubernetes.io/name=${name}`, `cnpg.io/cluster=${name}`]) {
+    // find a pod for this workload — apps label app.kubernetes.io/name; CNPG uses cnpg.io/cluster
+    // (scope to the PRIMARY so a multi-instance cluster doesn't return a replica's logs).
+    for (const sel of [`app.kubernetes.io/name=${name}`, `cnpg.io/cluster=${name},cnpg.io/instanceRole=primary`]) {
       const pr = await this.call("GET", `/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(sel)}`);
       if (pr.status >= 300) continue;
       const pods = (JSON.parse(pr.body).items ?? []) as any[];
