@@ -110,4 +110,7 @@ echo "✓ db hibernation CronJobs installed (toggle cnpg.io/hibernation on drop.
 say "Done — compute plane is up"
 echo "  KUBECONFIG=$KUBECONFIG"
 echo "  point the API at it:  DROP_KUBECONFIG=$KUBECONFIG  (and DROP_COMPUTE=1)"
+echo "  DB backups to local S3: set DROP_DB_BACKUP_S3_ENDPOINT to the in-cluster-reachable"
+echo "    Floci/MinIO address (NOT the API's host-side DROP_S3_ENDPOINT) +"
+echo "    DROP_DB_BACKUP_S3_EGRESS_CIDR. See docs/spikes/2026-06-22-local-cnpg-backups.md."
 echo "  tear down:  infra/local/compute-down.sh"
