@@ -19,7 +19,9 @@ import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
 import { sanitizeAppConfig, assertHttpOnly } from "../app-config.ts";
+import { sanitizeDatabaseConfig } from "../db-config.ts";
 import { appManifests, tenantManifests } from "../kube/manifests.ts";
+import { databaseManifests } from "../kube/cnpg.ts";
 import { tenantNamespace } from "./tenant.ts";
 import type { KubeClient } from "../kube/types.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
@@ -233,6 +235,76 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return c.json({ url: siteUrl(name), name, version: verId, image: appCfg.image });
   });
 
+  // ---- create database (managed Postgres via CNPG) ----
+  app.post("/v1/databases/:name", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const nameErr = validateName(name);
+    if (nameErr) return c.json({ error: nameErr }, 400);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const dbCfg = sanitizeDatabaseConfig(body);
+    if (!dbCfg) return c.json({ error: "invalid database config" }, 400);
+    if (dbCfg.name && dbCfg.name !== name) {
+      return c.json({ error: `database name "${dbCfg.name}" does not match target "${name}"` }, 400);
+    }
+
+    // resolve or claim — databases share the one name namespace with sites/apps
+    let site = await d.meta.getSitePlain(name);
+    if (!site) {
+      await ensureUser(email);
+      const claimed = await d.meta.claimSite(name, email, "database");
+      site = claimed ?? (await d.meta.getSitePlain(name));
+    }
+    if (!site) return c.json({ error: "claim failed" }, 500);
+    if (site.type !== "database") return c.json({ error: `name "${name}" is a ${site.type}, not a database` }, 409);
+    const actor = await actorFor(email, site);
+    if (!can(actor, "db:create")) return c.json({ error: `database is owned by ${site.owner}` }, 403);
+
+    // Local (Floci/MinIO): static S3 creds + an explicit endpointURL. Prod: real S3 via
+    // IRSA. Fail closed in prod if no IAM role is configured — otherwise we'd provision a
+    // DB whose backups silently never work (inheritFromIAMRole with no role bound).
+    const local = !!d.cfg.s3Endpoint;
+    if (!local && !d.cfg.dbBackupRoleArn) {
+      return c.json({ error: "database backups not configured: set DROP_DB_BACKUP_ROLE_ARN (IRSA role)" }, 501);
+    }
+
+    const verId = newVersionId(now());
+    const ns = tenantNamespace(site.owner);
+    await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs }));
+    const manifests = databaseManifests(dbCfg, {
+      name,
+      namespace: ns,
+      destinationPath: `s3://${d.cfg.s3Bucket}/databases/${ns}/${name}`,
+      apiServerCidrs: d.cfg.blockedEgressCidrs, // DB egress re-allows the in-cluster API on these CIDRs only
+      ...(local
+        ? { s3: { endpointURL: d.cfg.s3Endpoint, accessKeyId: d.cfg.s3KeyId, secretAccessKey: d.cfg.s3Secret } }
+        : { iamRoleArn: d.cfg.dbBackupRoleArn }),
+    });
+    await d.kube.applyDatabase(ns, name, manifests);
+
+    await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
+    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
+    // Connection reference — NEVER the password. CNPG creates the `<name>-rw` primary
+    // Service and a `<name>-app` Secret (user/db "app") in the tenant namespace; the app
+    // reads that Secret itself (same namespace).
+    return c.json({
+      name,
+      version: verId,
+      engine: dbCfg.engine,
+      host: `${name}-rw.${ns}.svc.cluster.local`,
+      port: 5432,
+      database: "app",
+      credentialsSecret: `${name}-app`,
+    });
+  });
+
   // ---- rollback ----
   app.post("/v1/sites/:name/rollback", async (c) => {
     const email = c.get("identity").email;
@@ -300,9 +372,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!can(await actorFor(email, site), "delete")) return c.json({ error: "owner only" }, 403);
-    // Tear down the running workload + env Secret BEFORE dropping metadata — otherwise
-    // the Deployment/Service/Secret/NetworkPolicy/HSO orphan in the tenant namespace.
+    // Tear down the running workload BEFORE dropping metadata — otherwise the k8s objects
+    // orphan in the tenant namespace. Apps: Deployment/Service/Secret/NetworkPolicy/HSO.
+    // Databases: the CNPG Cluster (cascades to pods) + ObjectStore/ScheduledBackup/policy.
     if (site.type === "app" && d.kube) await d.kube.deleteApp(tenantNamespace(site.owner), name);
+    else if (site.type === "database" && d.kube) await d.kube.deleteDatabase(tenantNamespace(site.owner), name);
     await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);
     return c.json({ deleted: name });
@@ -377,6 +451,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!can(await actorFor(email, site), "transfer")) return c.json({ error: "owner only" }, 403);
+    // Databases are STATEFUL and the tenant namespace is owner-derived. A metadata-only
+    // owner flip would orphan the running CNPG Cluster + PVCs in the old owner's namespace
+    // (unrecoverable — unlike an app you can't just "redeploy" without losing data). Block
+    // it; moving a DB across owners requires a real backup/restore migration.
+    if (site.type === "database") {
+      return c.json({ error: "databases cannot be transferred (stateful); back up and recreate under the new owner" }, 409);
+    }
     const body = (await c.req.json().catch(() => ({}))) as { email?: string };
     if (!body.email) return c.json({ error: "email required" }, 400);
     await ensureUser(body.email); // FK

@@ -53,3 +53,18 @@ test("loadAppDeploy throws when no app: section / no drop.yaml", async () => {
   await expect(loadAppDeploy(dirWith({ "drop.yaml": "site:\n  name: s\n" }))).rejects.toThrow(/app:/);
   await expect(loadAppDeploy(dirWith({ "index.html": "x" }))).rejects.toThrow(/no drop.yaml/);
 });
+
+import { loadDatabaseCreate } from "./resolve-name.ts";
+
+test("loadDatabaseCreate reads the database: section (storage + hibernation)", async () => {
+  const d = dirWith({ "drop.yaml": "database:\n  storage: 20Gi\n  hibernation: scheduled\n" });
+  const c = (await loadDatabaseCreate(d)) as any;
+  expect(c.storage).toBe("20Gi");
+  expect(c.hibernation).toBe("scheduled");
+  expect(c.engine).toBe("postgres-18");
+});
+
+test("loadDatabaseCreate returns {} (server defaults) when there's no drop.yaml or no database: section", async () => {
+  expect(await loadDatabaseCreate(dirWith({ "index.html": "x" }))).toEqual({}); // no drop.yaml
+  expect(await loadDatabaseCreate(dirWith({ "drop.yaml": "app:\n  image: x:1\n" }))).toEqual({}); // no database: section
+});

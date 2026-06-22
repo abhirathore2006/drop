@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { KubeClient } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
+import type { DatabaseManifests } from "./cnpg.ts";
 
 interface KubeConn {
   server: string;
@@ -86,6 +87,9 @@ export class KubeApiClient implements KubeClient {
   private netpolPath = (ns: string, n: string) => `/apis/networking.k8s.io/v1/namespaces/${ns}/networkpolicies/${n}`;
   private quotaPath = (ns: string, n: string) => `/api/v1/namespaces/${ns}/resourcequotas/${n}`;
   private limitRangePath = (ns: string, n: string) => `/api/v1/namespaces/${ns}/limitranges/${n}`;
+  private objectStorePath = (ns: string, n: string) => `/apis/barmancloud.cnpg.io/v1/namespaces/${ns}/objectstores/${n}`;
+  private clusterPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/clusters/${n}`;
+  private scheduledBackupPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/scheduledbackups/${n}`;
   private objName = (o: Record<string, unknown>) => (o.metadata as { name: string }).name;
 
   /** Fail fast if a CRD's API group isn't served yet (SSA returns a bare 404 otherwise). */
@@ -119,6 +123,29 @@ export class KubeApiClient implements KubeClient {
     await this.call("DELETE", this.servicePath(namespace, name));
     await this.call("DELETE", this.secretPath(namespace, `${name}-env`));
     await this.call("DELETE", this.deploymentPath(namespace, name));
+  }
+
+  async applyDatabase(namespace: string, name: string, m: DatabaseManifests): Promise<void> {
+    // Fail fast BEFORE creating any object: a cluster without CNPG + the Barman Cloud
+    // Plugin would orphan the Secret/NetworkPolicy and 404 on the Cluster/ObjectStore.
+    await this.assertCrd("postgresql.cnpg.io"); // the CNPG operator (Cluster/ScheduledBackup)
+    await this.assertCrd("barmancloud.cnpg.io"); // the Barman Cloud Plugin (ObjectStore)
+    // Order: creds Secret → ObjectStore (refs the Secret) → Cluster (refs the ObjectStore)
+    // → ScheduledBackup; NetworkPolicy any time.
+    if (m.secret) await this.apply(this.secretPath(namespace, this.objName(m.secret)), m.secret as Record<string, unknown>);
+    await this.apply(this.objectStorePath(namespace, this.objName(m.objectStore)), m.objectStore as Record<string, unknown>);
+    await this.apply(this.clusterPath(namespace, name), m.cluster as Record<string, unknown>);
+    await this.apply(this.scheduledBackupPath(namespace, this.objName(m.scheduledBackup)), m.scheduledBackup as Record<string, unknown>);
+    await this.apply(this.netpolPath(namespace, this.objName(m.networkPolicy)), m.networkPolicy as Record<string, unknown>);
+  }
+
+  async deleteDatabase(namespace: string, name: string): Promise<void> {
+    // Deleting the Cluster cascades to its instance pods; PVCs follow CNPG's retention.
+    await this.call("DELETE", this.scheduledBackupPath(namespace, `${name}-daily`));
+    await this.call("DELETE", this.clusterPath(namespace, name));
+    await this.call("DELETE", this.objectStorePath(namespace, `${name}-store`));
+    await this.call("DELETE", this.netpolPath(namespace, `${name}-db`));
+    await this.call("DELETE", this.secretPath(namespace, `${name}-backup-creds`));
   }
 
   async getApp(namespace: string, name: string): Promise<AppManifests | null> {

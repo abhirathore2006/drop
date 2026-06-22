@@ -1,5 +1,6 @@
 import type { Session } from "./session.ts";
 import type { AppConfig } from "../app-config.ts";
+import type { DatabaseConfig } from "../db-config.ts";
 
 export class Client {
   constructor(private s: Session) {}
@@ -32,6 +33,12 @@ export class Client {
     return this.req("POST", `/v1/apps/${name}`, {
       contentType: "application/json",
       body: JSON.stringify(app),
+    });
+  }
+  dbCreate(name: string, db: DatabaseConfig | Record<string, never>) {
+    return this.req("POST", `/v1/databases/${name}`, {
+      contentType: "application/json",
+      body: JSON.stringify(db),
     });
   }
   rollback(name: string, to: string) {

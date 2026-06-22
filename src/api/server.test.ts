@@ -25,7 +25,13 @@ async function mk(opts: { admins?: string[] } = {}) {
   const blob = new FakeBlob();
   const kube = new FakeKube();
   const meta = new MetaStore(db);
-  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
+  // DROP_S3_ENDPOINT set → "local" path for databases (static creds, no IRSA required).
+  const cfg = loadConfig({
+    DROP_S3_BUCKET: "b",
+    DROP_DATABASE_URL: "postgres://x/y",
+    DROP_BASE_DOMAIN: "drop.example.com",
+    DROP_S3_ENDPOINT: "http://localhost:4566",
+  });
   const verifier = new FakeVerifier({
     alice: { sub: "alice@example.com", email: "alice@example.com" },
     bob: { sub: "bob@example.com", email: "bob@example.com" },
@@ -373,6 +379,98 @@ test("auth: principal email is canonicalized to lowercase (no case-fold tenant c
   expect(site.owner).toBe("alice@example.com"); // owner stored canonical (not "Alice@Example.com")
   // the lowercase variant is the SAME principal → owner, not a foreign 403
   expect((await call(app, "POST", "/v1/apps/billing", "lower", { image: "x:2" })).status).toBe(200);
+  await db.destroy();
+});
+
+test("db:create claims type=database, applies CNPG manifests, returns a connection ref (no password)", async () => {
+  const { app, meta, kube, db } = await mk();
+  const res = await call(app, "POST", "/v1/databases/billing", "alice", { storage: "20Gi", hibernation: "scheduled" });
+  expect(res.status).toBe(200);
+  const j = await res.json();
+  expect(j.host).toBe(`billing-rw.${kube.dbApplies[0]!.namespace}.svc.cluster.local`);
+  expect(j.port).toBe(5432);
+  expect(j.database).toBe("app");
+  expect(j.credentialsSecret).toBe("billing-app");
+  expect(JSON.stringify(j)).not.toContain("password"); // never leak credentials in the response
+
+  const site = (await meta.getSitePlain("billing"))!;
+  expect(site.type).toBe("database");
+
+  expect(kube.dbApplies).toHaveLength(1);
+  const m = kube.dbApplies[0]!.manifests;
+  expect((m.cluster as any).spec.plugins[0].name).toBe("barman-cloud.cloudnative-pg.io");
+  expect((m.cluster as any).spec.storage.size).toBe("20Gi");
+  expect((m.cluster as any).metadata.labels["drop.dev/hibernation"]).toBe("scheduled");
+  expect((m.objectStore as any).apiVersion).toBe("barmancloud.cnpg.io/v1");
+  await db.destroy();
+});
+
+test("db:create provisions the tenant namespace (isolation objects) before the DB", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  expect(kube.tenantApplies).toHaveLength(1);
+  expect(kube.tenantApplies[0]!.namespace).toBe(kube.dbApplies[0]!.namespace);
+  await db.destroy();
+});
+
+test("db:create — names don't collide with sites/apps (409); non-owner 403; no kube 501", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "shared", await tgz({ "index.html": "x" })); // a site
+  expect((await call(app, "POST", "/v1/databases/shared", "alice", {})).status).toBe(409); // site, not a db
+  await call(app, "POST", "/v1/databases/billing", "alice", {}); // alice owns it
+  expect((await call(app, "POST", "/v1/databases/billing", "bob", {})).status).toBe(403); // foreign owner
+  await db.destroy();
+
+  const db2 = await makeTestDb();
+  const users = new UserStore(db2);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  const noKube = createApp({ cfg, meta: new MetaStore(db2), blob: new FakeBlob(), db: db2, users, verifier }); // no kube
+  expect((await call(noKube, "POST", "/v1/databases/x", "alice", {})).status).toBe(501);
+  await db2.destroy();
+});
+
+test("delete: a database tears down its CNPG objects (no orphan)", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  const ns = kube.dbApplies[0]!.namespace;
+  expect((await call(app, "DELETE", "/v1/sites/billing", "alice")).status).toBe(200);
+  expect(kube.dbDeletes).toContainEqual({ namespace: ns, name: "billing" });
+  await db.destroy();
+});
+
+test("db:create — prod (no S3 endpoint) fails closed without an IRSA role, succeeds with one", async () => {
+  const mkProd = async (extra: Record<string, string>) => {
+    const d = await makeTestDb();
+    const users = new UserStore(d);
+    const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com", ...extra });
+    const kube = new FakeKube();
+    const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+    return { d, kube, app: createApp({ cfg, meta: new MetaStore(d), blob: new FakeBlob(), db: d, users, verifier, kube }) };
+  };
+  // prod, no role → fail closed (501), no DB provisioned
+  const a = await mkProd({});
+  const r1 = await call(a.app, "POST", "/v1/databases/billing", "alice", {});
+  expect(r1.status).toBe(501);
+  expect(a.kube.dbApplies).toHaveLength(0);
+  await a.d.destroy();
+  // prod, with IRSA role → success; manifest uses IRSA (no static creds Secret, SA annotated)
+  const b = await mkProd({ DROP_DB_BACKUP_ROLE_ARN: "arn:aws:iam::1:role/drop-db" });
+  const r2 = await call(b.app, "POST", "/v1/databases/billing", "alice", {});
+  expect(r2.status).toBe(200);
+  const m = b.kube.dbApplies[0]!.manifests;
+  expect(m.secret).toBeUndefined();
+  expect((m.objectStore as any).spec.configuration.s3Credentials.inheritFromIAMRole).toBe(true);
+  expect((m.cluster as any).spec.serviceAccountTemplate.metadata.annotations["eks.amazonaws.com/role-arn"]).toBe("arn:aws:iam::1:role/drop-db");
+  await b.d.destroy();
+});
+
+test("transfer: a database is rejected (409) — stateful, can't be moved by a metadata flip", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  const res = await call(app, "POST", "/v1/sites/billing/transfer", "alice", { email: "bob@example.com" });
+  expect(res.status).toBe(409);
+  expect(kube.dbDeletes).toHaveLength(0); // nothing torn down — DB stays put with alice
   await db.destroy();
 });
 

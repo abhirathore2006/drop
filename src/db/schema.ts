@@ -16,7 +16,7 @@ export interface UsersTable {
 }
 
 export type Visibility = "public" | "private" | "password";
-export type WorkloadType = "site" | "app";
+export type WorkloadType = "site" | "app" | "database";
 
 export interface SitesTable {
   name: string;

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseDropYaml, CONFIG_FILE_YAML } from "../site-config.ts";
 import { parseAppConfig, type AppConfig } from "../app-config.ts";
+import { parseDatabaseConfig, type DatabaseConfig } from "../db-config.ts";
 import { validateName, generateName } from "../names.ts";
 
 export type NameSource = "arg" | "drop.yaml" | "generated";
@@ -54,4 +55,19 @@ export async function loadAppDeploy(
   }
   if (app.name) return { name: app.name, source: "drop.yaml", app };
   return { name: generateName(), source: "generated", app };
+}
+
+/**
+ * Load a database's config from a folder's drop.yaml `database:` section (storage,
+ * hibernation, …). Databases are named explicitly (no generated names — they're
+ * stateful), so the name is always the caller's argument. Returns an empty config
+ * (server applies defaults) when there's no drop.yaml or no database: section.
+ */
+export async function loadDatabaseCreate(dir: string): Promise<DatabaseConfig | Record<string, never>> {
+  try {
+    const text = await readFile(join(dir, CONFIG_FILE_YAML), "utf8");
+    return parseDatabaseConfig(text) ?? {};
+  } catch {
+    return {}; // no drop.yaml → server defaults (postgres-18, 10Gi, no hibernation)
+  }
 }

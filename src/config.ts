@@ -19,6 +19,7 @@ export interface Config {
   maxFiles: number;
   keepVersions: number;
   blockedEgressCidrs: string[]; // in-cluster/control-plane CIDRs excluded from the tenant HTTPS egress allowlist (MUST cover the live pod+service CIDRs)
+  dbBackupRoleArn?: string; // prod: IRSA role for CNPG database backups to S3 (omit locally — Floci uses static creds)
   edgeDiskCacheDir?: string; // edge: where to cache asset bytes on disk (off if unset)
   edgeDiskCacheBytes: number; // edge: disk cache budget
   interceptorUrl?: string; // edge: KEDA HTTP interceptor base URL — type=app hostnames proxy here (off if unset)
@@ -68,6 +69,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     edgeDiskCacheDir: env.DROP_EDGE_DISK_CACHE || undefined,
     edgeDiskCacheBytes: Number(env.DROP_EDGE_DISK_CACHE_BYTES ?? String(5 * 1024 * 1024 * 1024)),
     interceptorUrl: env.DROP_INTERCEPTOR_URL || undefined,
+    dbBackupRoleArn: env.DROP_DB_BACKUP_ROLE_ARN || undefined,
     docsDir: env.DROP_DOCS_DIR ?? "docs",
     cliDir: env.DROP_CLI_DIR ?? "dist",
   };

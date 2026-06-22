@@ -1,4 +1,5 @@
 import type { AppManifests, TenantManifests } from "./manifests.ts";
+import type { DatabaseManifests } from "./cnpg.ts";
 
 // The cluster boundary. The API depends on this port, never on a concrete k8s
 // client — so deploy logic is testable with FakeKube (no cluster), exactly as
@@ -13,4 +14,8 @@ export interface KubeClient {
   deleteApp(namespace: string, name: string): Promise<void>;
   /** Return the currently-applied manifests for an app, or null if none. */
   getApp(namespace: string, name: string): Promise<AppManifests | null>;
+  /** Create-or-update a managed database: CNPG ObjectStore + Cluster + ScheduledBackup + NetworkPolicy (+ creds Secret). */
+  applyDatabase(namespace: string, name: string, manifests: DatabaseManifests): Promise<void>;
+  /** Remove the database's CNPG objects. Safe if absent. */
+  deleteDatabase(namespace: string, name: string): Promise<void>;
 }

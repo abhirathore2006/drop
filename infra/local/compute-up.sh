@@ -66,13 +66,29 @@ aws eks update-kubeconfig --name "$CLUSTER" --kubeconfig "${KUBECONFIG:-$HOME/.k
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/drop-local.config}"
 kubectl get nodes
 
-say "Install operators: KEDA + KEDA HTTP add-on + CloudNativePG"
+say "Install operators: KEDA + KEDA HTTP add-on + cert-manager + CloudNativePG + Barman Cloud Plugin"
 helm repo add kedacore https://kedacore.github.io/charts >/dev/null 2>&1 || true
 helm repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null 2>&1 || true
+helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
 helm repo update >/dev/null
 helm upgrade --install keda kedacore/keda --namespace keda --create-namespace --wait
 helm upgrade --install keda-http-add-on kedacore/keda-add-ons-http --namespace keda --wait
-helm upgrade --install cnpg cnpg/cloudnative-pg --namespace cnpg-system --create-namespace --wait
+
+# cert-manager is a HARD PREREQUISITE of the Barman Cloud Plugin (it issues the plugin's
+# CNPG-I gRPC TLS certs). v1.20.2 is the current latest — the plugin docs don't pin a
+# version, so this is our pin, not an upstream-tested pairing.
+helm upgrade --install cert-manager jetstack/cert-manager --namespace cert-manager --create-namespace \
+  --version v1.20.2 --set crds.enabled=true --wait
+
+# CNPG operator: chart 0.28.3 -> operator app v1.29.1 (the Barman Cloud Plugin needs CNPG >= 1.26).
+helm upgrade --install cnpg cnpg/cloudnative-pg --namespace cnpg-system --create-namespace --version 0.28.3 --wait
+
+# Barman Cloud Plugin v0.13.0 — backups go through an ObjectStore CR + Cluster.spec.plugins
+# (the in-tree spec.backup.barmanObjectStore is DEPRECATED as of CNPG v1.26). The plugin's
+# documented install is `kubectl apply` of the release manifest (a community Helm chart also
+# exists in cloudnative-pg/charts, but kubectl apply is the documented path). Lands in cnpg-system.
+kubectl apply -f https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.13.0/manifest.yaml
+kubectl -n cnpg-system rollout status deploy/barman-cloud --timeout=180s || true
 
 say "Register the gvisor RuntimeClass (PROD sandbox for untrusted images)"
 # Note: runsc is NOT installed on the locally-nested k3s — it needs nested virt/ptrace
@@ -86,6 +102,10 @@ metadata: { name: gvisor }
 handler: runsc
 YAML
 echo "✓ gvisor RuntimeClass registered (untrusted-tenant sandbox; prod-only runtime)"
+
+say "Install the scheduled DB hibernation CronJobs (C5 — feasible substitute for request-wake)"
+kubectl apply -f "$(dirname "$0")/db-hibernation.yaml"
+echo "✓ db hibernation CronJobs installed (toggle cnpg.io/hibernation on drop.dev/hibernation=scheduled DBs)"
 
 say "Done — compute plane is up"
 echo "  KUBECONFIG=$KUBECONFIG"

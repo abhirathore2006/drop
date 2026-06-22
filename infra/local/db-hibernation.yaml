@@ -1,0 +1,121 @@
+# Phase C5 — Scheduled database hibernation (the feasible substitute for request-wake).
+#
+# Request-triggered DB wake is NOT possible: KEDA-HTTP wakes on L7 HTTP, but Postgres is
+# raw TCP. So instead of waking on demand, Drop hibernates DBs that opt in
+# (drop.yaml `database.hibernation: scheduled`, surfaced as the label
+# drop.dev/hibernation=scheduled) on a schedule, using CNPG's declarative hibernation
+# annotation `cnpg.io/hibernation=on|off` (deletes the Pods, RETAINS the PVCs).
+#
+# Two CronJobs toggle the annotation across ALL tenant namespaces. NOTE: CronJob.schedule
+# is STANDARD 5-field cron (NOT the 6-field/seconds-first cron CNPG's ScheduledBackup uses).
+#
+# This is the one component with legitimate CROSS-TENANT authority (it patches Clusters in
+# every tenant namespace), so it is hardened + is the highest-value target to protect:
+#   - the ClusterRole is least-privilege for the RESOURCE (only clusters, only get/list/patch),
+#   - the job pods run non-root, no-privesc, all caps dropped, seccomp RuntimeDefault,
+#   - the image is version-pinned (pin by DIGEST in prod).
+# PROD HARDENING (beyond this file): RBAC can't restrict `patch` to a single field, so add a
+# ValidatingAdmissionPolicy rejecting any change from this ServiceAccount other than
+# metadata.annotations['cnpg.io/hibernation'], and a NetworkPolicy limiting the job to the API server.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: drop-db-hibernator
+  namespace: cnpg-system
+---
+# Cluster-scoped: tenant namespaces are created dynamically, so the toggler needs to
+# reach Clusters in any namespace. Least privilege: only get/list/patch CNPG Clusters.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: drop-db-hibernator
+rules:
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: drop-db-hibernator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: drop-db-hibernator
+subjects:
+  - kind: ServiceAccount
+    name: drop-db-hibernator
+    namespace: cnpg-system
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: drop-db-hibernate
+  namespace: cnpg-system
+spec:
+  schedule: "0 2 * * *" # 02:00 daily — hibernate opted-in DBs (5-field cron)
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: drop-db-hibernator
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: hibernate
+              image: docker.io/bitnami/kubectl:1.31.4 # pin by digest in prod
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  kubectl get clusters.postgresql.cnpg.io -A -l drop.dev/hibernation=scheduled \
+                    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
+                  | while read -r ns name; do
+                      [ -z "$ns" ] && continue
+                      echo "hibernating $ns/$name"
+                      kubectl annotate cluster -n "$ns" "$name" --overwrite cnpg.io/hibernation=on
+                    done
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: drop-db-wake
+  namespace: cnpg-system
+spec:
+  schedule: "0 8 * * *" # 08:00 daily — wake opted-in DBs back up
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: drop-db-hibernator
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: wake
+              image: docker.io/bitnami/kubectl:1.31.4 # pin by digest in prod
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  kubectl get clusters.postgresql.cnpg.io -A -l drop.dev/hibernation=scheduled \
+                    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
+                  | while read -r ns name; do
+                      [ -z "$ns" ] && continue
+                      echo "waking $ns/$name"
+                      kubectl annotate cluster -n "$ns" "$name" --overwrite cnpg.io/hibernation=off
+                    done

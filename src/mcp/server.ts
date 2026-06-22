@@ -5,7 +5,7 @@ import { defaultSessionPath, loadSession, saveSession, type Session } from "../c
 import { Client } from "../cli/client.ts";
 import { packDir } from "../cli/pack.ts";
 import { devLoginToken, serverLogin } from "../cli/login.ts";
-import { resolveSiteName, loadAppDeploy } from "../cli/resolve-name.ts";
+import { resolveSiteName, loadAppDeploy, loadDatabaseCreate } from "../cli/resolve-name.ts";
 
 function apiBase(s?: Session): string {
   return process.env.DROP_API ?? s?.apiBase ?? "https://api.drop.example.com";
@@ -98,6 +98,22 @@ export function buildMcp(): McpServer {
         const { name: resolved, source, app } = await loadAppDeploy(resolve(directory), name);
         const res = await (await getClient()).deploy(resolved, app);
         return { ...res, name: resolved, nameSource: source };
+      }),
+  );
+
+  server.registerTool(
+    "db_create",
+    {
+      description: "Create a managed Postgres database. Apps in the same owner's namespace connect via the returned host + the credentials Secret (the password is never returned).",
+      inputSchema: {
+        name: z.string().describe("database name (DNS-safe; databases are named explicitly, never generated)"),
+        directory: z.string().optional().describe("folder whose drop.yaml database: section supplies storage/hibernation (defaults to none → server defaults)"),
+      },
+    },
+    async ({ name, directory }) =>
+      run(async () => {
+        const db = await loadDatabaseCreate(directory ? resolve(directory) : ".");
+        return await (await getClient()).dbCreate(name, db);
       }),
   );
 

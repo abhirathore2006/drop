@@ -5,7 +5,8 @@ import { loadConfig, saveConfig, resolveApiBase } from "./config.ts";
 import { Client } from "./client.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
-import { resolveSiteName, loadAppDeploy } from "./resolve-name.ts";
+import { resolveSiteName, loadAppDeploy, loadDatabaseCreate } from "./resolve-name.ts";
+import { validateName } from "../names.ts";
 
 async function client(): Promise<Client> {
   try {
@@ -94,6 +95,20 @@ export function buildProgram(): Command {
       if (source === "generated") {
         console.log(`  tip: add  name: ${name}  under app: in drop.yaml to keep this URL across deploys.`);
       }
+    });
+
+  program
+    .command("db:create <name> [dir]")
+    .description("Create a managed Postgres database (reads the database: section from dir/drop.yaml if present)")
+    .action(async (name: string, dir?: string) => {
+      const err = validateName(name);
+      if (err) throw new Error(err);
+      const db = await loadDatabaseCreate(dir ?? ".");
+      console.log(`  ▸ creating database ${name}…`);
+      const res = await (await client()).dbCreate(name, db);
+      console.log(`  ✓ ${res.engine} ready`);
+      console.log(`     host: ${res.host}:${res.port}  db: ${res.database}`);
+      console.log(`     credentials: read Secret '${res.credentialsSecret}' in your app's namespace (envFrom) — the password is never printed.`);
     });
 
   program
