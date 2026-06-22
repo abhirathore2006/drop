@@ -8,6 +8,7 @@ import { FakeKube } from "../kube/fake.ts";
 import { FakeSecretStore } from "../secrets/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { UserStore } from "../users/store.ts";
+import { OrgStore } from "../orgs/store.ts";
 import { makeTestDb } from "../db/testdb.ts";
 import { FakeVerifier } from "../auth/oidc.ts";
 import { loadConfig } from "../config.ts";
@@ -38,7 +39,8 @@ async function mk(opts: { admins?: string[] } = {}) {
     alice: { sub: "alice@example.com", email: "alice@example.com" },
     bob: { sub: "bob@example.com", email: "bob@example.com" },
   });
-  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets }), meta, blob, kube, secrets, db, users };
+  const orgs = new OrgStore(db);
+  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, orgs }), meta, blob, kube, secrets, orgs, db, users };
 }
 
 const pub = (app: any, tok: string, name: string, body: Buffer) =>
@@ -329,7 +331,7 @@ test("deploy: 501 when compute is not enabled (no kube)", async () => {
   const users = new UserStore(db);
   const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
   const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
-  const app = createApp({ cfg, meta: new MetaStore(db), blob: new FakeBlob(), db, users, verifier, secrets: new FakeSecretStore() }); // no kube
+  const app = createApp({ cfg, meta: new MetaStore(db), blob: new FakeBlob(), db, users, verifier, secrets: new FakeSecretStore(), orgs: new OrgStore(db) }); // no kube
   expect((await call(app, "POST", "/v1/apps/x", "alice", { image: "x:1" })).status).toBe(501);
   await db.destroy();
 });
@@ -389,12 +391,37 @@ test("auth: principal email is canonicalized to lowercase (no case-fold tenant c
     upper: { sub: "Alice@Example.com", email: "Alice@Example.com" },
     lower: { sub: "alice@example.com", email: "alice@example.com" },
   });
-  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube, secrets: new FakeSecretStore() });
+  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube, secrets: new FakeSecretStore(), orgs: new OrgStore(db) });
   expect((await call(app, "POST", "/v1/apps/billing", "upper", { image: "x:1" })).status).toBe(200);
   const site = (await meta.getSitePlain("billing"))!;
   expect(site.owner).toBe("alice@example.com"); // owner stored canonical (not "Alice@Example.com")
   // the lowercase variant is the SAME principal → owner, not a foreign 403
   expect((await call(app, "POST", "/v1/apps/billing", "lower", { image: "x:2" })).status).toBe(200);
+  await db.destroy();
+});
+
+test("orgs: team org grants org-WIDE rights; non-members blocked; member can't delete; personal default", async () => {
+  const { app, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  // deploy a resource INTO the org (?org=acme)
+  expect((await call(app, "POST", "/v1/apps/billing?org=acme", "alice", { image: "x:1" })).status).toBe(200);
+  // bob is not a member → no access to the org's resource, and can't create in the org
+  expect((await call(app, "GET", "/v1/sites/billing", "bob")).status).toBe(403);
+  expect((await call(app, "POST", "/v1/apps/other?org=acme", "bob", { image: "x:1" })).status).toBe(403);
+  // add bob as an org member → org-WIDE access (read + deploy + configure across the org)
+  expect((await call(app, "POST", "/v1/orgs/acme/members", "alice", { email: "bob@example.com", role: "member" })).status).toBe(200);
+  expect((await call(app, "GET", "/v1/sites/billing", "bob")).status).toBe(200);
+  // an org member sees the org's resources in their list (not just per-resource grants)
+  expect((await (await call(app, "GET", "/v1/sites", "bob")).json()).sites.map((s: any) => s.name)).toContain("billing");
+  expect((await call(app, "PUT", "/v1/apps/billing/secrets/API_KEY", "bob", { value: "v" })).status).toBe(200); // member → configure
+  // a member can't delete (owner/admin only)
+  expect((await call(app, "DELETE", "/v1/sites/billing", "bob")).status).toBe(403);
+  // listing orgs shows both the personal org and the team org
+  const orgs = (await (await call(app, "GET", "/v1/orgs", "alice")).json()).orgs;
+  expect(orgs.map((o: any) => o.slug)).toContain("acme");
+  expect(orgs.some((o: any) => o.kind === "personal")).toBe(true);
+  // a bad slug → 400
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "Bad Slug" })).status).toBe(400);
   await db.destroy();
 });
 
@@ -604,7 +631,7 @@ test("db:create — names don't collide with sites/apps (409); non-owner 403; no
   const users = new UserStore(db2);
   const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
   const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
-  const noKube = createApp({ cfg, meta: new MetaStore(db2), blob: new FakeBlob(), db: db2, users, verifier, secrets: new FakeSecretStore() }); // no kube
+  const noKube = createApp({ cfg, meta: new MetaStore(db2), blob: new FakeBlob(), db: db2, users, verifier, secrets: new FakeSecretStore(), orgs: new OrgStore(db2) }); // no kube
   expect((await call(noKube, "POST", "/v1/databases/x", "alice", {})).status).toBe(501);
   await db2.destroy();
 });
@@ -625,7 +652,7 @@ test("db:create — prod (no S3 endpoint) fails closed without an IRSA role, suc
     const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com", ...extra });
     const kube = new FakeKube();
     const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
-    return { d, kube, app: createApp({ cfg, meta: new MetaStore(d), blob: new FakeBlob(), db: d, users, verifier, kube, secrets: new FakeSecretStore() }) };
+    return { d, kube, app: createApp({ cfg, meta: new MetaStore(d), blob: new FakeBlob(), db: d, users, verifier, kube, secrets: new FakeSecretStore(), orgs: new OrgStore(d) }) };
   };
   // prod, no role → fail closed (501), no DB provisioned
   const a = await mkProd({});
@@ -775,7 +802,7 @@ test("deploy: tenant egress except is sourced from config (DROP_BLOCKED_EGRESS_C
     DROP_BLOCKED_EGRESS_CIDRS: "100.64.0.0/10,172.16.0.0/12",
   });
   const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
-  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube, secrets: new FakeSecretStore() });
+  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube, secrets: new FakeSecretStore(), orgs: new OrgStore(db) });
   await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
   const np = kube.tenantApplies[0]!.manifests.networkPolicy as any;
   const https = np.spec.egress.find((e: any) => (e.ports ?? []).some((p: any) => p.port === 443));

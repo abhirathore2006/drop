@@ -186,15 +186,22 @@ export class MetaStore {
     await this.db.deleteFrom("sites").where("name", "=", name).execute(); // cascades members + versions
   }
 
-  /** Names of sites a user owns or collaborates on. */
+  /** Names of resources a user can see: per-resource grants (site_members) UNION every resource in
+   *  an org they belong to (org-wide membership). */
   async listUserSites(email: string): Promise<string[]> {
+    const e = email.toLowerCase();
     const rows = await this.db
-      .selectFrom("site_members")
-      .select("site_name")
-      .where("email", "=", email)
-      .orderBy("site_name")
+      .selectFrom("sites")
+      .select("name")
+      .where((eb) =>
+        eb.or([
+          eb("name", "in", (q) => q.selectFrom("site_members").select("site_name").where("email", "=", e)),
+          eb("org_id", "in", (q) => q.selectFrom("org_members").select("org_id").where("email", "=", e)),
+        ]),
+      )
+      .orderBy("name")
       .execute();
-    return rows.map((r) => r.site_name);
+    return rows.map((r) => r.name);
   }
 
   /** Keyset page over all sites (admin browse), optional name prefix / owner / type filters. */
