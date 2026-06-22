@@ -93,6 +93,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   };
   app.get("/cli/drop.mjs", () => serveCli("drop.js"));
   app.get("/cli/mcp.mjs", () => serveCli("mcp.js"));
+  // The admin console bundle (React; built to <cliDir>/ui/app.js by build.mjs).
+  app.get("/ui/app.js", () => serveCli("ui/app.js"));
 
   app.use(
     "/v1/*",
