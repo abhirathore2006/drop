@@ -97,6 +97,7 @@ export class KubeApiClient implements KubeClient {
   private clusterPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/clusters/${n}`;
   private scheduledBackupPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/scheduledbackups/${n}`;
   private jobPath = (ns: string, n: string) => `/apis/batch/v1/namespaces/${ns}/jobs/${n}`;
+  private scaledObjectPath = (ns: string, n: string) => `/apis/keda.sh/v1alpha1/namespaces/${ns}/scaledobjects/${n}`;
   private objName = (o: Record<string, unknown>) => (o.metadata as { name: string }).name;
 
   /** Fail fast if a CRD's API group isn't served yet (SSA returns a bare 404 otherwise). */
@@ -162,6 +163,65 @@ export class KubeApiClient implements KubeClient {
     await this.call("DELETE", this.netpolPath(namespace, `${name}-db`));
     await this.call("DELETE", this.secretPath(namespace, `${name}-backup-creds`));
     await this.call("DELETE", this.secretPath(namespace, PWSET_SECRET(name))); // reap a crash-orphaned rotation Secret
+  }
+
+  // --- generic per-key Secret mutations (used by KubeSecretStore for app secrets) ---
+  // MERGE-patch, NOT server-side-apply: a merge-patch adds/updates exactly the named key and leaves
+  // the others intact, so setting one secret never prunes the rest (SSA would). JSON-merge `null`
+  // deletes a key. These are write-path only — no method ever returns a value.
+
+  /** Create-or-update one key in a Secret (create the Opaque Secret if it doesn't exist yet). */
+  async ensureSecretKey(namespace: string, name: string, key: string, value: string): Promise<void> {
+    const body = JSON.stringify({ stringData: { [key]: value } });
+    const r = await this.call("PATCH", this.secretPath(namespace, name), { body, contentType: "application/merge-patch+json" });
+    if (r.status === 404) {
+      const create = await this.call("POST", `/api/v1/namespaces/${namespace}/secrets`, {
+        body: JSON.stringify({
+          apiVersion: "v1",
+          kind: "Secret",
+          type: "Opaque",
+          metadata: { name, namespace, labels: { "app.kubernetes.io/managed-by": "drop", "app.kubernetes.io/name": name } },
+          stringData: { [key]: value },
+        }),
+        contentType: "application/json",
+      });
+      if (create.status === 409) return void (await this.ensureSecretKey(namespace, name, key, value)); // raced — retry the patch
+      if (create.status >= 300) throw new Error(`create secret ${name} -> ${create.status}: ${create.body.slice(0, 200)}`);
+      return;
+    }
+    if (r.status >= 300) throw new Error(`patch secret ${name} -> ${r.status}: ${r.body.slice(0, 200)}`);
+  }
+
+  /** Remove one key from a Secret. Idempotent (absent Secret/key → no-op). */
+  async removeSecretKey(namespace: string, name: string, key: string): Promise<void> {
+    const r = await this.call("PATCH", this.secretPath(namespace, name), {
+      body: JSON.stringify({ data: { [key]: null } }), // JSON-merge null deletes the key
+      contentType: "application/merge-patch+json",
+    });
+    if (r.status === 404) return;
+    if (r.status >= 300) throw new Error(`remove secret key ${name}/${key} -> ${r.status}`);
+  }
+
+  /** Key NAMES present in a Secret (never values). Empty if the Secret is absent. */
+  async listSecretDataKeys(namespace: string, name: string): Promise<string[]> {
+    const r = await this.call("GET", this.secretPath(namespace, name));
+    if (r.status === 404) return [];
+    if (r.status >= 300) throw new Error(`get secret ${name} -> ${r.status}`);
+    return Object.keys((JSON.parse(r.body).data ?? {}) as Record<string, string>).sort();
+  }
+
+  /** Delete a whole Secret object. Safe if absent. */
+  async deleteSecretObject(namespace: string, name: string): Promise<void> {
+    await this.call("DELETE", this.secretPath(namespace, name));
+  }
+
+  // --- External Secrets Operator ExternalSecret (aws/gcp/azure/vault secret injection) ---
+  private externalSecretPath = (ns: string, n: string) => `/apis/external-secrets.io/v1/namespaces/${ns}/externalsecrets/${n}`;
+  async applyExternalSecret(namespace: string, name: string, obj: Record<string, unknown>): Promise<void> {
+    await this.apply(this.externalSecretPath(namespace, name), obj); // SSA: data list = exactly the current keys
+  }
+  async deleteExternalSecret(namespace: string, name: string): Promise<void> {
+    await this.call("DELETE", this.externalSecretPath(namespace, name));
   }
 
   private podsPath = (ns: string, n: string) =>
@@ -300,6 +360,52 @@ export class KubeApiClient implements KubeClient {
     } finally {
       await cleanup();
     }
+  }
+
+  // --- app lifecycle: restart / stop (true-offline) / start ---
+
+  async restartApp(namespace: string, name: string, restartedAt: string): Promise<void> {
+    const r = await this.call("PATCH", this.deploymentPath(namespace, name), {
+      body: JSON.stringify({ spec: { template: { metadata: { annotations: { "drop.dev/restartedAt": restartedAt } } } } }),
+      contentType: "application/merge-patch+json",
+    });
+    if (r.status === 404) throw new Error(`no such app: ${name}`);
+    if (r.status >= 300) throw new Error(`restartApp ${name} -> ${r.status}: ${r.body.slice(0, 200)}`);
+  }
+
+  async stopApp(namespace: string, name: string): Promise<void> {
+    // Pause KEDA: paused-replicas:0 pins the workload at 0 AND makes KEDA ignore the HTTP scaler,
+    // so traffic to the interceptor can't wake it — true offline. KEDA creates the ScaledObject
+    // asynchronously from the HTTPScaledObject, so on a (re)deploy it may not exist yet — retry
+    // until it does, or the app could wake on traffic before the pause lands.
+    let paused = false;
+    for (let i = 0; i < 15; i++) {
+      const so = await this.call("PATCH", this.scaledObjectPath(namespace, name), {
+        body: JSON.stringify({ metadata: { annotations: { "autoscaling.keda.sh/paused-replicas": "0" } } }),
+        contentType: "application/merge-patch+json",
+      });
+      if (so.status < 300) { paused = true; break; }
+      if (so.status !== 404) throw new Error(`stopApp ${name}: pause -> ${so.status}`);
+      await sleep(2000); // ScaledObject not created yet — wait for KEDA's reconcile
+    }
+    // Scale the Deployment to 0 now so it goes down immediately (KEDA keeps it there while paused).
+    const dp = await this.call("PATCH", this.deploymentPath(namespace, name), {
+      body: JSON.stringify({ spec: { replicas: 0 } }),
+      contentType: "application/merge-patch+json",
+    });
+    if (dp.status === 404) throw new Error(`no such app: ${name}`);
+    if (dp.status >= 300) throw new Error(`stopApp ${name}: scale -> ${dp.status}`);
+    if (!paused) throw new Error(`stopApp ${name}: KEDA ScaledObject never appeared — not paused, may wake on traffic`);
+  }
+
+  async startApp(namespace: string, name: string): Promise<void> {
+    // Remove the pause annotation → KEDA resumes scaling per the HTTPScaledObject (0..max on traffic).
+    const so = await this.call("PATCH", this.scaledObjectPath(namespace, name), {
+      body: JSON.stringify({ metadata: { annotations: { "autoscaling.keda.sh/paused-replicas": null } } }),
+      contentType: "application/merge-patch+json",
+    });
+    if (so.status === 404) throw new Error(`no such app: ${name}`);
+    if (so.status >= 300) throw new Error(`startApp ${name}: unpause -> ${so.status}`);
   }
 
   async getDatabaseStatus(namespace: string, name: string): Promise<DatabaseStatus | null> {

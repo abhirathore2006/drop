@@ -125,8 +125,15 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
               name: ctx.name,
               image: app.image,
               ports: [{ containerPort }],
-              // env lives in a Secret (not plaintext in the pod spec) — SEC-5
-              ...(hasEnv ? { envFrom: [{ secretRef: { name: secretName } }] } : {}),
+              // env lives in Secrets (not plaintext in the pod spec) — SEC-5. Two sources:
+              //  - <name>-env: non-secret config from drop.yaml app.env (only when present).
+              //  - <name>-secret: write-only app secrets managed out-of-band (CLI/dashboard/MCP),
+              //    written by the SecretStore / synced by ESO. Listed LAST so a secret overrides a
+              //    same-named config value; optional so a not-yet-created Secret never blocks startup.
+              envFrom: [
+                ...(hasEnv ? [{ secretRef: { name: secretName } }] : []),
+                { secretRef: { name: `${ctx.name}-secret`, optional: true } },
+              ],
               ...(limits ? { resources: { limits, requests: limits } } : {}),
               // Minimal, non-breaking baseline: block privilege escalation + default
               // seccomp, but DON'T drop caps (most official images chown/setuid at

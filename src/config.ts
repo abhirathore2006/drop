@@ -27,6 +27,14 @@ export interface Config {
   interceptorUrl?: string; // edge: KEDA HTTP interceptor base URL — type=app hostnames proxy here (off if unset)
   docsDir: string; // api: static docs site served at /docs (relative to cwd)
   cliDir: string; // api: dir holding the CLI bundles served at /cli (relative to cwd)
+  // --- app secrets backend (chosen at deploy time) ---
+  secretBackend: "kube" | "aws"; // "kube" = write the <app>-secret Secret directly; "aws" = AWS Secrets Manager + ESO
+  secretManagerEndpoint?: string; // local Floci endpoint for the SM API (host-side); omit for real AWS
+  secretManagerRegion: string;
+  secretManagerKeyId?: string; // static creds for the SM client (Floci: "test"); omit in prod → IRSA
+  secretManagerSecret?: string;
+  secretStoreName: string; // the ESO ClusterSecretStore the app ExternalSecrets reference (e.g. "floci")
+  secretPathPrefix: string; // SM name prefix → drop/<owner>/<app>/<KEY>
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -76,5 +84,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     dbBackupEgressCidr: env.DROP_DB_BACKUP_S3_EGRESS_CIDR || undefined,
     docsDir: env.DROP_DOCS_DIR ?? "docs",
     cliDir: env.DROP_CLI_DIR ?? "dist",
+    secretBackend: env.DROP_SECRET_BACKEND === "aws" ? "aws" : "kube",
+    secretManagerEndpoint: env.DROP_SECRET_MANAGER_ENDPOINT || undefined,
+    secretManagerRegion: env.DROP_SECRET_MANAGER_REGION ?? env.DROP_S3_REGION ?? "us-east-1",
+    secretManagerKeyId: env.DROP_SECRET_MANAGER_KEY_ID || undefined,
+    secretManagerSecret: env.DROP_SECRET_MANAGER_SECRET || undefined,
+    secretStoreName: env.DROP_SECRET_STORE_NAME ?? "floci",
+    secretPathPrefix: env.DROP_SECRET_PATH_PREFIX ?? "drop",
   };
 }

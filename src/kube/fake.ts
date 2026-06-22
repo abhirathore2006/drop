@@ -75,4 +75,16 @@ export class FakeKube implements KubeClient {
   async getWorkloadLogs(namespace: string, name: string): Promise<string> {
     return this.logsByName.get(this.key(namespace, name)) ?? "";
   }
+
+  readonly restarts: { namespace: string; name: string }[] = [];
+  readonly stopped = new Set<string>();
+  async restartApp(namespace: string, name: string): Promise<void> {
+    this.restarts.push({ namespace, name });
+  }
+  async stopApp(namespace: string, name: string): Promise<void> {
+    this.stopped.add(this.key(namespace, name));
+  }
+  async startApp(namespace: string, name: string): Promise<void> {
+    this.stopped.delete(this.key(namespace, name));
+  }
 }

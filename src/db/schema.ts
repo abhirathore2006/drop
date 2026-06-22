@@ -25,8 +25,19 @@ export interface SitesTable {
   visibility: ColumnType<Visibility, Visibility | undefined, Visibility>;
   password_hash: string | null;
   config: JsonConfig;
+  runtime_state: ColumnType<RuntimeState, RuntimeState | undefined, RuntimeState>;
   created_at: Generated<Ts>;
   updated_at: Ts;
+}
+
+export type RuntimeState = "running" | "stopped";
+
+export interface AppSecretKeysTable {
+  app: string;
+  key: string;
+  fingerprint: string;
+  updated_by: string;
+  updated_at: Generated<Ts>;
 }
 
 export type SiteRole = "owner" | "editor" | "viewer";
@@ -67,4 +78,5 @@ export interface Database {
   site_members: SiteMembersTable;
   versions: VersionsTable;
   auth_handles: AuthHandlesTable;
+  app_secret_keys: AppSecretKeysTable;
 }

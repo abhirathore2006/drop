@@ -45,7 +45,7 @@ export interface Detail {
   current: string | null;
   url: string;
   versions: Version[];
-  app?: { image: string | null; scale: { min: number; max: number } | null; status: AppStatus | null };
+  app?: { image: string | null; scale: { min: number; max: number } | null; status: AppStatus | null; runtimeState?: "running" | "stopped" };
   database?: { host: string; port: number; database: string; user: string; credentialsSecret: string; status: DatabaseStatus | null };
 }
 
@@ -77,4 +77,11 @@ export const api = {
   remove: (name: string) => req("DELETE", `/v1/sites/${name}`),
   setUserStatus: (email: string, status: "active" | "suspended") =>
     req("POST", `/v1/admin/users/${encodeURIComponent(email)}/status`, { status }),
+  // app secrets (write-only) + lifecycle
+  listSecrets: (name: string) => req<{ secrets: { key: string; fingerprint: string; updatedBy: string; updatedAt: string }[] }>("GET", `/v1/apps/${name}/secrets`),
+  setSecret: (name: string, key: string, value: string) => req("PUT", `/v1/apps/${name}/secrets/${encodeURIComponent(key)}`, { value }),
+  deleteSecret: (name: string, key: string) => req("DELETE", `/v1/apps/${name}/secrets/${encodeURIComponent(key)}`),
+  restartApp: (name: string) => req("POST", `/v1/apps/${name}/restart`, {}),
+  stopApp: (name: string) => req("POST", `/v1/apps/${name}/stop`, {}),
+  startApp: (name: string) => req("POST", `/v1/apps/${name}/start`, {}),
 };

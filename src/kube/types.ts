@@ -27,6 +27,12 @@ export interface KubeClient {
   getDatabaseStatus(namespace: string, name: string): Promise<DatabaseStatus | null>;
   /** Recent log lines from the workload's pods (newest pod), for crash diagnostics. "" if none. */
   getWorkloadLogs(namespace: string, name: string, tailLines?: number): Promise<string>;
+  /** Roll the app's pods (bump a pod-template annotation) — picks up new env/secrets. */
+  restartApp(namespace: string, name: string, restartedAt: string): Promise<void>;
+  /** Take the app TRULY offline: pause KEDA (pin to 0, ignore traffic) + scale the Deployment to 0. */
+  stopApp(namespace: string, name: string): Promise<void>;
+  /** Resume: un-pause KEDA so it scales per the HTTPScaledObject again. */
+  startApp(namespace: string, name: string): Promise<void>;
 }
 
 /** Thrown by setDatabasePassword when the role password WAS successfully changed but persisting

@@ -77,9 +77,29 @@ const m0002_workload_type: Migration = {
   },
 };
 
+// App secrets: a registry of secret KEY NAMES + metadata (never values — values live in the
+// SecretStore backend). Plus per-app runtime_state for the stop/start lifecycle.
+const m0003_app_secrets: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("app_secret_keys")
+      .addColumn("app", "text", (c) => c.notNull().references("sites.name").onDelete("cascade"))
+      .addColumn("key", "text", (c) => c.notNull())
+      .addColumn("fingerprint", "text", (c) => c.notNull())
+      .addColumn("updated_by", "text", (c) => c.notNull())
+      .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addPrimaryKeyConstraint("app_secret_keys_pk", ["app", "key"])
+      .execute();
+    await db.schema.alterTable("sites").addColumn("runtime_state", "text", (c) => c.notNull().defaultTo("running")).execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
-    return { "0001_init": m0001_init, "0002_workload_type": m0002_workload_type };
+    return { "0001_init": m0001_init, "0002_workload_type": m0002_workload_type, "0003_app_secrets": m0003_app_secrets };
   }
 }

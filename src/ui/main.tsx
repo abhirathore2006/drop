@@ -88,6 +88,7 @@ h2 .count{background:#11151a;border:1px solid #2a2f37;border-radius:20px;padding
 .empty{margin-top:60px;text-align:center}.empty code{margin:0 3px}
 code.reveal{display:inline-block;color:#9be15d;background:#0e1f14;border-color:#1f3a26;word-break:break-all;user-select:all}
 .warn{margin-top:8px;color:#f0b86b;font-size:12px;line-height:1.5;background:#241a0e;border:1px solid #3a2c14;border-radius:6px;padding:7px 9px}
+.secadd{display:flex;gap:6px;margin-top:10px}.secadd input{flex:1;min-width:0;padding:7px 9px;border-radius:8px;border:1px solid #2a2f37;background:#11151a;color:inherit;font:inherit;font-size:13px}.secadd input:first-child{flex:0 0 38%}
 `;
 
 const style = document.createElement("style");

@@ -47,6 +47,27 @@ export class Client {
       body: JSON.stringify(password ? { password } : {}),
     });
   }
+  setSecret(app: string, key: string, value: string) {
+    return this.req("PUT", `/v1/apps/${app}/secrets/${encodeURIComponent(key)}`, {
+      contentType: "application/json",
+      body: JSON.stringify({ value }),
+    });
+  }
+  listSecrets(app: string) {
+    return this.req("GET", `/v1/apps/${app}/secrets`);
+  }
+  deleteSecret(app: string, key: string) {
+    return this.req("DELETE", `/v1/apps/${app}/secrets/${encodeURIComponent(key)}`);
+  }
+  restartApp(app: string) {
+    return this.req("POST", `/v1/apps/${app}/restart`);
+  }
+  stopApp(app: string) {
+    return this.req("POST", `/v1/apps/${app}/stop`);
+  }
+  startApp(app: string) {
+    return this.req("POST", `/v1/apps/${app}/start`);
+  }
   rollback(name: string, to: string) {
     return this.req("POST", `/v1/sites/${name}/rollback`, {
       contentType: "application/json",

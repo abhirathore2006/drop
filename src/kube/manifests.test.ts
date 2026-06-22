@@ -90,7 +90,8 @@ test("appManifests: env in a Secret; interceptor ingress on the container port; 
   expect((m.secret as any).stringData.TOKEN).toBe("s3cr3t");
   const ctr = (m.deployment as any).spec.template.spec.containers[0];
   expect(ctr.env).toBeUndefined();
-  expect(ctr.envFrom[0].secretRef.name).toBe("billing-env");
+  // config Secret first, then the write-only app-secret (optional, LAST → wins on key collision).
+  expect(ctr.envFrom).toEqual([{ secretRef: { name: "billing-env" } }, { secretRef: { name: "billing-secret", optional: true } }]);
   expect((m.deployment as any).spec.template.spec.runtimeClassName).toBe("gvisor");
   const ip = m.ingressPolicy as any;
   expect(ip.kind).toBe("NetworkPolicy");
@@ -98,9 +99,10 @@ test("appManifests: env in a Secret; interceptor ingress on the container port; 
   expect(ip.spec.ingress[0].ports[0].port).toBe(8080); // CONTAINER port, not Service :80
 });
 
-test("appManifests: no runtimeClassName / no secret when sandbox off & no env (internal-trusted default)", () => {
+test("appManifests: no runtimeClassName / no config Secret when sandbox off & no env; still envFroms the optional app-secret", () => {
   const m = appManifests({ image: "x:1", services: [{ internalPort: 80, protocol: "http" }] }, { name: "a", namespace: "n", host: "a.x" });
   expect((m.deployment as any).spec.template.spec.runtimeClassName).toBeUndefined();
-  expect(m.secret).toBeUndefined();
-  expect((m.deployment as any).spec.template.spec.containers[0].envFrom).toBeUndefined();
+  expect(m.secret).toBeUndefined(); // no <name>-env config Secret
+  // even with no config env, the app-secret ref is always present (optional) so set secrets inject.
+  expect((m.deployment as any).spec.template.spec.containers[0].envFrom).toEqual([{ secretRef: { name: "a-secret", optional: true } }]);
 });

@@ -65,6 +65,81 @@ function Logs({ name }: { name: string }) {
   );
 }
 
+// Write-only secrets panel: list KEY names (values are never shown), add/update (write-only), delete.
+function Secrets({ name, canManage, onChanged }: { name: string; canManage: boolean; onChanged: () => void }) {
+  const [keys, setKeys] = useState<{ key: string; fingerprint: string; updatedBy: string; updatedAt: string }[] | null>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [nk, setNk] = useState("");
+  const [nv, setNv] = useState("");
+  const load = useCallback(async () => {
+    try {
+      setKeys((await api.listSecrets(name)).secrets);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, [name]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setErr("");
+    try {
+      await fn();
+      await load();
+      onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="sec">
+      <h3>secrets ({keys?.length ?? 0})</h3>
+      {err && <div className="err">{err}</div>}
+      {keys?.length === 0 && <p className="muted">no secrets — injected as env vars, write-only</p>}
+      {keys?.map((k) => (
+        <div className="item" key={k.key}>
+          <div className="meta">
+            <b>{k.key}</b>
+            <div className="sub">
+              •••••• · {k.updatedBy} · {new Date(k.updatedAt).toISOString().slice(0, 10)}
+            </div>
+          </div>
+          {canManage && (
+            <button className="btn sm danger" disabled={busy} title="delete" onClick={() => run(() => api.deleteSecret(name, k.key))}>
+              ✕
+            </button>
+          )}
+        </div>
+      ))}
+      {canManage && (
+        <form
+          className="secadd"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (nk && nv)
+              void run(async () => {
+                await api.setSecret(name, nk, nv);
+                setNk("");
+                setNv("");
+              });
+          }}
+        >
+          <input placeholder="KEY" value={nk} onChange={(e) => setNk(e.target.value.toUpperCase())} />
+          <input placeholder="value (write-only)" type="password" value={nv} onChange={(e) => setNv(e.target.value)} />
+          <button className="btn sm" disabled={busy || !nk || !nv}>
+            set
+          </button>
+        </form>
+      )}
+      {canManage && !!keys?.length && <div className="sub">set/changed secrets apply on the next <b>restart</b>.</div>}
+    </div>
+  );
+}
+
 function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClose: () => void; onChanged: () => void }) {
   const [d, setD] = useState<Detail | null>(null);
   const [err, setErr] = useState("");
@@ -99,6 +174,8 @@ function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClos
   };
 
   const isOwner = d?.owner === me.email || me.admin;
+  // lifecycle (restart/stop/start) is editor+; secrets are owner/admin.
+  const canDeploy = !!me.admin || !!d?.members.some((m) => m.email === me.email && (m.role === "owner" || m.role === "editor"));
 
   const rotatePw = async () => {
     if (!confirm(`Rotate the database password for ${d!.name}? The new password is shown once; apps must restart to pick it up.`)) return;
@@ -158,8 +235,25 @@ function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClos
                     "—"
                   )}
                 </Field>
+                {canDeploy && (
+                  <Field label="lifecycle">
+                    <button className="btn sm" disabled={busy} onClick={() => act(() => api.restartApp(d.name))}>
+                      restart
+                    </button>{" "}
+                    {d.app.runtimeState === "stopped" ? (
+                      <button className="btn sm" disabled={busy} onClick={() => act(() => api.startApp(d.name))}>
+                        start
+                      </button>
+                    ) : (
+                      <button className="btn sm danger" disabled={busy} onClick={() => act(() => api.stopApp(d.name))}>
+                        stop
+                      </button>
+                    )}
+                  </Field>
+                )}
               </div>
             )}
+            {d.type === "app" && <Secrets name={d.name} canManage={isOwner} onChanged={onChanged} />}
 
             {/* DATABASE */}
             {d.type === "database" && d.database && (

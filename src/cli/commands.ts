@@ -138,6 +138,41 @@ export function buildProgram(): Command {
       if (res.warning) console.error(`  ⚠ ${res.warning}`);
     });
 
+  const secrets = program.command("secrets").description("Manage an app's write-only secrets (set/list-keys/delete; values are never shown)");
+  secrets
+    .command("set <app> <key> [value]")
+    .description("Set/rotate a secret. Value via stdin if omitted (recommended); restart the app to apply.")
+    .option("--stdin", "read the value from stdin")
+    .action(async (appName: string, key: string, value: string | undefined, opts: { stdin?: boolean }) => {
+      let v = value;
+      if (opts.stdin || value === undefined) v = (await readStdin()).replace(/\n$/, "");
+      else console.error("  ⚠ a secret value passed as an argument is saved to your shell history — prefer piping it via --stdin.");
+      if (!v) throw new Error("value required (pass an argument, or pipe it in with --stdin)");
+      const res = await (await client()).setSecret(appName, key, v);
+      console.log(`  ✓ secret ${res.key} set (${res.fingerprint}) — not shown. apply it with:  drop restart ${appName}`);
+    });
+  secrets
+    .command("ls <app>")
+    .description("List an app's secret keys (names + metadata only)")
+    .action(async (appName: string) => show(await (await client()).listSecrets(appName)));
+  secrets
+    .command("rm <app> <key>")
+    .description("Delete a secret")
+    .action(async (appName: string, key: string) => show(await (await client()).deleteSecret(appName, key)));
+
+  program
+    .command("restart <app>")
+    .description("Roll the app's pods (applies newly-set secrets/config)")
+    .action(async (appName: string) => show(await (await client()).restartApp(appName)));
+  program
+    .command("stop <app>")
+    .description("Take the app offline (true stop — won't wake on traffic)")
+    .action(async (appName: string) => show(await (await client()).stopApp(appName)));
+  program
+    .command("start <app>")
+    .description("Bring a stopped app back online")
+    .action(async (appName: string) => show(await (await client()).startApp(appName)));
+
   program
     .command("rollback <name>")
     .description("Roll back to the previous (or --to) version")

@@ -1,7 +1,7 @@
 import type { SiteConfig } from "../site-config.ts";
-import type { SiteRole, Visibility, WorkloadType } from "../db/schema.ts";
+import type { RuntimeState, SiteRole, Visibility, WorkloadType } from "../db/schema.ts";
 
-export type { Visibility, WorkloadType };
+export type { Visibility, WorkloadType, RuntimeState };
 
 export interface Member {
   email: string;
@@ -17,8 +17,17 @@ export interface Site {
   members: Member[]; // full membership incl. owner
   currentVersion: string | null;
   visibility: Visibility;
+  runtimeState: RuntimeState; // "running" | "stopped" (apps; stop/start lifecycle)
   config?: SiteConfig; // current version's parsed drop.yaml (denormalized for the edge)
   createdAt: string; // ISO
+  updatedAt: string; // ISO
+}
+
+/** A secret KEY's metadata — never the value. */
+export interface SecretKeyMeta {
+  key: string;
+  fingerprint: string;
+  updatedBy: string;
   updatedAt: string; // ISO
 }
 

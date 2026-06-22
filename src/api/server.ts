@@ -24,6 +24,8 @@ import { appManifests, tenantManifests } from "../kube/manifests.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
 import { tenantNamespace } from "./tenant.ts";
 import { PasswordSyncError, type KubeClient } from "../kube/types.ts";
+import type { SecretStore } from "../secrets/types.ts";
+import { fingerprint, validateSecretKey } from "../secrets/secrets.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { dashboardHtml } from "./dashboard.ts";
 
@@ -35,6 +37,7 @@ export interface Deps {
   users: UserStore;
   verifier: Verifier;
   kube?: KubeClient; // optional: when absent, /v1/apps returns 501 (static-only instance)
+  secrets: SecretStore; // app-secrets backend (kube locally, AWS Secrets Manager / etc. in prod)
   now?: () => Date;
 }
 
@@ -239,11 +242,100 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs })); // namespace + NetworkPolicy + quota + LimitRange
     const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox: !appCfg.trusted });
     await d.kube.applyApp(ns, name, manifests);
+    // Reconcile the secret-injection wiring (no-op for kube; (re)writes the ESO ExternalSecret for
+    // external backends) using the current key registry.
+    const secretKeys = (await d.meta.listSecretKeys(name)).map((k) => k.key);
+    await d.secrets.ensureBinding({ owner: site.owner, app: name, namespace: ns }, secretKeys);
+    // A redeploy must not silently wake a STOPPED app — re-apply the offline state.
+    if (site.runtimeState === "stopped") await d.kube.stopApp(ns, name);
 
     await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
     await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
     return c.json({ url: siteUrl(name), name, version: verId, image: appCfg.image });
   });
+
+  // ---- app secrets: write-only (set/list-keys/delete; values are NEVER returned) ----
+  // Gated at `configure` (owner/admin), like set-visibility / db:password. The value lives only in
+  // the SecretStore backend + the pod env — never in a response, log, or the metastore.
+  const resolveAppForSecrets = async (c: any): Promise<{ site: Site; email: string } | { err: Response }> => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return { err: c.json({ error: "no such app" }, 404) };
+    if (site.type !== "app") return { err: c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409) };
+    if (!can(await actorFor(email, site), "configure")) return { err: c.json({ error: "owner only" }, 403) };
+    return { site, email };
+  };
+
+  app.put("/v1/apps/:name/secrets/:key", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const key = c.req.param("key");
+    const keyErr = validateSecretKey(key);
+    if (keyErr) return c.json({ error: keyErr }, 400);
+    const r = await resolveAppForSecrets(c);
+    if ("err" in r) return r.err;
+    const body = (await c.req.json().catch(() => ({}))) as { value?: unknown };
+    if (typeof body.value !== "string" || body.value.length === 0) return c.json({ error: "value required (non-empty string)" }, 400);
+    if (body.value.length > 64 * 1024) return c.json({ error: "value too large (max 64KiB)" }, 400);
+    const scope = { owner: r.site.owner, app: r.site.name, namespace: tenantNamespace(r.site.owner) };
+    await d.secrets.setSecret(scope, key, body.value);
+    const fp = fingerprint(body.value);
+    await d.meta.upsertSecretKey(r.site.name, key, fp, r.email);
+    await d.secrets.ensureBinding(scope, (await d.meta.listSecretKeys(r.site.name)).map((k) => k.key));
+    return c.json({ key, fingerprint: fp, updatedBy: r.email, updatedAt: now().toISOString() }); // NEVER the value
+  });
+
+  app.get("/v1/apps/:name/secrets", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const r = await resolveAppForSecrets(c);
+    if ("err" in r) return r.err;
+    // key NAMES + metadata only — never values. (Restart to apply pending changes; the UI compares
+    // fingerprints to flag "changed".)
+    return c.json({ secrets: await d.meta.listSecretKeys(r.site.name) });
+  });
+
+  app.delete("/v1/apps/:name/secrets/:key", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const key = c.req.param("key");
+    const keyErr = validateSecretKey(key);
+    if (keyErr) return c.json({ error: keyErr }, 400);
+    const r = await resolveAppForSecrets(c);
+    if ("err" in r) return r.err;
+    const scope = { owner: r.site.owner, app: r.site.name, namespace: tenantNamespace(r.site.owner) };
+    await d.secrets.deleteSecret(scope, key);
+    await d.meta.deleteSecretKey(r.site.name, key);
+    await d.secrets.ensureBinding(scope, (await d.meta.listSecretKeys(r.site.name)).map((k) => k.key));
+    return c.json({ key, deleted: true });
+  });
+
+  // ---- app lifecycle: restart / stop (true-offline) / start (editor+; operational) ----
+  const lifecycle = (action: "restart" | "stop" | "start") => async (c: any) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such app" }, 404);
+    if (site.type !== "app") return c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409);
+    if (!can(await actorFor(email, site), "deploy")) return c.json({ error: "not permitted" }, 403);
+    const ns = tenantNamespace(site.owner);
+    if (action === "restart") {
+      // A restart while stopped would silently no-op (the pods are pinned to 0) — be explicit.
+      if (site.runtimeState === "stopped") return c.json({ error: "app is stopped — `start` it first" }, 409);
+      await d.kube.restartApp(ns, name, now().toISOString());
+      return c.json({ name, restarted: true });
+    }
+    if (action === "stop") {
+      await d.kube.stopApp(ns, name);
+      await d.meta.setRuntimeState(name, "stopped");
+      return c.json({ name, state: "stopped" });
+    }
+    await d.kube.startApp(ns, name);
+    await d.meta.setRuntimeState(name, "running");
+    return c.json({ name, state: "running" });
+  };
+  app.post("/v1/apps/:name/restart", lifecycle("restart"));
+  app.post("/v1/apps/:name/stop", lifecycle("stop"));
+  app.post("/v1/apps/:name/start", lifecycle("start"));
 
   // ---- create database (managed Postgres via CNPG) ----
   app.post("/v1/databases/:name", async (c) => {
@@ -426,6 +518,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       } catch {
         /* leave status null */
       }
+      a.runtimeState = site.runtimeState; // "running" | "stopped"
+      if (site.runtimeState === "stopped" && a.status) (a.status as Record<string, unknown>).reason = "Stopped";
       out.app = a;
     } else if (d.kube && site.type === "database") {
       const ns = tenantNamespace(site.owner);
@@ -496,8 +590,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // Tear down the running workload BEFORE dropping metadata — otherwise the k8s objects
     // orphan in the tenant namespace. Apps: Deployment/Service/Secret/NetworkPolicy/HSO.
     // Databases: the CNPG Cluster (cascades to pods) + ObjectStore/ScheduledBackup/policy.
-    if (site.type === "app" && d.kube) await d.kube.deleteApp(tenantNamespace(site.owner), name);
-    else if (site.type === "database" && d.kube) await d.kube.deleteDatabase(tenantNamespace(site.owner), name);
+    if (site.type === "app" && d.kube) {
+      await d.kube.deleteApp(tenantNamespace(site.owner), name);
+      // Remove the app's secret material (the <app>-secret Secret + any SM secrets/ExternalSecret).
+      // Log (don't swallow) a teardown failure — otherwise SM secrets orphan with no record.
+      await d.secrets
+        .destroy({ owner: site.owner, app: name, namespace: tenantNamespace(site.owner) })
+        .catch((e) => console.error(`delete ${name}: secrets.destroy failed (possible orphaned secret material): ${(e as Error).message}`));
+    } else if (site.type === "database" && d.kube) await d.kube.deleteDatabase(tenantNamespace(site.owner), name);
     await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);
     return c.json({ deleted: name });
@@ -611,8 +711,15 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // An app's workload lives in the OLD owner's tenant namespace; the namespace is
     // owner-derived, so a transfer must remove it there. The new owner redeploys to
     // provision it in their own namespace (avoids cross-tenant objects + a dangling Secret).
-    if (site.type === "app" && d.kube) await d.kube.deleteApp(tenantNamespace(oldOwner), name);
-    return c.json({ owner: newOwner });
+    // SECRETS are owner-namespace/path-derived too: tear them down (else they'd leak in the old
+    // namespace AND the registry would advertise keys whose values now live nowhere the new owner
+    // can reach). Transfer DROPS secrets — the new owner re-sets them, then redeploys.
+    if (site.type === "app" && d.kube) {
+      await d.kube.deleteApp(tenantNamespace(oldOwner), name);
+      await d.secrets.destroy({ owner: oldOwner, app: name, namespace: tenantNamespace(oldOwner) }).catch((e) => console.error(`transfer ${name}: secrets.destroy failed (orphaned secret material in ${oldOwner}'s namespace): ${(e as Error).message}`));
+      await d.meta.clearSecretKeys(name); // the new owner re-sets secrets under their namespace
+    }
+    return c.json({ owner: newOwner, secretsDropped: site.type === "app" });
   });
 
   return app;

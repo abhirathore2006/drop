@@ -162,5 +162,40 @@ export function buildMcp(): McpServer {
     async ({ name, email }) => run(() => getClient().then((c) => c.transfer(name, email))),
   );
 
+  // ---- app secrets (write-only) + lifecycle ----
+  server.registerTool(
+    "secret_set",
+    {
+      description: "Set/rotate an app secret (owner only). Stored write-only and injected as an env var; the value is never readable again. Restart the app to apply.",
+      inputSchema: { app: z.string(), key: z.string().describe("UPPER_SNAKE env-var name"), value: z.string() },
+    },
+    async ({ app, key, value }) => run(() => getClient().then((c) => c.setSecret(app, key, value))),
+  );
+  server.registerTool(
+    "secret_list",
+    { description: "List an app's secret KEY names + metadata (never the values).", inputSchema: { app: z.string() } },
+    async ({ app }) => run(() => getClient().then((c) => c.listSecrets(app))),
+  );
+  server.registerTool(
+    "secret_delete",
+    { description: "Delete an app secret (owner only).", inputSchema: { app: z.string(), key: z.string() } },
+    async ({ app, key }) => run(() => getClient().then((c) => c.deleteSecret(app, key))),
+  );
+  server.registerTool(
+    "app_restart",
+    { description: "Roll an app's pods (applies newly-set secrets/config).", inputSchema: { app: z.string() } },
+    async ({ app }) => run(() => getClient().then((c) => c.restartApp(app))),
+  );
+  server.registerTool(
+    "app_stop",
+    { description: "Take an app offline (true stop — won't wake on traffic).", inputSchema: { app: z.string() } },
+    async ({ app }) => run(() => getClient().then((c) => c.stopApp(app))),
+  );
+  server.registerTool(
+    "app_start",
+    { description: "Bring a stopped app back online.", inputSchema: { app: z.string() } },
+    async ({ app }) => run(() => getClient().then((c) => c.startApp(app))),
+  );
+
   return server;
 }

@@ -8,6 +8,8 @@ import {
   type Visibility,
   type WorkloadType,
   type VersionMeta,
+  type SecretKeyMeta,
+  type RuntimeState,
   SiteNotFoundError,
 } from "./types.ts";
 
@@ -38,6 +40,7 @@ export class MetaStore {
       collaborators: members.filter((m) => m.role !== "owner").map((m) => m.email),
       currentVersion: (row.current_version as string | null) ?? null,
       visibility: row.visibility as Visibility,
+      runtimeState: (row.runtime_state as "running" | "stopped") ?? "running",
       config: parseCfg(row.config),
       createdAt: iso(row.created_at),
       updatedAt: iso(row.updated_at),
@@ -241,5 +244,36 @@ export class MetaStore {
       bytes: Number(r.bytes),
       config: parseCfg(r.config),
     }));
+  }
+
+  // ---- app secret KEY registry (names + metadata only — values live in the SecretStore) ----
+
+  /** Record/refresh a secret key's metadata (never the value). */
+  async upsertSecretKey(app: string, key: string, fingerprint: string, updatedBy: string): Promise<void> {
+    await this.db
+      .insertInto("app_secret_keys")
+      .values({ app, key, fingerprint, updated_by: updatedBy, updated_at: sql`now()` })
+      .onConflict((oc) => oc.columns(["app", "key"]).doUpdateSet({ fingerprint, updated_by: updatedBy, updated_at: sql`now()` }))
+      .execute();
+  }
+
+  /** A site's secret keys + metadata, sorted by key. */
+  async listSecretKeys(app: string): Promise<SecretKeyMeta[]> {
+    const rows = await this.db.selectFrom("app_secret_keys").selectAll().where("app", "=", app).orderBy("key").execute();
+    return rows.map((r) => ({ key: r.key, fingerprint: r.fingerprint, updatedBy: r.updated_by, updatedAt: iso(r.updated_at) }));
+  }
+
+  async deleteSecretKey(app: string, key: string): Promise<void> {
+    await this.db.deleteFrom("app_secret_keys").where("app", "=", app).where("key", "=", key).execute();
+  }
+
+  /** Drop the entire secret-key registry for an app (e.g. on ownership transfer). */
+  async clearSecretKeys(app: string): Promise<void> {
+    await this.db.deleteFrom("app_secret_keys").where("app", "=", app).execute();
+  }
+
+  /** Set an app's runtime state (stop/start lifecycle). */
+  async setRuntimeState(name: string, state: RuntimeState): Promise<void> {
+    await this.db.updateTable("sites").set({ runtime_state: state, updated_at: sql`now()` }).where("name", "=", name).execute();
   }
 }

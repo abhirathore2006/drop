@@ -9,6 +9,7 @@ import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
 import { createApp } from "../src/api/server.ts";
 import { KubeApiClient } from "../src/kube/client.ts";
+import { makeSecretStore } from "../src/secrets/factory.ts";
 import type { Verifier } from "../src/auth/types.ts";
 import type { KubeClient } from "../src/kube/types.ts";
 
@@ -57,9 +58,11 @@ if (cfg.devAuth) {
 
 // Compute plane is opt-in: set DROP_KUBECONFIG to enable container-app deploys
 // (POST /v1/apps). Without it, the API is static-only and /v1/apps returns 501.
+let kubeApi: KubeApiClient | undefined;
 let kube: KubeClient | undefined;
 if (process.env.DROP_KUBECONFIG) {
-  kube = new KubeApiClient(process.env.DROP_KUBECONFIG);
+  kubeApi = new KubeApiClient(process.env.DROP_KUBECONFIG);
+  kube = kubeApi;
   console.log(`drop-api compute plane enabled (kubeconfig: ${process.env.DROP_KUBECONFIG})`);
   // The tenant egress allowlist blocks cross-tenant + platform-DB traffic by excluding
   // the in-cluster pod/service CIDRs from outbound 443. The default (10.0.0.0/8) only
@@ -72,7 +75,9 @@ if (process.env.DROP_KUBECONFIG) {
   }
 }
 
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube });
+const secrets = makeSecretStore(cfg, kubeApi);
+if (kube) console.log(`drop-api secrets backend: ${cfg.secretBackend}`);
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });
