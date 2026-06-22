@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { databaseManifests } from "./cnpg.ts";
+import { databaseManifests, databasePasswordJob } from "./cnpg.ts";
 import type { DatabaseConfig } from "../db-config.ts";
 
 const base: DatabaseConfig = { engine: "postgres-18", storage: "10Gi", hibernation: "none" };
@@ -60,6 +60,60 @@ test("databaseManifests: Cluster wires the Barman plugin (not the deprecated inl
   expect(cl.spec.storage.size).toBe("10Gi");
   expect(cl.spec.resources.limits.memory).toBeDefined();
   expect(cl.spec.resources.requests.memory).toBeDefined();
+});
+
+test("databaseManifests: appPassword emits a basic-auth creds Secret + bootstraps the Cluster from it; absent on update", () => {
+  const create = databaseManifests(base, { ...localCtx, appPassword: "s3cr3t-pw-value" });
+  const sec = create.appSecret as any;
+  expect(sec.kind).toBe("Secret");
+  expect(sec.type).toBe("kubernetes.io/basic-auth");
+  expect(sec.metadata.name).toBe("billing-db-app"); // the connection Secret apps read
+  expect(sec.stringData.username).toBe("app");
+  expect(sec.stringData.password).toBe("s3cr3t-pw-value");
+  // the Cluster bootstraps the `app` user/db from THIS Secret (platform-owned, not CNPG-auto)
+  const boot = (create.cluster as any).spec.bootstrap.initdb;
+  expect(boot.database).toBe("app");
+  expect(boot.owner).toBe("app");
+  expect(boot.secret.name).toBe("billing-db-app");
+  // NOT managed.roles — that path doesn't reliably rotate the bootstrap app user's password.
+  expect((create.cluster as any).spec.managed).toBeUndefined();
+
+  // update (no appPassword): the Secret is NOT re-emitted (never silently rotate), but the
+  // immutable bootstrap ref is still present in the desired spec.
+  const update = databaseManifests(base, localCtx);
+  expect(update.appSecret).toBeUndefined();
+  expect((update.cluster as any).spec.bootstrap.initdb.secret.name).toBe("billing-db-app");
+});
+
+test("databasePasswordJob: idempotent in-namespace ALTER, injection-safe, secret-sourced, locked-down", () => {
+  const job = databasePasswordJob({ name: "billing-db", namespace: "drop-t-alice", image: "ghcr.io/x/pg:18" }) as any;
+  expect(job.kind).toBe("Job");
+  expect(job.metadata.name).toBe("billing-db-pwset");
+  expect(job.metadata.namespace).toBe("drop-t-alice");
+  expect(job.spec.ttlSecondsAfterFinished).toBeGreaterThan(0); // auto-GC even if the caller's delete is missed
+  expect(job.spec.activeDeadlineSeconds).toBeGreaterThan(0); // a stuck connect can't pin it open forever
+  const c = job.spec.template.spec.containers[0];
+  expect(c.image).toBe("ghcr.io/x/pg:18");
+  // newpw is read from env via \getenv and server-side-quoted (:'newpw') — never interpolated
+  // into the SQL string, so an arbitrary password can't break out.
+  const sql = c.args.join("\n");
+  expect(sql).toContain("\\getenv newpw NEWPW");
+  expect(sql).toContain("ALTER ROLE app PASSWORD :'newpw'");
+  expect(sql).toContain('PGPASSWORD="$NEWPW"'); // idempotent probe: if NEWPW already works → exit 0
+  const env = Object.fromEntries(c.env.map((e: any) => [e.name, e]));
+  // BOTH passwords arrive via secretKeyRef — NO plaintext password in the Job/Pod spec (or audit log).
+  expect(env.NEWPW.value).toBeUndefined();
+  expect(env.NEWPW.valueFrom.secretKeyRef.name).toBe("billing-db-pwset"); // short-lived NEWPW Secret
+  expect(env.NEWPW.valueFrom.secretKeyRef.key).toBe("NEWPW");
+  expect(env.PGUSER.value).toBe("app");
+  expect(env.PGHOST.value).toBe("billing-db-rw");
+  expect(env.PGPASSWORD.valueFrom.secretKeyRef.name).toBe("billing-db-app"); // connect with CURRENT creds
+  expect(env.PGPASSWORD.valueFrom.secretKeyRef.key).toBe("password");
+  // hardened pod (no priv-esc, all caps dropped, non-root)
+  expect(c.securityContext.allowPrivilegeEscalation).toBe(false);
+  expect(c.securityContext.capabilities.drop).toEqual(["ALL"]);
+  expect(job.spec.template.spec.securityContext.runAsNonRoot).toBe(true);
+  expect(job.spec.template.spec.restartPolicy).toBe("Never");
 });
 
 test("databaseManifests: prod Cluster sets the IRSA serviceAccountTemplate annotation", () => {

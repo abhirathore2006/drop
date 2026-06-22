@@ -46,7 +46,7 @@ export interface Detail {
   url: string;
   versions: Version[];
   app?: { image: string | null; scale: { min: number; max: number } | null; status: AppStatus | null };
-  database?: { host: string; port: number; database: string; credentialsSecret: string; status: DatabaseStatus | null };
+  database?: { host: string; port: number; database: string; user: string; credentialsSecret: string; status: DatabaseStatus | null };
 }
 
 async function req<T = any>(method: string, path: string, body?: unknown): Promise<T> {
@@ -69,6 +69,7 @@ export const api = {
   rollback: (name: string, to: string) => req("POST", `/v1/sites/${name}/rollback`, { to }),
   setVisibility: (name: string, visibility: string, password?: string) =>
     req("POST", `/v1/sites/${name}/visibility`, { visibility, password }),
+  setDbPassword: (name: string) => req<{ name: string; user: string; password: string; warning?: string }>("POST", `/v1/databases/${name}/password`, {}),
   addCollaborator: (name: string, email: string) => req("POST", `/v1/sites/${name}/collaborators`, { email }),
   removeCollaborator: (name: string, email: string) =>
     req("DELETE", `/v1/sites/${name}/collaborators/${encodeURIComponent(email)}`),

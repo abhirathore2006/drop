@@ -2,6 +2,7 @@
 // Parsed at create time; the API translates it into a CloudNativePG `Cluster` (+ backups
 // via the Barman Cloud Plugin) in the tenant namespace. v1 supports a single Postgres
 // engine; storage + scheduled hibernation are the tunable knobs.
+import { randomBytes } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import { validateName } from "./names.ts";
 
@@ -46,6 +47,26 @@ export function sanitizeDatabaseConfig(input: unknown): DatabaseConfig | undefin
   // engine: v1 pins to postgres-18 regardless of what's requested (future engines are
   // additive). We don't error on an unknown engine — we pin to the supported one.
   return cfg;
+}
+
+// A user-supplied DB password: printable, no whitespace/quote/backslash (keeps it safe in a
+// connection string and out of trouble even if some tool interpolates it), 12–128 chars.
+const DB_PASSWORD_RE = /^[A-Za-z0-9!#$%&()*+,\-./:;<=>?@[\]^_{|}~]{12,128}$/;
+
+/** Validate a caller-provided DB password; returns an error string, or null if acceptable. */
+export function validateDbPassword(pw: unknown): string | null {
+  if (typeof pw !== "string") return "password must be a string";
+  if (!DB_PASSWORD_RE.test(pw)) return "password must be 12–128 chars, printable, no spaces or quotes/backslash";
+  // Reject trivially weak values (e.g. "aaaaaaaaaaaa", "012012012012") — a low bar, but it
+  // stops the obviously-guessable. The generated path far exceeds this.
+  if (new Set(pw).size < 5) return "password is too weak (too few distinct characters)";
+  return null;
+}
+
+/** Generate a strong random DB password (URL-safe base64, ~25 chars / 144 bits). Always
+ *  matches DB_PASSWORD_RE (base64url alphabet is a subset of the allowed set). */
+export function generateDbPassword(): string {
+  return randomBytes(18).toString("base64url");
 }
 
 /** Parse a `drop.yaml` body and return its `database:` section, or undefined if absent. */

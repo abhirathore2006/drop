@@ -1,4 +1,4 @@
-import type { KubeClient, AppStatus, DatabaseStatus } from "./types.ts";
+import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 
@@ -42,6 +42,16 @@ export class FakeKube implements KubeClient {
   async deleteDatabase(namespace: string, name: string): Promise<void> {
     this.dbDeletes.push({ namespace, name });
     this.dbs.delete(this.key(namespace, name));
+  }
+
+  readonly passwordSets: { namespace: string; name: string; password: string }[] = [];
+  passwordGate: Promise<void> | null = null; // tests can hold a rotation in-flight (concurrency)
+  passwordSyncFail = false; // tests can simulate "role rotated but Secret write failed"
+  async setDatabasePassword(namespace: string, name: string, newPassword: string): Promise<void> {
+    if (!this.dbs.has(this.key(namespace, name))) throw new Error(`no such database: ${name}`);
+    if (this.passwordGate) await this.passwordGate;
+    this.passwordSets.push({ namespace, name, password: newPassword }); // the role IS rotated
+    if (this.passwordSyncFail) throw new PasswordSyncError(`${name}: rotated but creds Secret not synced`);
   }
 
   // Live-status doubles. Tests can preset specific values via statusOverride; otherwise an

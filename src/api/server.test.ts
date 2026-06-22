@@ -390,6 +390,7 @@ test("db:create claims type=database, applies CNPG manifests, returns a connecti
   expect(j.host).toBe(`billing-rw.${kube.dbApplies[0]!.namespace}.svc.cluster.local`);
   expect(j.port).toBe(5432);
   expect(j.database).toBe("app");
+  expect(j.user).toBe("app");
   expect(j.credentialsSecret).toBe("billing-app");
   expect(JSON.stringify(j)).not.toContain("password"); // never leak credentials in the response
 
@@ -402,6 +403,78 @@ test("db:create claims type=database, applies CNPG manifests, returns a connecti
   expect((m.cluster as any).spec.storage.size).toBe("20Gi");
   expect((m.cluster as any).metadata.labels["drop.dev/hibernation"]).toBe("scheduled");
   expect((m.objectStore as any).apiVersion).toBe("barmancloud.cnpg.io/v1");
+  await db.destroy();
+});
+
+test("db:create emits a platform-owned basic-auth app Secret (bootstrap source) — password never in the response", async () => {
+  const { app, kube, db } = await mk();
+  const res = await call(app, "POST", "/v1/databases/billing", "alice", {});
+  expect(JSON.stringify(await res.json())).not.toContain("password");
+  const m = kube.dbApplies[0]!.manifests as any;
+  expect(m.appSecret.type).toBe("kubernetes.io/basic-auth");
+  expect(m.appSecret.metadata.name).toBe("billing-app");
+  expect(m.appSecret.stringData.username).toBe("app");
+  expect(m.appSecret.stringData.password.length).toBeGreaterThanOrEqual(12);
+  // re-apply (update) must NOT re-emit the Secret (never silently rotate the password)
+  await call(app, "POST", "/v1/databases/billing", "alice", { storage: "20Gi" });
+  expect((kube.dbApplies[1]!.manifests as any).appSecret).toBeUndefined();
+  await db.destroy();
+});
+
+test("db password: owner rotates (200, password once + kube called); editor forbidden (configure, not db:create)", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  // an editor can create/update DBs (db:create) but must NOT rotate credentials (configure)
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "editor" });
+  expect((await call(app, "POST", "/v1/databases/billing/password", "bob", {})).status).toBe(403);
+  const r = await call(app, "POST", "/v1/databases/billing/password", "alice", {});
+  expect(r.status).toBe(200);
+  const j = await r.json();
+  expect(j.user).toBe("app");
+  expect(j.password.length).toBeGreaterThanOrEqual(12);
+  expect(kube.passwordSets).toHaveLength(1);
+  expect(kube.passwordSets[0]!.name).toBe("billing");
+  expect(kube.passwordSets[0]!.password).toBe(j.password); // the secret set IS what we returned
+  await db.destroy();
+});
+
+test("db password: a partial rotation (role changed, Secret sync failed) still returns the live password (200 + warning), never a 502", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  kube.passwordSyncFail = true; // role rotates but the creds Secret write fails
+  const r = await call(app, "POST", "/v1/databases/billing/password", "alice", {});
+  expect(r.status).toBe(200); // NOT 502 — the password is now the only live copy
+  const j = await r.json();
+  expect(j.password.length).toBeGreaterThanOrEqual(12);
+  expect(j.warning).toBeTruthy();
+  expect(kube.passwordSets[0]!.password).toBe(j.password); // the rotation did happen
+  await db.destroy();
+});
+
+test("db password: concurrent rotations are serialized — the second gets 409 (no Job/Secret stomp)", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  let release!: () => void;
+  kube.passwordGate = new Promise<void>((r) => { release = r; }); // hold the first rotation in-flight
+  const first = call(app, "POST", "/v1/databases/billing/password", "alice", {});
+  await new Promise((r) => setTimeout(r, 25)); // let the first acquire the per-name lock
+  const second = await call(app, "POST", "/v1/databases/billing/password", "alice", {});
+  expect(second.status).toBe(409); // a rotation is already in progress
+  release();
+  expect((await first).status).toBe(200);
+  expect(kube.passwordSets).toHaveLength(1); // only the first actually rotated
+  await db.destroy();
+});
+
+test("db password: validates a caller-supplied password; 409 on a non-database; 404 when missing", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  expect((await call(app, "POST", "/v1/databases/billing/password", "alice", { password: "short" })).status).toBe(400);
+  const ok = await call(app, "POST", "/v1/databases/billing/password", "alice", { password: "a-valid-password-123" });
+  expect((await ok.json()).password).toBe("a-valid-password-123"); // honored verbatim
+  await pub(app, "alice", "asite", await tgz({ "index.html": "x" }));
+  expect((await call(app, "POST", "/v1/databases/asite/password", "alice", {})).status).toBe(409); // a site, not a db
+  expect((await call(app, "POST", "/v1/databases/nope/password", "alice", {})).status).toBe(404); // unknown
   await db.destroy();
 });
 
@@ -540,6 +613,7 @@ test("database detail: GET /v1/sites/:name returns connection ref (no password) 
   expect(j.type).toBe("database");
   expect(j.database.port).toBe(5432);
   expect(j.database.database).toBe("app");
+  expect(j.database.user).toBe("app"); // the connection username is surfaced (password still never is)
   expect(j.database.credentialsSecret).toBe("bills-app");
   expect(j.database.host).toMatch(/^bills-rw\.drop-t-/);
   expect(j.database.status.phase).toBe("Cluster in healthy state");

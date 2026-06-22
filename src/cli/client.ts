@@ -41,6 +41,12 @@ export class Client {
       body: JSON.stringify(db),
     });
   }
+  dbPassword(name: string, password?: string) {
+    return this.req("POST", `/v1/databases/${name}/password`, {
+      contentType: "application/json",
+      body: JSON.stringify(password ? { password } : {}),
+    });
+  }
   rollback(name: string, to: string) {
     return this.req("POST", `/v1/sites/${name}/rollback`, {
       contentType: "application/json",

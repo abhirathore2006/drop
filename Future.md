@@ -70,3 +70,17 @@ surfaced in the admin console.
 
 `UserStore.setRole`/`listUsers` exist but aren't wired to routes; granting/revoking admin requires
 editing `DROP_ADMINS` and rebooting. Add admin routes + console UI (suspension already shipped).
+
+## 7. DB password rotation: distributed lock + configurable operand image
+
+The `POST /v1/databases/:name/password` rotation (`db:password`) serializes concurrent rotations
+with a **process-local** `Set` (`rotatingPasswords` in `api/server.ts`) — correct for the common
+double-submit / two-admin case on a single API instance, but a **multi-replica** deployment could
+still run two rotations against the same DB concurrently. Replace with a distributed lock (a
+metastore row lock / advisory lock keyed on the DB name) when the API runs >1 replica.
+
+Also, the rotation Job reuses the live Cluster's `.status.image`; when that's unset it falls back to
+a hardcoded `DEFAULT_OPERAND_IMAGE` (`kube/cnpg.ts`) — an internet `ghcr.io` tag that won't pull in
+an air-gapped / mirror-only registry. Make the fallback config-overridable (and mirror it) for prod.
+In practice `.status.image` is set whenever the DB is connectable (the only time rotation can
+succeed), so this is a defensive edge, not a routine path.

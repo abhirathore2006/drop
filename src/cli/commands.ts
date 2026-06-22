@@ -19,6 +19,12 @@ async function client(): Promise<Client> {
 
 const show = (v: unknown) => console.log(JSON.stringify(v, null, 2));
 
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const c of process.stdin) chunks.push(c as Buffer);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export function buildProgram(): Command {
   const program = new Command();
   program.name("drop").description("Publish static sites to *.drop.example.com");
@@ -107,8 +113,29 @@ export function buildProgram(): Command {
       console.log(`  ▸ creating database ${name}…`);
       const res = await (await client()).dbCreate(name, db);
       console.log(`  ✓ ${res.engine} ready`);
-      console.log(`     host: ${res.host}:${res.port}  db: ${res.database}`);
-      console.log(`     credentials: read Secret '${res.credentialsSecret}' in your app's namespace (envFrom) — the password is never printed.`);
+      console.log(`     host: ${res.host}:${res.port}  db: ${res.database}  user: ${res.user}`);
+      console.log(`     credentials: read Secret '${res.credentialsSecret}' (keys username/password) in your app's namespace (envFrom) — the password is never printed.`);
+    });
+
+  program
+    .command("db:password <name> [password]")
+    .description("Set/rotate the managed database's `app` password (owner only; generates one if omitted)")
+    .option("--password-stdin", "read the new password from stdin (avoids shell history / process listing)")
+    .action(async (name: string, password: string | undefined, opts: { passwordStdin?: boolean }) => {
+      const err = validateName(name);
+      if (err) throw new Error(err);
+      let pw = password;
+      if (opts.passwordStdin) {
+        pw = (await readStdin()).trim();
+        if (!pw) throw new Error("--password-stdin given but stdin was empty");
+      } else if (password) {
+        console.error("  ⚠ a password passed as an argument is saved to your shell history and visible in process listings — prefer --password-stdin, or omit it to generate a strong one.");
+      }
+      console.log(`  ▸ rotating password for ${name}…`);
+      const res = await (await client()).dbPassword(name, pw);
+      console.log(`  ✓ password set for user '${res.user}' — shown once, store it now:`);
+      console.log(`     ${res.password}`);
+      if (res.warning) console.error(`  ⚠ ${res.warning}`);
     });
 
   program

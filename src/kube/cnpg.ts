@@ -35,7 +35,16 @@ export interface DatabaseManifestContext {
   // on :4566), allow the DB pod to egress to it. Prod S3 is public 443 — already allowed by
   // the tenant policy — so this is omitted in prod.
   objectStoreEgress?: { cidr: string; port: number };
+  // The `app` user's password, set ONLY at create. Present → emit the platform-owned creds
+  // Secret + wire bootstrap.initdb.secret at it (so CNPG does NOT auto-generate/own the
+  // `<name>-app` Secret — we own it, which lets set-password rotate it later). Absent on a
+  // re-apply (update) so the password is never silently rotated; bootstrap is immutable then.
+  appPassword?: string;
 }
+
+// Fallback operand image for the password-rotation Job when the live Cluster status hasn't
+// reported its image yet. The Job only needs psql; any recent CNPG operand image carries it.
+export const DEFAULT_OPERAND_IMAGE = "ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie";
 
 export interface DatabaseManifests {
   objectStore: Record<string, unknown>; // barmancloud.cnpg.io/v1 ObjectStore (backup target)
@@ -43,6 +52,7 @@ export interface DatabaseManifests {
   scheduledBackup: Record<string, unknown>; // postgresql.cnpg.io/v1 ScheduledBackup (method: plugin)
   networkPolicy: Record<string, unknown>; // cnpg-system ingress + API/object-store egress for DB pods
   secret?: Record<string, unknown>; // S3 creds (local only; omitted under IRSA)
+  appSecret?: Record<string, unknown>; // basic-auth `app` creds — set only at create (when ctx.appPassword is present)
 }
 
 /** Build the CNPG objects for one managed database in a tenant namespace. */
@@ -90,6 +100,12 @@ export function databaseManifests(db: DatabaseConfig, ctx: DatabaseManifestConte
     metadata: { name: ctx.name, namespace: ctx.namespace, labels },
     spec: {
       instances: 1,
+      // The `app` user/database are bootstrapped from a PLATFORM-owned Secret (not CNPG's
+      // auto-generated one) so set-password can later rotate the Secret without fighting the
+      // operator over ownership. `bootstrap.initdb` is immutable post-create — re-applying with
+      // the same secret ref is a no-op, so this is safe on update. NOT managed.roles: that path
+      // does not reliably re-apply a changed password for the bootstrap app user (verified).
+      bootstrap: { initdb: { database: "app", owner: "app", secret: { name: `${ctx.name}-app` } } },
       // WAL archiving + backups via the Barman Cloud Plugin (NOT spec.backup.barmanObjectStore).
       plugins: [{ name: PLUGIN_NAME, isWALArchiver: true, parameters: { barmanObjectName: storeName } }],
       storage: { size: db.storage },
@@ -159,5 +175,90 @@ export function databaseManifests(db: DatabaseConfig, ctx: DatabaseManifestConte
       stringData: { ACCESS_KEY_ID: ctx.s3!.accessKeyId, ACCESS_SECRET_KEY: ctx.s3!.secretAccessKey },
     };
   }
+  // The `app` creds Secret is emitted only at create (ctx.appPassword present). It is the
+  // connection Secret the tenant's apps read, and the source for bootstrap.initdb. basic-auth
+  // type (username+password) is what CNPG's initdb.secret expects.
+  if (ctx.appPassword) {
+    out.appSecret = {
+      apiVersion: "v1",
+      kind: "Secret",
+      type: "kubernetes.io/basic-auth",
+      metadata: { name: `${ctx.name}-app`, namespace: ctx.namespace, labels },
+      stringData: { username: "app", password: ctx.appPassword },
+    };
+  }
   return out;
+}
+
+export interface PasswordJobContext {
+  name: string; // the CNPG Cluster name (rw service = `<name>-rw`, creds Secret = `<name>-app`)
+  namespace: string;
+  image: string; // operand image (carries psql); from the live Cluster .status.image
+}
+
+export const PWSET_SECRET = (name: string) => `${name}-pwset`; // short-lived Secret holding NEWPW
+
+/** A one-shot Job that rotates the managed DB's `app` password by ALTERing the role from
+ *  INSIDE the tenant namespace (a role may change its OWN password — no superuser needed).
+ *  It connects as `app` with the CURRENT password (mounted from the `<name>-app` Secret) and
+ *  runs `ALTER ROLE app PASSWORD :'newpw'`, where `newpw` is loaded from the NEWPW env var via
+ *  psql's `\getenv` and server-side-quoted by `:'…'` — so an arbitrary password can never break
+ *  out into SQL. BOTH passwords arrive via secretKeyRef (no plaintext in the Job/Pod spec or the
+ *  apiserver audit log). The caller updates the `<name>-app` Secret to match AFTER success. */
+export function databasePasswordJob(ctx: PasswordJobContext): Record<string, unknown> {
+  const jobName = `${ctx.name}-pwset`;
+  const labels = { "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name, "drop.dev/job": "pwset" };
+  return {
+    apiVersion: "batch/v1",
+    kind: "Job",
+    metadata: { name: jobName, namespace: ctx.namespace, labels },
+    spec: {
+      backoffLimit: 2,
+      // Bounds the worst case server-side. Retry budget below: 10 × (≤2×4s connect + 2s) ≈ 100s < 120.
+      activeDeadlineSeconds: 120,
+      ttlSecondsAfterFinished: 120, // belt-and-suspenders: auto-GC even if the caller's delete is missed
+      template: {
+        // app.kubernetes.io/name=<job> lets getWorkloadLogs surface this Job's pod logs on failure.
+        metadata: { labels: { ...labels, "app.kubernetes.io/name": jobName } },
+        spec: {
+          restartPolicy: "Never",
+          securityContext: { runAsNonRoot: true, seccompProfile: { type: "RuntimeDefault" } },
+          containers: [
+            {
+              name: "pwset",
+              image: ctx.image,
+              command: ["sh", "-c"],
+              // \getenv pulls NEWPW into a psql var; :'newpw' quotes it server-side so an arbitrary
+              // password can never break out of the SQL.
+              // IDEMPOTENT RETRY LOOP, for two failure modes a one-shot would mishandle:
+              //  (a) CNI NetworkPolicy programming race — a freshly-scheduled pod's first egress is
+              //      REJECTed ("connection refused"); retry until the rules land.
+              //  (b) connection dropped AFTER the server committed the ALTER but before psql saw the
+              //      ack — the role is already the NEW password. So EACH iteration first PROBES with
+              //      NEWPW: if that already authenticates, the rotation is done → exit 0. Only if it
+              //      doesn't do we connect with the CURRENT creds and run the ALTER. This makes the
+              //      whole Job safe to retry and self-healing across pod restarts.
+              args: [
+                "printf '%s\\n' '\\getenv newpw NEWPW' \"ALTER ROLE app PASSWORD :'newpw';\" > /tmp/rotate.sql\n" +
+                  "for i in $(seq 1 10); do " +
+                  'PGPASSWORD="$NEWPW" psql -tAc "select 1" >/dev/null 2>&1 && exit 0; ' + // already rotated?
+                  "psql -v ON_ERROR_STOP=1 -f /tmp/rotate.sql && exit 0; " + // else set it with current creds
+                  'echo "pwset: attempt $i did not complete, retrying in 2s" >&2; sleep 2; done; exit 1\n',
+              ],
+              env: [
+                { name: "PGHOST", value: `${ctx.name}-rw` },
+                { name: "PGPORT", value: "5432" },
+                { name: "PGUSER", value: "app" },
+                { name: "PGDATABASE", value: "app" },
+                { name: "PGCONNECT_TIMEOUT", value: "4" },
+                { name: "PGPASSWORD", valueFrom: { secretKeyRef: { name: `${ctx.name}-app`, key: "password" } } }, // current creds
+                { name: "NEWPW", valueFrom: { secretKeyRef: { name: jobName, key: "NEWPW" } } }, // target (short-lived Secret)
+              ],
+              securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } },
+            },
+          ],
+        },
+      },
+    },
+  };
 }

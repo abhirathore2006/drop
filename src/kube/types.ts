@@ -18,12 +18,22 @@ export interface KubeClient {
   applyDatabase(namespace: string, name: string, manifests: DatabaseManifests): Promise<void>;
   /** Remove the database's CNPG objects. Safe if absent. */
   deleteDatabase(namespace: string, name: string): Promise<void>;
+  /** Rotate the managed DB's `app` password (ALTER ROLE via an in-namespace Job, then update
+   *  the `<name>-app` creds Secret). Throws if the rotation Job does not succeed. */
+  setDatabasePassword(namespace: string, name: string, newPassword: string): Promise<void>;
   /** Live app status from the Deployment + pods (replicas, ready, restarts, crash reason), or null if absent. */
   getAppStatus(namespace: string, name: string): Promise<AppStatus | null>;
   /** Live CNPG database status (phase + ready/desired instances), or null if absent. */
   getDatabaseStatus(namespace: string, name: string): Promise<DatabaseStatus | null>;
   /** Recent log lines from the workload's pods (newest pod), for crash diagnostics. "" if none. */
   getWorkloadLogs(namespace: string, name: string, tailLines?: number): Promise<string>;
+}
+
+/** Thrown by setDatabasePassword when the role password WAS successfully changed but persisting
+ *  it to the `<name>-app` creds Secret failed. The new password is now the LIVE one, so the
+ *  caller must surface it (it is the only copy) rather than report a blanket failure. */
+export class PasswordSyncError extends Error {
+  readonly name = "PasswordSyncError";
 }
 
 export interface AppStatus {

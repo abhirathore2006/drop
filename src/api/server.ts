@@ -19,11 +19,11 @@ import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
 import { sanitizeAppConfig, assertHttpOnly } from "../app-config.ts";
-import { sanitizeDatabaseConfig } from "../db-config.ts";
+import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword } from "../db-config.ts";
 import { appManifests, tenantManifests } from "../kube/manifests.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
 import { tenantNamespace } from "./tenant.ts";
-import type { KubeClient } from "../kube/types.ts";
+import { PasswordSyncError, type KubeClient } from "../kube/types.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { dashboardHtml } from "./dashboard.ts";
 
@@ -42,6 +42,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const now = d.now ?? (() => new Date());
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
   const app = new Hono<AuthEnv>();
+  // In-flight DB password rotations, keyed by name. Serializes per database so two concurrent
+  // rotations can't stomp the shared Job/Secret and diverge the role from the creds Secret.
+  // Process-local: covers the double-submit / two-admin case on a single API instance (the common
+  // one); a multi-replica deployment would want a distributed lock — noted in Future.md.
+  const rotatingPasswords = new Set<string>();
 
   app.get("/healthz", (c) => c.text("ok"));
 
@@ -262,6 +267,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
     // resolve or claim — databases share the one name namespace with sites/apps
     let site = await d.meta.getSitePlain(name);
+    const isCreate = !site; // first claim → generate the app password; a re-apply must NOT rotate it
     if (!site) {
       await ensureUser(email);
       const claimed = await d.meta.claimSite(name, email, "database");
@@ -296,6 +302,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       name,
       namespace: ns,
       destinationPath: `s3://${d.cfg.s3Bucket}/databases/${ns}/${name}`,
+      ...(isCreate ? { appPassword: generateDbPassword() } : {}), // only on create — never re-rotate on update
       apiServerCidrs: d.cfg.blockedEgressCidrs, // DB egress re-allows the in-cluster API on these CIDRs only
       ...(local
         ? { s3: { endpointURL: backupEndpoint, accessKeyId: d.cfg.s3KeyId, secretAccessKey: d.cfg.s3Secret }, objectStoreEgress: storeEgress }
@@ -315,8 +322,49 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       host: `${name}-rw.${ns}.svc.cluster.local`,
       port: 5432,
       database: "app",
+      user: "app",
       credentialsSecret: `${name}-app`,
     });
+  });
+
+  // ---- set / rotate the managed DB's `app` password (owner/admin) ----
+  // Sensitive: rotating credentials can break other readers, so it is gated at `configure`
+  // (owner/admin), like visibility — not the editor-level `db:create`. The new password is
+  // returned ONCE (the only time the platform reveals it); apps otherwise read it in-namespace
+  // from the `<name>-app` Secret. Existing connections keep working until pods restart.
+  app.post("/v1/databases/:name/password", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (site.type !== "database") return c.json({ error: `name "${name}" is a ${site.type}, not a database` }, 409);
+    if (!can(await actorFor(email, site), "configure")) return c.json({ error: "owner only" }, 403);
+
+    const body = (await c.req.json().catch(() => ({}))) as { password?: unknown };
+    let password: string;
+    if (body.password != null) {
+      const err = validateDbPassword(body.password);
+      if (err) return c.json({ error: err }, 400);
+      password = body.password as string;
+    } else {
+      password = generateDbPassword();
+    }
+
+    if (rotatingPasswords.has(name)) return c.json({ error: "a password rotation is already in progress for this database" }, 409);
+    rotatingPasswords.add(name);
+    const ns = tenantNamespace(site.owner);
+    try {
+      await d.kube.setDatabasePassword(ns, name, password);
+    } catch (e) {
+      // The role WAS rotated but the creds Secret didn't sync: the password is now the only live
+      // copy, so return it (200 + warning) rather than hiding it behind a 502.
+      if (e instanceof PasswordSyncError) return c.json({ name, user: "app", password, warning: e.message });
+      return c.json({ error: `password rotation failed: ${(e as Error).message}` }, 502);
+    } finally {
+      rotatingPasswords.delete(name);
+    }
+    return c.json({ name, user: "app", password }); // returned ONCE — store it now
   });
 
   // ---- rollback ----
@@ -387,6 +435,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         host: `${name}-rw.${ns}.svc.cluster.local`,
         port: 5432,
         database: "app",
+        user: "app", // the bootstrap role/owner — username is "app"; password lives in the Secret
         credentialsSecret: `${name}-app`, // the password lives in this Secret; never returned here
         status: null,
       };

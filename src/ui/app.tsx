@@ -69,6 +69,8 @@ function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClos
   const [d, setD] = useState<Detail | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pw, setPw] = useState<string | null>(null); // the just-rotated DB password, shown once
+  const [pwWarn, setPwWarn] = useState<string | null>(null); // partial-rotation warning (Secret didn't sync)
 
   const load = useCallback(async () => {
     try {
@@ -97,6 +99,22 @@ function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClos
   };
 
   const isOwner = d?.owner === me.email || me.admin;
+
+  const rotatePw = async () => {
+    if (!confirm(`Rotate the database password for ${d!.name}? The new password is shown once; apps must restart to pick it up.`)) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const r = await api.setDbPassword(d!.name);
+      setPw(r.password);
+      setPwWarn(r.warning ?? null);
+      onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <>
@@ -162,9 +180,27 @@ function Drawer({ name, me, onClose, onChanged }: { name: string; me: Me; onClos
                   </code>
                 </Field>
                 <Field label="database">{d.database.database}</Field>
-                <Field label="credentials">
-                  Secret <code>{d.database.credentialsSecret}</code> (password not shown)
+                <Field label="user">
+                  <code>{d.database.user}</code>
                 </Field>
+                <Field label="credentials">
+                  Secret <code>{d.database.credentialsSecret}</code> · keys <code>username</code>/<code>password</code> (not shown)
+                </Field>
+                {isOwner && (
+                  <Field label="password">
+                    {pw ? (
+                      <span>
+                        <code className="reveal">{pw}</code>
+                        <div className="sub">shown once — copy it now. restart apps to pick up the new password.</div>
+                        {pwWarn && <div className="warn">⚠ {pwWarn}</div>}
+                      </span>
+                    ) : (
+                      <button className="btn sm" disabled={busy} onClick={rotatePw}>
+                        set / rotate password
+                      </button>
+                    )}
+                  </Field>
+                )}
               </div>
             )}
 
