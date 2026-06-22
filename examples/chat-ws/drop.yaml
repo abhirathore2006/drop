@@ -1,0 +1,38 @@
+# Deploy with:  drop deploy examples/chat-ws
+# Full walkthrough (create the DB + map these env vars):  examples/DATABASE_APPS.md
+app:
+  name: chat
+  # Built locally and imported into k3s (see the guide). NOT a :latest tag, so k8s uses the
+  # imported image instead of trying to pull from a registry.
+  image: chat-ws:1
+  # Marks this app for the edge's WebSocket routing path. The platform work that makes WS upgrades
+  # tunnel cleanly through the public edge hostname is tracked in
+  # ../../planning/2026-06-23-websocket-support-plan.md — until that lands, exercise the app by
+  # port-forwarding straight to the pod (see README.md → "Status").
+  websocket: true
+  services:
+    - internal_port: 8080 # must match the PORT the app listens on
+  scale:
+    # WebSocket apps must NOT scale to zero (min:0): a long-lived connection needs a live pod to
+    # hold it, and (today) the edge can't wake a scaled-to-zero pod on a WS upgrade. Keep min >= 1.
+    min: 1
+    # Keep max:1 for now: broadcast/presence state is per-pod (kept in memory in this process). A
+    # multi-pod deployment would fan a message out to only the clients on the same pod — true
+    # multi-pod broadcast needs a shared pub/sub (e.g. Postgres LISTEN/NOTIFY or Redis). Until that
+    # exists, pin to a single replica.
+    max: 1
+  resources:
+    cpu: "250m"
+    memory: "256Mi"
+  env:
+    # --- non-secret DB connection config (safe to commit) ---
+    PGHOST: chat-db-rw # the `-rw` Service of the DB you create with `drop db:create chat-db`
+    PGPORT: "5432"
+    PGUSER: app # CNPG's application role
+    PGDATABASE: app # CNPG's application database
+    PGSSLMODE: require # encrypt in transit (CNPG self-signed cert; the app does not verify it)
+  # PGPASSWORD is NOT here — it is a SECRET (never committed). After deploying, set it write-only:
+  #   drop db:password chat-db                          # prints the password once
+  #   printf '<that password>' | drop secrets set chat PGPASSWORD --stdin
+  #   drop restart chat                                 # apply it
+  # Secrets are stored in the secret manager and injected as env vars — see ../DATABASE_APPS.md.

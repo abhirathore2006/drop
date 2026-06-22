@@ -1,0 +1,10 @@
+{
+  "name": "chat-ws",
+  "private": true,
+  "version": "1.0.0",
+  "description": "A Postgres-backed live chat — a Drop Node.js app demonstrating WebSockets (http + ws on one port) over a managed database",
+  "dependencies": {
+    "pg": "^8.13.1",
+    "ws": "^8.18.0"
+  }
+}
