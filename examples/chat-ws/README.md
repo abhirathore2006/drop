@@ -34,14 +34,14 @@ standard libpq `PG*` env vars.
 
 ```bash
 # 1. create the managed Postgres database
-drop db:create chat-db
+drop db create chat-db
 
 # 2. build + deploy in one step — Drop builds the Dockerfile and pushes the image through
 #    Drop for you (no registry creds, no manual ctr import; same command locally and in prod)
 drop deploy examples/chat-ws --build
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
-drop db:password chat-db                                # prints the password ONCE
+drop db password chat-db                                # prints the password ONCE
 printf '<that password>' | drop secrets set chat PGPASSWORD --stdin
 drop restart chat                                       # restart to inject the new secret
 
@@ -54,7 +54,7 @@ open http://localhost:8080                              # open it in two tabs an
 
 > `--build` uses `docker` by default; set `DROP_BUILDER=podman` to build with podman. To create
 > the app inside a team org instead of your personal org, add `--org <slug>` (likewise on
-> `drop db:create`). `drop push examples/chat-ws` does just build+push and prints the ref.
+> `drop db create`). `drop push examples/chat-ws` does just build+push and prints the ref.
 
 <details><summary>Prebuilt-image alternative (no <code>--build</code>): build + import into k3s yourself</summary>
 
@@ -73,7 +73,7 @@ drop deploy examples/chat-ws      # uses image: chat-ws:1 from drop.yaml
 The non-secret connection config (`PGHOST: chat-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db:password chat-db` → `drop secrets set chat PGPASSWORD --stdin` → `drop restart chat`.
+`drop db password chat-db` → `drop secrets set chat PGPASSWORD --stdin` → `drop restart chat`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 ## How the chat works

@@ -391,10 +391,10 @@ ScaledObject (`paused-replicas: 0`) *and* scales to 0 (true offline — won't wa
 > in-cluster Service** (bypassing the interceptor, `min ≥ 1` so no scale-to-zero) — is in
 > `planning/2026-06-23-websocket-support-plan.md`.
 
-**Databases.** `drop db:create` → a **CloudNativePG** `Cluster` (Postgres 18, single instance),
+**Databases.** `drop db create` → a **CloudNativePG** `Cluster` (Postgres 18, single instance),
 with backups via the **Barman Cloud Plugin** (`ObjectStore` + `ScheduledBackup`, method `plugin`)
 to S3 (local Floci, prod IRSA). The app user/db are bootstrapped from a platform-owned
-`<db>-app` Secret. `drop db:password` rotates the role password with a one-shot, idempotent
+`<db>-app` Secret. `drop db password` rotates the role password with a one-shot, idempotent
 in-namespace `ALTER ROLE` Job (a role changes its own password — no superuser), then syncs the
 Secret. Apps connect in-namespace to `<db>-rw`.
 

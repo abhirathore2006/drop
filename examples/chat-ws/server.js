@@ -3,7 +3,7 @@
 // library's WebSocketServer is attached to the http.Server via its 'upgrade' event, so one process
 // and one port serve both. Chat messages persist in a managed Drop Postgres and broadcast to every
 // connected client in real time. It connects with the standard libpq PG* env vars (PGHOST/PGPORT/
-// PGUSER/PGPASSWORD/PGDATABASE) that you map from `drop db:create` + `drop db:password` (see
+// PGUSER/PGPASSWORD/PGDATABASE) that you map from `drop db create` + `drop db password` (see
 // examples/DATABASE_APPS.md). CNPG serves a self-signed (operator-CA) TLS cert, so we encrypt in
 // transit WITHOUT verifying it — the app and DB share one tenant namespace and are isolated by
 // NetworkPolicy. Set PGSSLMODE=disable to turn TLS off entirely.

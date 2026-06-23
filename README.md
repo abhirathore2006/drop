@@ -12,7 +12,7 @@ $ drop publish ./dist myapp           # static site
 
 $ drop deploy ./api myapi             # container app (drop.yaml app:)
   ✓ live at https://myapi.drop.example.com
-$ drop db:create myapi-db             # managed Postgres (CloudNativePG)
+$ drop db create myapi-db             # managed Postgres (CloudNativePG)
 $ printf "$PW" | drop secrets set myapi DATABASE_PASSWORD --stdin   # write-only secret
 $ drop restart myapi                  # apply it
 ```
@@ -133,7 +133,7 @@ personal org:
 ```bash
 drop publish ./dist mysite --org acme
 drop deploy  ./api  myapi  --org acme
-drop db:create myapi-db    --org acme
+drop db create myapi-db    --org acme
 ```
 
 The same is exposed over MCP as `org_create`, `org_list`, and `org_add_member` (with an `org` arg
@@ -211,14 +211,14 @@ v1 is one HTTP service, 443-only.
 ### Managed databases (CloudNativePG)
 
 ```bash
-drop db:create myapi-db          # a single-instance Postgres 18 in your namespace
-drop db:password myapi-db        # set/rotate the `app` role password — printed ONCE
+drop db create myapi-db          # a single-instance Postgres 18 in your namespace
+drop db password myapi-db        # set/rotate the `app` role password — printed ONCE
 ```
 
 CloudNativePG provisions a `Cluster`; backups go to S3 via the **Barman Cloud Plugin**
 (`ObjectStore` + `ScheduledBackup`, local Floci or prod IRSA). Apps connect in-namespace to the
 `<db>-rw` service as user/db `app`; the connection ref (host/port/db/user + the `<db>-app`
-Secret) is returned — **never the password**. `db:password` rotates it via a one-shot in-namespace
+Secret) is returned — **never the password**. `db password` rotates it via a one-shot in-namespace
 `ALTER ROLE` Job (no superuser). Databases can't be transferred (stateful) and tear down cleanly.
 
 ### Secrets (write-only)
@@ -301,7 +301,7 @@ DROP_KUBECONFIG=~/.kube/drop-local.config DROP_SECRET_BACKEND=aws \
   DROP_SECRET_MANAGER_ENDPOINT=http://localhost:4566 DROP_SECRET_STORE_NAME=floci ... node dist/api.js
 ```
 
-Then `drop deploy`, `drop db:create`, `drop secrets set`, and `drop restart/stop/start` work
+Then `drop deploy`, `drop db create`, `drop secrets set`, and `drop restart/stop/start` work
 locally exactly as in prod. See [`examples/DATABASE_APPS.md`](examples/DATABASE_APPS.md) for the
 end-to-end flow (build an image, import it into k3s, create a DB, set a secret, deploy).
 

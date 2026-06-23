@@ -599,7 +599,7 @@ function MyWorkloads() {
       <div className="empty">
         <p>No workloads yet.</p>
         <p className="muted">
-          Ship one from the CLI: <code>drop deploy ./app</code> · <code>drop db:create mydb</code> ·{" "}
+          Ship one from the CLI: <code>drop deploy ./app</code> · <code>drop db create mydb</code> ·{" "}
           <code>drop publish ./site</code>
         </p>
       </div>

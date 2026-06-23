@@ -173,10 +173,10 @@
     <code>planning/2026-06-23-websocket-support-plan.md</code>.</p></div>
 
     <h3>Databases</h3>
-    <p><code>drop db:create</code> → a <strong>CloudNativePG</strong> <code>Cluster</code> (Postgres 18, single
+    <p><code>drop db create</code> → a <strong>CloudNativePG</strong> <code>Cluster</code> (Postgres 18, single
     instance), with backups via the <strong>Barman Cloud Plugin</strong> (<code>ObjectStore</code> +
     <code>ScheduledBackup</code>, method <code>plugin</code>) to S3 (local Floci, prod IRSA). The app user/db are
-    bootstrapped from a platform-owned <code>&lt;db&gt;-app</code> Secret. <code>drop db:password</code> rotates the
+    bootstrapped from a platform-owned <code>&lt;db&gt;-app</code> Secret. <code>drop db password</code> rotates the
     role password with a one-shot, idempotent in-namespace <code>ALTER ROLE</code> Job (a role changes its own
     password — no superuser), then syncs the Secret. Apps connect in-namespace to <code>&lt;db&gt;-rw</code>.</p>
 

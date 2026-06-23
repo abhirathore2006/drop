@@ -19,13 +19,13 @@ env vars, same write-only `PGPASSWORD` secret, regardless of framework.
 
 ## How the binding works (the mental model)
 
-When you run `drop db:create <db>`, the platform provisions a CloudNativePG cluster in **your
+When you run `drop db create <db>`, the platform provisions a CloudNativePG cluster in **your
 tenant namespace** and gives you a connection reference:
 
 - **host** `…-rw.<namespace>.svc.cluster.local` — or just **`<db>-rw`** from another pod in the
   same namespace (your app lives there too)
 - **port** `5432`  ·  **database** `app`  ·  **user** `app`
-- **password** — lives in the Kubernetes Secret `<db>-app`; never printed by `db:create`
+- **password** — lives in the Kubernetes Secret `<db>-app`; never printed by `db create`
 
 Your app reads those five values as environment variables. They split into two kinds:
 
@@ -35,7 +35,7 @@ Your app reads those five values as environment variables. They split into two k
   with `drop secrets set <app> PGPASSWORD --stdin`; Drop stores it in the secret manager and
   injects it into the pod as an env var. It can be rotated or deleted, but never read back.
 
-To get a password to store, use **`drop db:password <db>`** — it sets (rotates) the `app` password
+To get a password to store, use **`drop db password <db>`** — it sets (rotates) the `app` password
 and prints it **once**; pipe that into `drop secrets set`.
 
 > Secrets are injected via a second `envFrom` (the `<app>-secret` Secret), alongside the
@@ -69,7 +69,7 @@ credentials by hand. (The manual build-and-import path is still available — se
 ### Step 1 — create the database
 
 ```bash
-drop db:create guestbook-db
+drop db create guestbook-db
 ```
 
 ```
@@ -82,8 +82,8 @@ drop db:create guestbook-db
 Note the **host**, **db** (`app`), and **user** (`app`).
 
 > By default the database (and the app you deploy in Step 3) land in your **personal** org. To put
-> them in a team org instead, add `--org <slug>` to both `drop db:create` and `drop deploy` — e.g.
-> `drop db:create guestbook-db --org acme`. Create a team org with `drop org create <slug> [name]`.
+> them in a team org instead, add `--org <slug>` to both `drop db create` and `drop deploy` — e.g.
+> `drop db create guestbook-db --org acme`. Create a team org with `drop org create <slug> [name]`.
 
 ### Step 2 — the env config (already in `drop.yaml`)
 
@@ -106,7 +106,7 @@ app:
 ```
 
 > `PGHOST` is `guestbook-db-rw`, not the full FQDN, because the app pod runs in the **same tenant
-> namespace** as the database. The full FQDN from `db:create` also works.
+> namespace** as the database. The full FQDN from `db create` also works.
 
 ### Step 3 — build + deploy (one command)
 
@@ -154,7 +154,7 @@ drop deploy examples/guestbook-node      # uses image: guestbook-node:1 from dro
 ### Step 4 — set the DB password as a write-only secret, then restart
 
 ```bash
-drop db:password guestbook-db                                # prints the password ONCE
+drop db password guestbook-db                                # prints the password ONCE
 printf '<that password>' | drop secrets set guestbook PGPASSWORD --stdin
 drop restart guestbook                                       # restart to inject the new secret
 ```
@@ -198,11 +198,11 @@ Identical flow with a different DB name and a heavier build. Differences from th
   `HOSTNAME`; without `0.0.0.0` it would only listen on localhost inside the pod).
 
 ```bash
-drop db:create notes-db
+drop db create notes-db
 
 drop deploy examples/notes-next --build          # builds (next build) + pushes + → https://notes.drop.localhost
 
-drop db:password notes-db                         # prints the password ONCE
+drop db password notes-db                         # prints the password ONCE
 printf '<that password>' | drop secrets set notes PGPASSWORD --stdin
 drop restart notes                                # apply it
 ```
@@ -231,11 +231,11 @@ tools too. Owner/admin only.
 
 ## Rotating the password later
 
-`drop db:password <db>` rotates the live `app` role password and returns the new one once; store it
+`drop db password <db>` rotates the live `app` role password and returns the new one once; store it
 as the secret and restart:
 
 ```bash
-drop db:password guestbook-db
+drop db password guestbook-db
 printf '<new password>' | drop secrets set guestbook PGPASSWORD --stdin
 drop restart guestbook
 ```
@@ -259,7 +259,7 @@ MCP tools. Editor+ (operational).
 |---|---|
 | `ErrImagePull` / `ImagePullBackOff` | Image not imported, name mismatch, or a `:latest` tag (forces a pull). Rebuild + re-import with the `docker.io/library/<name>:<tag>` ref, keep the tag non-`latest`. |
 | `connection refused` / `timeout` to the DB | Wrong `PGHOST` (must be `<db>-rw`), or the DB isn't Ready yet (`kubectl get cluster -A`). The apps retry for ~60s on startup. |
-| `password authentication failed` | The `PGPASSWORD` secret doesn't match the live role — re-run `drop db:password <db>`, `drop secrets set <app> PGPASSWORD --stdin`, then `drop restart <app>`. A secret change needs a restart to take effect. |
+| `password authentication failed` | The `PGPASSWORD` secret doesn't match the live role — re-run `drop db password <db>`, `drop secrets set <app> PGPASSWORD --stdin`, then `drop restart <app>`. A secret change needs a restart to take effect. |
 | TLS / `self-signed certificate` errors | CNPG uses a self-signed cert. The samples set `ssl.rejectUnauthorized:false`; if you wrote your own client, do the same (or mount the `<db>-ca` Secret and verify). `PGSSLMODE=disable` turns TLS off. |
 | Next.js app starts but isn't reachable | The image must set `HOSTNAME=0.0.0.0` (already in its Dockerfile); the standalone server otherwise binds localhost only. |
 | App responds 502 / never wakes | `internal_port` in `drop.yaml` must match the port the app listens on (8080 here). |
@@ -283,5 +283,5 @@ drop info guestbook                                      # workload metadata + s
 | `PGPORT` | `5432` | |
 | `PGUSER` | `app` | CNPG's application role |
 | `PGDATABASE` | `app` | CNPG's application database |
-| `PGPASSWORD` | from `drop db:password <db>` | a **secret** — set write-only via `drop secrets set <app> PGPASSWORD --stdin`, never in `drop.yaml`/git |
+| `PGPASSWORD` | from `drop db password <db>` | a **secret** — set write-only via `drop secrets set <app> PGPASSWORD --stdin`, never in `drop.yaml`/git |
 | `PGSSLMODE` | `require` | the samples encrypt without verifying the self-signed cert; `disable` turns TLS off |

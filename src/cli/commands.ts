@@ -125,36 +125,23 @@ export function buildProgram(): Command {
       console.log(`       if you instead pin  image: ${image}  in drop.yaml, bump the tag on a rebuild — reusing the same tag won't roll the pods.`);
     });
 
-  program
-    .command("db:create <name> [dir]")
+  const db = program.command("db").description("Manage managed Postgres databases (create / password)");
+  db
+    .command("create <name> [dir]")
     .description("Create a managed Postgres database (reads the database: section from dir/drop.yaml if present)")
     .option("--org <slug>", "create in this organisation (default: your personal org)")
     .action(async (name: string, dir: string | undefined, opts: { org?: string }) => {
       const err = validateName(name);
       if (err) throw new Error(err);
-      const db = await loadDatabaseCreate(dir ?? ".");
+      const cfg = await loadDatabaseCreate(dir ?? ".");
       console.log(`  ▸ creating database ${name}…`);
-      const res = await (await client()).dbCreate(name, db, opts.org);
+      const res = await (await client()).dbCreate(name, cfg, opts.org);
       console.log(`  ✓ ${res.engine} ready`);
       console.log(`     host: ${res.host}:${res.port}  db: ${res.database}  user: ${res.user}`);
       console.log(`     credentials: read Secret '${res.credentialsSecret}' (keys username/password) in your app's namespace (envFrom) — the password is never printed.`);
     });
-
-  const org = program.command("org").description("Manage organisations (group resources + org-level permissions)");
-  org
-    .command("create <slug> [name]")
-    .description("Create a team organisation (you become owner). Deploy into it with --org <slug>.")
-    .action(async (slug: string, name?: string) => show(await (await client()).createOrg(slug, name)));
-  org.command("ls").description("List your organisations + your role in each").action(async () => show(await (await client()).listOrgs()));
-  org.command("members <slug>").description("Show an org's members").action(async (slug: string) => show(await (await client()).orgInfo(slug)));
-  org
-    .command("add <slug> <email> [role]")
-    .description("Add/update a member (owner|admin|member|viewer; default member)")
-    .action(async (slug: string, email: string, role?: string) => show(await (await client()).addOrgMember(slug, email, role)));
-  org.command("rm <slug> <email>").description("Remove a member").action(async (slug: string, email: string) => show(await (await client()).removeOrgMember(slug, email)));
-
-  program
-    .command("db:password <name> [password]")
+  db
+    .command("password <name> [password]")
     .description("Set/rotate the managed database's `app` password (owner only; generates one if omitted)")
     .option("--password-stdin", "read the new password from stdin (avoids shell history / process listing)")
     .action(async (name: string, password: string | undefined, opts: { passwordStdin?: boolean }) => {
@@ -173,6 +160,19 @@ export function buildProgram(): Command {
       console.log(`     ${res.password}`);
       if (res.warning) console.error(`  ⚠ ${res.warning}`);
     });
+
+  const org = program.command("org").description("Manage organisations (group resources + org-level permissions)");
+  org
+    .command("create <slug> [name]")
+    .description("Create a team organisation (you become owner). Deploy into it with --org <slug>.")
+    .action(async (slug: string, name?: string) => show(await (await client()).createOrg(slug, name)));
+  org.command("ls").description("List your organisations + your role in each").action(async () => show(await (await client()).listOrgs()));
+  org.command("members <slug>").description("Show an org's members").action(async (slug: string) => show(await (await client()).orgInfo(slug)));
+  org
+    .command("add <slug> <email> [role]")
+    .description("Add/update a member (owner|admin|member|viewer; default member)")
+    .action(async (slug: string, email: string, role?: string) => show(await (await client()).addOrgMember(slug, email, role)));
+  org.command("rm <slug> <email>").description("Remove a member").action(async (slug: string, email: string) => show(await (await client()).removeOrgMember(slug, email)));
 
   const secrets = program.command("secrets").description("Manage an app's write-only secrets (set/list-keys/delete; values are never shown)");
   secrets

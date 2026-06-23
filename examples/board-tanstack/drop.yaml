@@ -15,13 +15,13 @@ app:
     memory: "512Mi" # the SSR node server wants a little more than the plain Node app
   env:
     # --- non-secret DB connection config (safe to commit) ---
-    PGHOST: board-db-rw # the `-rw` Service of the DB you create with `drop db:create board-db`
+    PGHOST: board-db-rw # the `-rw` Service of the DB you create with `drop db create board-db`
     PGPORT: "5432"
     PGUSER: app # CNPG's application role
     PGDATABASE: app # CNPG's application database
     PGSSLMODE: require # encrypt in transit (CNPG self-signed cert; the app does not verify it)
   # PGPASSWORD is NOT here — it is a SECRET (never committed). After deploying, set it write-only:
-  #   drop db:password board-db                       # prints the password once
+  #   drop db password board-db                       # prints the password once
   #   printf '<that password>' | drop secrets set board PGPASSWORD --stdin
   #   drop restart board                              # apply it
   # Secrets are stored in the secret manager and injected as env vars — see ../DATABASE_APPS.md.

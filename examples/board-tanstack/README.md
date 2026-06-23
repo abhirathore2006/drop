@@ -15,14 +15,14 @@ Pages: **list** (`/`, with an inline add form + per-item delete), **detail** (`/
 
 ```bash
 # 1. create the managed Postgres database
-drop db:create board-db
+drop db create board-db
 
 # 2. build + deploy in one step — Drop builds the Dockerfile (which runs `vite build` to generate
 #    the route tree + the .output node server) and pushes the image through Drop for you
 drop deploy examples/board-tanstack --build
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
-drop db:password board-db                                 # prints the password ONCE
+drop db password board-db                                 # prints the password ONCE
 printf '<that password>' | drop secrets set board PGPASSWORD --stdin
 drop restart board                                        # restart to inject the new secret
 
@@ -32,7 +32,7 @@ open https://board.drop.localhost/        # or: http://board.drop.localhost:8474
 
 > `--build` uses `docker` by default; set `DROP_BUILDER=podman` to build with podman. To create
 > the app inside a team org instead of your personal org, add `--org <slug>` (likewise on
-> `drop db:create`). `drop push examples/board-tanstack` does just build+push and prints the ref.
+> `drop db create`). `drop push examples/board-tanstack` does just build+push and prints the ref.
 
 <details><summary>Prebuilt-image alternative (no <code>--build</code>): build + import into k3s yourself</summary>
 
@@ -51,7 +51,7 @@ drop deploy examples/board-tanstack      # uses image: board-tanstack:1 from dro
 The non-secret connection config (`PGHOST: board-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db:password board-db` → `drop secrets set board PGPASSWORD --stdin` → `drop restart board`.
+`drop db password board-db` → `drop secrets set board PGPASSWORD --stdin` → `drop restart board`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 ## How it's wired

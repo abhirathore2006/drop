@@ -1,7 +1,7 @@
 // Server-only Postgres access for the link board. This module is imported only from server
 // functions (createServerFn handlers), so `pg` and the connection pool never reach the client
 // bundle. It connects with the standard libpq PG* env vars (PGHOST/PGPORT/PGUSER/PGPASSWORD/
-// PGDATABASE) that you map from `drop db:create` + `drop db:password` (see ../DATABASE_APPS.md).
+// PGDATABASE) that you map from `drop db create` + `drop db password` (see ../DATABASE_APPS.md).
 // CNPG serves a self-signed (operator-CA) TLS cert, so we encrypt in transit WITHOUT verifying it
 // — the app and DB share one tenant namespace and are isolated by NetworkPolicy. Set
 // PGSSLMODE=disable to turn TLS off entirely.

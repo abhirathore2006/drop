@@ -56,7 +56,7 @@
 
 <span class="tok-c">$</span> drop deploy ./api myapi --build     <span class="tok-c"># build the Dockerfile & push it through Drop, then deploy</span>
   <span class="tok-s">✓ live at https://myapi.drop.example.com</span>
-<span class="tok-c">$</span> drop db:create myapi-db             <span class="tok-c"># managed Postgres (CloudNativePG)</span>
+<span class="tok-c">$</span> drop db create myapi-db             <span class="tok-c"># managed Postgres (CloudNativePG)</span>
 <span class="tok-c">$</span> printf "$PW" | drop secrets set myapi DATABASE_PASSWORD --stdin  <span class="tok-c"># write-only secret</span>
 <span class="tok-c">$</span> drop restart myapi                  <span class="tok-c"># apply it</span></code></pre>
 
@@ -145,8 +145,8 @@ drop publish ./dist myapp</code></pre>
       <div class="card">
         <div class="n">DATA</div>
         <h3>Managed Postgres</h3>
-        <p><code>drop db:create</code> provisions a CloudNativePG cluster in your namespace with Barman
-        backups to S3. <code>drop db:password</code> sets/rotates the role password — printed once, never
+        <p><code>drop db create</code> provisions a CloudNativePG cluster in your namespace with Barman
+        backups to S3. <code>drop db password</code> sets/rotates the role password — printed once, never
         the connection password stored where it can be read back.</p>
       </div>
       <div class="card">
@@ -205,8 +205,8 @@ drop publish ./dist myapp</code></pre>
         with <code>drop org create &lt;slug&gt;</code> and get their own namespace. Org roles apply org-wide
         (owner / admin = everything; member = ship + configure/secrets; viewer = read), and stack with per-resource
         site roles. Create flows take <code>--org &lt;slug&gt;</code> (default: your personal org).</li>
-      <li><strong>Managed databases</strong> — <code>drop db:create</code> provisions a CloudNativePG
-        Postgres in your namespace with Barman backups to S3; <code>drop db:password</code> sets/rotates the
+      <li><strong>Managed databases</strong> — <code>drop db create</code> provisions a CloudNativePG
+        Postgres in your namespace with Barman backups to S3; <code>drop db password</code> sets/rotates the
         role password. The connection ref is returned — never the password.</li>
       <li><strong>Write-only secrets</strong> — <code>drop secrets set --stdin / ls / rm</code> manage per-app
         secrets that are never readable back and inject as env vars (backend <code>kube</code> or AWS Secrets

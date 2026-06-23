@@ -1,5 +1,5 @@
-// One shared pg Pool, built from the standard libpq PG* env vars you map from `drop db:create`
-// + `drop db:password` (see examples/DATABASE_APPS.md). Cached on globalThis so we keep ONE pool
+// One shared pg Pool, built from the standard libpq PG* env vars you map from `drop db create`
+// + `drop db password` (see examples/DATABASE_APPS.md). Cached on globalThis so we keep ONE pool
 // across requests (and across hot-reloads in dev). CNPG serves a self-signed (operator-CA) TLS
 // cert, so we encrypt in transit without verifying it; set PGSSLMODE=disable to turn TLS off.
 import pg from "pg";

@@ -61,7 +61,7 @@ allowing `:4566 → 10.88.0.0/16`:
   s3://drop/spike/spike-pg/spike-pg/base/20260622T082410/backup.info
   s3://drop/spike/spike-pg/spike-pg/wals/0000000100000000/0000…01.gz   (continuous WAL)
   ```
-- End-to-end via the **API** (`drop db:create bkdb`): the emitted ObjectStore used
+- End-to-end via the **API** (`drop db create bkdb`): the emitted ObjectStore used
   `endpointURL=http://10.88.0.3:4566`, the netpol carried `:4566 → 10.88.0.0/16`, and WAL
   archived to `s3://drop/databases/<ns>/bkdb/…`.
 

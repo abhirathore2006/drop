@@ -12,14 +12,14 @@ standalone image. Reads the standard libpq `PG*` env vars. The image bakes `PORT
 
 ```bash
 # 1. create the managed Postgres database
-drop db:create notes-db
+drop db create notes-db
 
 # 2. build + deploy in one step — Drop builds the Dockerfile (this one runs `next build`, so it's
 #    slower) and pushes the image through Drop for you (no registry creds, no manual ctr import)
 drop deploy examples/notes-next --build
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
-drop db:password notes-db                                 # prints the password ONCE
+drop db password notes-db                                 # prints the password ONCE
 printf '<that password>' | drop secrets set notes PGPASSWORD --stdin
 drop restart notes                                        # restart to inject the new secret
 
@@ -29,7 +29,7 @@ open https://notes.drop.localhost/            # or: http://notes.drop.localhost:
 
 > `--build` uses `docker` by default; set `DROP_BUILDER=podman` to build with podman. To create
 > the app inside a team org instead of your personal org, add `--org <slug>` (likewise on
-> `drop db:create`). `drop push examples/notes-next` does just build+push and prints the ref.
+> `drop db create`). `drop push examples/notes-next` does just build+push and prints the ref.
 
 <details><summary>Prebuilt-image alternative (no <code>--build</code>): build + import into k3s yourself</summary>
 
@@ -48,7 +48,7 @@ drop deploy examples/notes-next      # uses image: notes-next:1 from drop.yaml
 The non-secret connection config (`PGHOST: notes-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db:password notes-db` → `drop secrets set notes PGPASSWORD --stdin` → `drop restart notes`.
+`drop db password notes-db` → `drop secrets set notes PGPASSWORD --stdin` → `drop restart notes`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 Full walkthrough (the binding model, the Node example, troubleshooting):

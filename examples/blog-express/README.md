@@ -15,14 +15,14 @@ edit (`/posts/:id/edit` → `POST /posts/:id`), delete (`POST /posts/:id/delete`
 
 ```bash
 # 1. create the managed Postgres database
-drop db:create blog-db
+drop db create blog-db
 
 # 2. build + deploy in one step — Drop builds the Dockerfile and pushes the image through
 #    Drop for you (no registry creds, no manual ctr import; same command locally and in prod)
 drop deploy examples/blog-express --build
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
-drop db:password blog-db                                 # prints the password ONCE
+drop db password blog-db                                 # prints the password ONCE
 printf '<that password>' | drop secrets set blog PGPASSWORD --stdin
 drop restart blog                                        # restart to inject the new secret
 
@@ -32,7 +32,7 @@ open https://blog.drop.localhost/             # or: http://blog.drop.localhost:8
 
 > `--build` uses `docker` by default; set `DROP_BUILDER=podman` to build with podman. To create
 > the app inside a team org instead of your personal org, add `--org <slug>` (likewise on
-> `drop db:create`). `drop push examples/blog-express` does just build+push and prints the ref.
+> `drop db create`). `drop push examples/blog-express` does just build+push and prints the ref.
 
 <details><summary>Prebuilt-image alternative (no <code>--build</code>): build + import into k3s yourself</summary>
 
@@ -51,7 +51,7 @@ drop deploy examples/blog-express      # uses image: blog-express:1 from drop.ya
 The non-secret connection config (`PGHOST: blog-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db:password blog-db` → `drop secrets set blog PGPASSWORD --stdin` → `drop restart blog`.
+`drop db password blog-db` → `drop secrets set blog PGPASSWORD --stdin` → `drop restart blog`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 Full walkthrough (the binding model, the Next.js example, troubleshooting):
