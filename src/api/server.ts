@@ -146,6 +146,12 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return { org };
   };
   const isPlatformAdmin = async (email: string) => (await d.users.getUser(email))?.role === "admin";
+  // Resolve a resource's owning org to a display shape ({slug,name,kind}) for the console/CLI, or null.
+  const orgOf = async (orgId: string | null) => {
+    if (!orgId) return null;
+    const o = await d.orgs.getOrg(orgId);
+    return o ? { slug: o.slug, name: o.name, kind: o.kind } : null;
+  };
 
   app.get("/v1/me", async (c) => {
     const email = c.get("identity").email;
@@ -658,6 +664,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       name: site.name,
       type: site.type,
       owner: site.owner,
+      org: await orgOf(site.orgId),
       collaborators: site.collaborators,
       members: site.members,
       visibility: site.visibility,
@@ -784,7 +791,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const out: unknown[] = [];
     for (const name of names) {
       const s = await d.meta.getSitePlain(name);
-      if (s) out.push({ name: s.name, type: s.type, owner: s.owner, visibility: s.visibility, url: siteUrl(name), current: s.currentVersion });
+      if (s) out.push({ name: s.name, type: s.type, owner: s.owner, visibility: s.visibility, url: siteUrl(name), current: s.currentVersion, org: await orgOf(s.orgId) });
     }
     return c.json({ sites: out });
   });
@@ -808,6 +815,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
           name: s.name,
           type: s.type,
           owner: s.owner,
+          org: await orgOf(s.orgId),
           visibility: s.visibility,
           current: s.currentVersion,
           url: siteUrl(name),

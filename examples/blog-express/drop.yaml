@@ -15,7 +15,7 @@ app:
     memory: "256Mi"
   env:
     # --- non-secret DB connection config (safe to commit) ---
-    PGHOST: blog-db-rw # the `-rw` Service of the DB you create with `drop db:create blog-db`
+    PGHOST: blog-db-rw # the `-rw` Service of the DB you create with `drop db:create blog-db` (same org → same namespace → short name resolves)
     PGPORT: "5432"
     PGUSER: app # CNPG's application role
     PGDATABASE: app # CNPG's application database

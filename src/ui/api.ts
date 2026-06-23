@@ -7,10 +7,17 @@ export interface Me {
   admin: boolean;
 }
 
+export interface Org {
+  slug: string;
+  name: string;
+  kind: string; // "personal" | "team"
+}
+
 export interface ListItem {
   name: string;
   type: WorkloadType;
   owner: string;
+  org?: Org | null;
   visibility: string;
   url: string;
   current: string | null;
@@ -39,6 +46,7 @@ export interface Detail {
   name: string;
   type: WorkloadType;
   owner: string;
+  org?: Org | null;
   collaborators: string[];
   members: { email: string; role: string }[];
   visibility: string;

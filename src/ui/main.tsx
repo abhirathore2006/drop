@@ -31,7 +31,8 @@ h2 .count{background:#11151a;border:1px solid #2a2f37;border-radius:20px;padding
 .dot{width:8px;height:8px;border-radius:50%;background:#9be15d;box-shadow:0 0 8px #9be15d66}
 .card-name{font-weight:600;font-size:16px;flex:1}
 .card-owner{color:#8a9099;font-size:13px;margin:8px 0 14px}
-.card-foot{display:flex;justify-content:flex-end}
+.card-foot{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.card-org{font-size:11px;color:#9be15d;background:#11201a;border:1px solid #1f3a2a;border-radius:6px;padding:2px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60%}
 .ver{font-family:ui-monospace,monospace;font-size:12px;color:#6b7280}
 
 /* badges + pills */

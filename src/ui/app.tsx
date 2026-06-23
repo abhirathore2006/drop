@@ -33,6 +33,9 @@ function useRoute(): Route {
   return r;
 }
 const pathFor = (w: { type: WorkloadType; name: string }) => `/${w.type}/${encodeURIComponent(w.name)}`;
+// Org display: a personal org's name is the owner's email (redundant on a card that shows the owner),
+// so show "personal"; team orgs show their name.
+const orgLabel = (o?: { slug: string; name: string; kind: string } | null) => (!o ? "—" : o.kind === "personal" ? "personal" : o.name);
 
 function TypeBadge({ t }: { t: WorkloadType }) {
   return <span className={`badge badge-${t}`}>{TYPE_LABEL[t]}</span>;
@@ -55,6 +58,11 @@ function Card({ w }: { w: ListItem }) {
       </div>
       <div className="card-owner">{w.owner}</div>
       <div className="card-foot">
+        {w.org && (
+          <span className="card-org" title={`org: ${w.org.slug}`}>
+            🏢 {orgLabel(w.org)}
+          </span>
+        )}
         <span className="ver">{w.current ? "#" + w.current.replace(/^v_\d+_/, "") : "—"}</span>
       </div>
     </button>
@@ -244,7 +252,15 @@ function WorkloadPage({ name, me }: { name: string; me: Me }) {
                 {d.url.replace(/^https?:\/\//, "")} ↗
               </a>
             )}
-            <div className="downer">owner: {d.owner}</div>
+            <div className="downer">
+              owner: {d.owner}
+              {d.org && (
+                <span className="dorg" title={`org slug: ${d.org.slug}`}>
+                  {" · "}org: {orgLabel(d.org)}
+                  {d.org.kind !== "personal" ? ` (${d.org.slug})` : ""}
+                </span>
+              )}
+            </div>
           </div>
           {err && <div className="err">{err}</div>}
           <div className="panels">

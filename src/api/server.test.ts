@@ -761,9 +761,16 @@ test("read-model: list + detail + admin all carry the workload `type`", async ()
   const byName = Object.fromEntries(list.sites.map((s: any) => [s.name, s.type]));
   expect(byName.mysite).toBe("site");
   expect(byName.myapp).toBe("app");
-  expect((await (await call(app, "GET", "/v1/sites/myapp", "alice")).json()).type).toBe("app");
+  // each workload carries its owning org (slug/name/kind) for the console/CLI to display
+  const myapp = list.sites.find((s: any) => s.name === "myapp");
+  expect(myapp.org).toMatchObject({ kind: "personal", name: "alice@example.com" });
+  expect(typeof myapp.org.slug).toBe("string");
+  const detail = await (await call(app, "GET", "/v1/sites/myapp", "alice")).json();
+  expect(detail.type).toBe("app");
+  expect(detail.org).toMatchObject({ kind: "personal", name: "alice@example.com" });
   const admin = await (await call(app, "GET", "/v1/admin/sites", "alice")).json();
   expect(admin.sites.every((s: any) => typeof s.type === "string")).toBe(true);
+  expect(admin.sites.every((s: any) => s.org && typeof s.org.slug === "string")).toBe(true);
   await db.destroy();
 });
 
