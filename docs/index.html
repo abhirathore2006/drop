@@ -54,11 +54,11 @@
     <pre><code><span class="tok-c">$</span> drop publish ./dist myapp           <span class="tok-c"># static site</span>
   <span class="tok-s">✓ live at https://myapp.drop.example.com</span>  <span class="tok-c">(internal-only)</span>
 
-<span class="tok-c">$</span> drop deploy ./api myapi --build     <span class="tok-c"># build the Dockerfile & push it through Drop, then deploy</span>
-  <span class="tok-s">✓ live at https://myapi.drop.example.com</span>
 <span class="tok-c">$</span> drop db create myapi-db             <span class="tok-c"># managed Postgres (CloudNativePG)</span>
-<span class="tok-c">$</span> printf "$PW" | drop secrets set myapi DATABASE_PASSWORD --stdin  <span class="tok-c"># write-only secret</span>
-<span class="tok-c">$</span> drop restart myapi                  <span class="tok-c"># apply it</span></code></pre>
+<span class="tok-c">$</span> drop deploy ./api myapi --build --no-start  <span class="tok-c"># build + push through Drop, deploy — don't boot yet</span>
+<span class="tok-c">$</span> drop db password myapi-db --set-secret myapi:PGPASSWORD  <span class="tok-c"># rotate pw into the app secret (never printed)</span>
+<span class="tok-c">$</span> drop start myapi                    <span class="tok-c"># first boot — already has the secret</span>
+  <span class="tok-s">✓ live at https://myapi.drop.example.com</span></code></pre>
 
     <div class="note tip"><span class="lbl">Two planes, one product</span><p><strong>Static sites</strong>
     serve bytes from S3 at the edge. <strong>Compute</strong> (apps + databases + secrets) is <strong>opt-in</strong>

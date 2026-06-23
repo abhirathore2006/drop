@@ -186,7 +186,8 @@ printf '<that password>' | drop secrets set guestbook PGPASSWORD --stdin
 
 `drop secrets set` stores the value in the secret manager and never prints it back. `drop secrets ls
 guestbook` shows the key + when it changed (never the value). The app picks up a new/changed secret
-on the next **restart** (or deploy) — that's why Step 5 ends with `drop restart`.
+on its next **start** (or restart/deploy) — which is why Step 4 ends with `drop start`: it's the
+app's first boot, with the password already in place.
 
 ### Step 5 — verify
 
@@ -225,11 +226,10 @@ Identical flow with a different DB name and a heavier build. Differences from th
 ```bash
 drop db create notes-db
 
-drop deploy examples/notes-next --build          # builds (next build) + pushes + → https://notes.drop.localhost
+drop deploy examples/notes-next --build --no-start   # builds (next build) + pushes; deploy stopped
 
-drop db password notes-db                         # prints the password ONCE
-printf '<that password>' | drop secrets set notes PGPASSWORD --stdin
-drop restart notes                                # apply it
+drop db password notes-db --set-secret notes:PGPASSWORD   # rotate + store; never printed
+drop start notes                                  # first boot, already has the password → https://notes.drop.localhost
 ```
 
 ---

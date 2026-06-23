@@ -1,4 +1,4 @@
-# Deploy with:  drop deploy examples/board-tanstack
+# Deploy with:  drop deploy examples/board-tanstack --build --no-start   (walkthrough: ../DATABASE_APPS.md)
 # Full walkthrough (create the DB + map these env vars):  examples/DATABASE_APPS.md
 app:
   name: board
@@ -20,8 +20,7 @@ app:
     PGUSER: app # CNPG's application role
     PGDATABASE: app # CNPG's application database
     PGSSLMODE: require # encrypt in transit (CNPG self-signed cert; the app does not verify it)
-  # PGPASSWORD is NOT here — it is a SECRET (never committed). After deploying, set it write-only:
-  #   drop db password board-db                       # prints the password once
-  #   printf '<that password>' | drop secrets set board PGPASSWORD --stdin
-  #   drop restart board                              # apply it
+  # PGPASSWORD is NOT here — it is a SECRET (never committed). Deploy with --no-start, then rotate the DB password straight into this secret and start the app:
+  #   drop db password board-db --set-secret board:PGPASSWORD   # rotate + store; never printed
+  #   drop start board   # first boot, already has the password
   # Secrets are stored in the secret manager and injected as env vars — see ../DATABASE_APPS.md.

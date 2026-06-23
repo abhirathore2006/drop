@@ -1,4 +1,4 @@
-# Deploy with:  drop deploy examples/guestbook-node
+# Deploy with:  drop deploy examples/guestbook-node --build --no-start   (walkthrough: ../DATABASE_APPS.md)
 # Full walkthrough (create the DB + map these env vars):  examples/DATABASE_APPS.md
 app:
   name: guestbook
@@ -20,8 +20,7 @@ app:
     PGUSER: app # CNPG's application role
     PGDATABASE: app # CNPG's application database
     PGSSLMODE: require # encrypt in transit (CNPG self-signed cert; the app does not verify it)
-  # PGPASSWORD is NOT here — it is a SECRET (never committed). After deploying, set it write-only:
-  #   drop db password guestbook-db                          # prints the password once
-  #   printf '<that password>' | drop secrets set guestbook PGPASSWORD --stdin
-  #   drop restart guestbook                                 # apply it
+  # PGPASSWORD is NOT here — it is a SECRET (never committed). Deploy with --no-start, then rotate the DB password straight into this secret and start the app:
+  #   drop db password guestbook-db --set-secret guestbook:PGPASSWORD   # rotate + store; never printed
+  #   drop start guestbook   # first boot, already has the password
   # Secrets are stored in the secret manager and injected as env vars — see ../DATABASE_APPS.md.
