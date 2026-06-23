@@ -84,3 +84,63 @@ a hardcoded `DEFAULT_OPERAND_IMAGE` (`kube/cnpg.ts`) — an internet `ghcr.io` t
 an air-gapped / mirror-only registry. Make the fallback config-overridable (and mirror it) for prod.
 In practice `.status.image` is set whenever the DB is connectable (the only time rotation can
 succeed), so this is a defensive edge, not a routine path.
+
+## 8. CLI/MCP-driven image build + push (local == prod), target: in-cluster builds
+
+> **Status (2026-06-23):** Step 2 shipped on `feat/image-registry` — an `ImageStore` port
+> (`containerd` local / `registry` prod backends, like `SecretStore`), `PUT /v1/apps/:name/image`,
+> and `drop push` / `drop deploy --build` (build locally → stream a `docker save` tarball through
+> Drop → cluster). The manual `ctr import` is now optional. **Remaining:** verify the prod registry
+> (ECR) backend against a real/emulated registry + wire tenant-ECR/pull-creds in Terraform, and
+> Step 3 (in-cluster Kaniko/BuildKit builds — the no-local-Docker end-state). An MCP `app_push`
+> tool can mirror the CLI once a build context is settled.
+>
+> **Review follow-ups (deferred, low-risk):** (a) a reused image tag won't roll the pods (the
+> `--build` path mints a fresh tag each build, so this only bites a manually-pinned reused tag —
+> a deploy-time pod-template annotation would make same-tag redeploys roll); (b) containerd image
+> GC — every `--build` adds a tagged `drop.local/<app>:*` layer the node never reclaims, so prune
+> old tags per app (matters on the 8Gi local VM); (c) `drop push` claims an app name without
+> provisioning tenant manifests/quota (deploy does that later) — the upload size cap bounds disk
+> abuse, but a per-tenant name/workload cap (item 4) is the real backstop.
+
+**Problem.** Drop is bring-your-own-image: `drop deploy` only forwards the `app.image` string from
+`drop.yaml` into the Deployment's `container.image` verbatim — no build, no push, no
+`imagePullPolicy`, **no `imagePullSecrets`** (`kube/manifests.ts:126`). Consequences:
+- **Local** is a manual hack that *bypasses Drop entirely*: `podman build -t docker.io/library/<n>:<t>`
+  then `podman save | podman exec k3s ctr … images import` to shove the image straight into k3s's
+  containerd, *then* `drop deploy` (`examples/DATABASE_APPS.md:104-120`). The non-`:latest` tag is
+  what makes k8s use the imported image (default `IfNotPresent`) instead of pulling.
+- **Prod (EKS)** has no tenant image path at all. Terraform provisions ECR only for the *platform's*
+  own api/edge images (`infra/terraform/foundation/main.tf:14-27`); there is **no tenant registry,
+  no pull-credential wiring**. A private-registry tenant image would `ImagePullBackOff`. The docs
+  admit it: *"in a real cluster you'd `docker push` to a registry instead"* (`DATABASE_APPS.md:60`).
+
+So the two environments use *different, manual* image delivery, and neither goes through Drop —
+the opposite of a Heroku/Fly PaaS.
+
+**Proposal.** One CLI/MCP-driven flow that puts the image in a registry the cluster pulls from,
+**identical locally and in prod**. Build it in increments toward an in-cluster builder:
+
+- **Step 1 — registry + CLI build/push (smallest parity win).** Stand up a registry in both
+  environments: a `registry:2` container at `localhost:5000` locally (k3s configured to pull from
+  it), an **ECR repo per tenant/app** in prod (Drop provisions it at app-create + injects
+  `imagePullSecrets`, or uses node IRSA). `drop deploy` (or a new `drop build`/`drop push`) builds
+  the app's Dockerfile with the local Docker/podman, tags it `<registry>/<tenant>/<app>:<version>`,
+  pushes, and deploys referencing that ref. **Kills the `ctr import` hack; local == prod.** Needs a
+  local container builder (already required today).
+- **Step 2 — push the built image *through* Drop (no client registry creds).** CLI `docker save`s
+  the built image and **streams the tarball to a Drop API endpoint**, reusing the static-site
+  `publish` tarball-upload pattern (`/v1/sites/:name/versions` → an analogous `/v1/apps/:name/image`).
+  Drop loads it into the registry/containerd server-side. Developers never handle registry auth.
+- **Step 3 — in-cluster builds (TARGET end-state, full Heroku).** CLI uploads only the build
+  *context* (source tarball); Drop builds the image **in-cluster with Kaniko/BuildKit** (no local
+  Docker), pushes to the registry, streams build logs back to the CLI, and deploys. This is the
+  north-star: `git push`-style `drop deploy ./app` with zero local container tooling. Largest new
+  surface — a builder workload, build-log streaming, per-build resource limits + layer cache.
+
+**Why / touch points.** Closes the single biggest "is this really a PaaS?" gap. Touches
+`app-config.ts` (drop the implicit-tag assumption; maybe a `build:` block), `kube/manifests.ts`
+(explicit `imagePullPolicy` + `imagePullSecrets`), `api/server.ts` (image-upload/build routes +
+per-tenant registry provisioning), `cli/commands.ts` + `cli/client.ts` + `mcp/server.ts` (a
+`build`/`push` surface), `infra/terraform` (tenant ECR + pull IAM/IRSA) and `infra/local`
+(`registry:2` + k3s registry config). Steps 1→3 ship independently; each removes manual work.

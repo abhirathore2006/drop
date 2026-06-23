@@ -9,6 +9,7 @@ export interface ManifestContext {
   namespace: string; // tenant namespace
   host: string; // <name>.<baseDomain> — the registered HTTPScaledObject host
   sandbox?: boolean; // run under the gVisor RuntimeClass (untrusted tenants; prod only)
+  imagePullSecret?: string; // name of an imagePullSecret in the tenant ns (registry image backend; omit for local containerd-import + IRSA)
 }
 export interface AppManifests {
   deployment: Record<string, unknown>;
@@ -94,6 +95,17 @@ export function tenantManifests(namespace: string, opts: { blockedEgressCidrs?: 
   };
 }
 
+// Explicit pull policy by ref: a `drop.local/*` image was imported into the node's containerd and
+// has NO registry to fall back on, so it MUST be IfNotPresent regardless of tag (incl. :latest).
+// Otherwise parse the tag from the LAST ref segment (so a registry-with-port host like
+// `reg:5000/app` isn't mistaken for a tagged image): :latest / untagged → Always, else IfNotPresent.
+export function imagePullPolicy(image: string): "Always" | "IfNotPresent" {
+  if (image.startsWith("drop.local/")) return "IfNotPresent";
+  const lastSeg = image.split("/").pop() ?? image;
+  const tag = lastSeg.includes(":") ? lastSeg.split(":").pop()! : "latest";
+  return tag === "latest" ? "Always" : "IfNotPresent";
+}
+
 export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests {
   assertHttpOnly(app); // v1 guard: exactly one HTTP service
   const containerPort = app.services[0]!.internalPort;
@@ -120,10 +132,15 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
         metadata: { labels },
         spec: {
           ...(ctx.sandbox ? { runtimeClassName: "gvisor" } : {}),
+          // Pull secret for a private registry image (registry backend). Local containerd-imported
+          // images need none (already on the node); ECR-via-IRSA needs none either.
+          ...(ctx.imagePullSecret ? { imagePullSecrets: [{ name: ctx.imagePullSecret }] } : {}),
           containers: [
             {
               name: ctx.name,
               image: app.image,
+              // Make the policy explicit instead of relying on k8s' tag-based default (see imagePullPolicy).
+              imagePullPolicy: imagePullPolicy(app.image),
               ports: [{ containerPort }],
               // env lives in Secrets (not plaintext in the pod spec) — SEC-5. Two sources:
               //  - <name>-env: non-secret config from drop.yaml app.env (only when present).

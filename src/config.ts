@@ -35,6 +35,16 @@ export interface Config {
   secretManagerSecret?: string;
   secretStoreName: string; // the ESO ClusterSecretStore the app ExternalSecrets reference (e.g. "floci")
   secretPathPrefix: string; // SM name prefix → drop/<owner>/<app>/<KEY>
+  // Image push (`drop push` / `drop deploy --build` → PUT /v1/apps/:name/image). The CLI uploads a
+  // `docker save` tarball; the backend makes it pullable by the cluster. "containerd" imports into
+  // the local k3s node's containerd (local dev); "registry" pushes to a registry like ECR (prod).
+  imageBackend: "containerd" | "registry";
+  imageRuntime: string; // host container CLI that can reach the k3s node (containerd backend): "podman" | "docker"
+  imageK3sContainer: string; // the container running k3s (containerd backend), e.g. "k3s"
+  imageContainerdSock: string; // k3s containerd socket path inside that container
+  imageRegistry?: string; // registry host/repo prefix for the "registry" backend, e.g. <acct>.dkr.ecr.<region>.amazonaws.com/drop-apps
+  imageRegistryPullSecret?: string; // name of a pre-provisioned imagePullSecret in the tenant ns (registry backend)
+  imageMaxBytes: number; // reject an image-push upload larger than this (default 2 GiB) — DoS bound
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -91,5 +101,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     secretManagerSecret: env.DROP_SECRET_MANAGER_SECRET || undefined,
     secretStoreName: env.DROP_SECRET_STORE_NAME ?? "floci",
     secretPathPrefix: env.DROP_SECRET_PATH_PREFIX ?? "drop",
+    imageBackend: env.DROP_IMAGE_BACKEND === "registry" ? "registry" : "containerd",
+    imageRuntime: env.DROP_IMAGE_RUNTIME ?? "podman",
+    imageK3sContainer: env.DROP_K3S_CONTAINER ?? "k3s",
+    imageContainerdSock: env.DROP_CONTAINERD_SOCK ?? "/run/k3s/containerd/containerd.sock",
+    imageRegistry: env.DROP_IMAGE_REGISTRY || undefined,
+    imageRegistryPullSecret: env.DROP_IMAGE_REGISTRY_PULL_SECRET || undefined,
+    imageMaxBytes: Number(env.DROP_IMAGE_MAX_BYTES) || 2 * 1024 * 1024 * 1024,
   };
 }

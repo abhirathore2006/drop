@@ -6,6 +6,7 @@ import { createApp } from "./server.ts";
 import { FakeBlob } from "../blob/fake.ts";
 import { FakeKube } from "../kube/fake.ts";
 import { FakeSecretStore } from "../secrets/fake.ts";
+import { FakeImageStore } from "../images/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { UserStore } from "../users/store.ts";
 import { OrgStore } from "../orgs/store.ts";
@@ -40,7 +41,8 @@ async function mk(opts: { admins?: string[] } = {}) {
     bob: { sub: "bob@example.com", email: "bob@example.com" },
   });
   const orgs = new OrgStore(db);
-  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, orgs }), meta, blob, kube, secrets, orgs, db, users };
+  const images = new FakeImageStore();
+  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs }), meta, blob, kube, secrets, images, orgs, db, users };
 }
 
 const pub = (app: any, tok: string, name: string, body: Buffer) =>
@@ -54,6 +56,12 @@ const call = (app: any, method: string, path: string, tok: string, body?: any) =
     method,
     headers: { authorization: `Bearer ${tok}`, "content-type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
+  });
+const putImage = (app: any, tok: string, name: string, tag: string | null, body: Uint8Array) =>
+  app.request(`/v1/apps/${name}/image${tag === null ? "" : `?tag=${encodeURIComponent(tag)}`}`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${tok}`, "content-type": "application/octet-stream" },
+    body,
   });
 
 test("publish claims, sets pointer, returns url", async () => {
@@ -315,6 +323,69 @@ test("deploy: app and site names don't collide (409 both ways)", async () => {
   await db.destroy();
 });
 
+test("image push: claims the app, streams the tarball to the ImageStore, returns the in-cluster ref", async () => {
+  const { app, images, meta, db } = await mk();
+  const body = new Uint8Array([1, 2, 3, 4, 5]);
+  const res = await putImage(app, "alice", "imgapp", "v1", body);
+  expect(res.status).toBe(200);
+  const j = await res.json();
+  expect(j.image).toBe("drop.local/imgapp:v1");
+  expect(j.version).toBe("v1");
+
+  // the app was claimed (so `drop deploy --build` works before any deploy) + the push was recorded
+  const site = (await meta.getSitePlain("imgapp"))!;
+  expect(site.type).toBe("app");
+  expect(site.owner).toBe("alice@example.com");
+  expect(images.pushes).toHaveLength(1);
+  expect(images.pushes[0]!.scope.app).toBe("imgapp");
+  expect(images.pushes[0]!.scope.namespace).toMatch(/^drop-t-/);
+  expect(images.pushes[0]!.version).toBe("v1");
+  expect(images.pushes[0]!.bytes).toBe(5);
+  await db.destroy();
+});
+
+test("image push: rejects a missing/invalid ?tag (would mismatch the imported ref)", async () => {
+  const { app, images, db } = await mk();
+  expect((await putImage(app, "alice", "imgapp", null, new Uint8Array([1]))).status).toBe(400);
+  expect((await putImage(app, "alice", "imgapp", "bad tag!", new Uint8Array([1]))).status).toBe(400);
+  expect(images.pushes).toHaveLength(0); // never reached the backend
+  await db.destroy();
+});
+
+test("image push: type collision (site name) 409; non-owner 403", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "asite", await tgz({ "index.html": "x" })); // a site
+  expect((await putImage(app, "alice", "asite", "v1", new Uint8Array([1]))).status).toBe(409);
+  await call(app, "POST", "/v1/apps/aliceapp", "alice", { image: "x:1" }); // alice owns
+  expect((await putImage(app, "bob", "aliceapp", "v1", new Uint8Array([1]))).status).toBe(403);
+  await db.destroy();
+});
+
+test("image push: 413 when the upload exceeds the configured size cap", async () => {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  await users.upsertOnLogin("alice@example.com", null);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_S3_ENDPOINT: "http://localhost:4566", DROP_IMAGE_MAX_BYTES: "4" });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  const images = new FakeImageStore();
+  const app = createApp({ cfg, meta: new MetaStore(db), blob: new FakeBlob(), db, users, verifier, kube: new FakeKube(), secrets: new FakeSecretStore(), images, orgs: new OrgStore(db) });
+  const res = await putImage(app, "alice", "bigapp", "v1", new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8])); // 8 > 4-byte cap
+  expect(res.status).toBe(413);
+  expect(images.pushes).toHaveLength(0); // aborted mid-stream, never recorded
+  await db.destroy();
+});
+
+test("image push: 501 when compute is disabled (no kube)", async () => {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  await users.upsertOnLogin("alice@example.com", null);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_S3_ENDPOINT: "http://localhost:4566" });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  const app = createApp({ cfg, meta: new MetaStore(db), blob: new FakeBlob(), db, users, verifier, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(db) }); // no kube
+  expect((await putImage(app, "alice", "imgapp", "v1", new Uint8Array([1]))).status).toBe(501);
+  await db.destroy();
+});
+
 test("deploy: non-owner 403; bad config 400", async () => {
   const { app, db } = await mk();
   await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" }); // alice owns
@@ -331,7 +402,7 @@ test("deploy: 501 when compute is not enabled (no kube)", async () => {
   const users = new UserStore(db);
   const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
   const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
-  const app = createApp({ cfg, meta: new MetaStore(db), blob: new FakeBlob(), db, users, verifier, secrets: new FakeSecretStore(), orgs: new OrgStore(db) }); // no kube
+  const app = createApp({ cfg, meta: new MetaStore(db), blob: new FakeBlob(), db, users, verifier, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(db) }); // no kube
   expect((await call(app, "POST", "/v1/apps/x", "alice", { image: "x:1" })).status).toBe(501);
   await db.destroy();
 });
@@ -391,7 +462,7 @@ test("auth: principal email is canonicalized to lowercase (no case-fold tenant c
     upper: { sub: "Alice@Example.com", email: "Alice@Example.com" },
     lower: { sub: "alice@example.com", email: "alice@example.com" },
   });
-  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube, secrets: new FakeSecretStore(), orgs: new OrgStore(db) });
+  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(db) });
   expect((await call(app, "POST", "/v1/apps/billing", "upper", { image: "x:1" })).status).toBe(200);
   const site = (await meta.getSitePlain("billing"))!;
   expect(site.owner).toBe("alice@example.com"); // owner stored canonical (not "Alice@Example.com")
@@ -631,7 +702,7 @@ test("db:create — names don't collide with sites/apps (409); non-owner 403; no
   const users = new UserStore(db2);
   const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
   const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
-  const noKube = createApp({ cfg, meta: new MetaStore(db2), blob: new FakeBlob(), db: db2, users, verifier, secrets: new FakeSecretStore(), orgs: new OrgStore(db2) }); // no kube
+  const noKube = createApp({ cfg, meta: new MetaStore(db2), blob: new FakeBlob(), db: db2, users, verifier, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(db2) }); // no kube
   expect((await call(noKube, "POST", "/v1/databases/x", "alice", {})).status).toBe(501);
   await db2.destroy();
 });
@@ -652,7 +723,7 @@ test("db:create — prod (no S3 endpoint) fails closed without an IRSA role, suc
     const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com", ...extra });
     const kube = new FakeKube();
     const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
-    return { d, kube, app: createApp({ cfg, meta: new MetaStore(d), blob: new FakeBlob(), db: d, users, verifier, kube, secrets: new FakeSecretStore(), orgs: new OrgStore(d) }) };
+    return { d, kube, app: createApp({ cfg, meta: new MetaStore(d), blob: new FakeBlob(), db: d, users, verifier, kube, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(d) }) };
   };
   // prod, no role → fail closed (501), no DB provisioned
   const a = await mkProd({});
@@ -802,7 +873,7 @@ test("deploy: tenant egress except is sourced from config (DROP_BLOCKED_EGRESS_C
     DROP_BLOCKED_EGRESS_CIDRS: "100.64.0.0/10,172.16.0.0/12",
   });
   const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
-  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube, secrets: new FakeSecretStore(), orgs: new OrgStore(db) });
+  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(db) });
   await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
   const np = kube.tenantApplies[0]!.manifests.networkPolicy as any;
   const https = np.spec.egress.find((e: any) => (e.ports ?? []).some((p: any) => p.port === 443));

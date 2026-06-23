@@ -11,6 +11,7 @@ import { SessionVerifier } from "../src/auth/session-token.ts";
 import { createApp } from "../src/api/server.ts";
 import { KubeApiClient } from "../src/kube/client.ts";
 import { makeSecretStore } from "../src/secrets/factory.ts";
+import { makeImageStore } from "../src/images/factory.ts";
 import type { Verifier } from "../src/auth/types.ts";
 import type { KubeClient } from "../src/kube/types.ts";
 
@@ -77,9 +78,10 @@ if (process.env.DROP_KUBECONFIG) {
 }
 
 const secrets = makeSecretStore(cfg, kubeApi);
-if (kube) console.log(`drop-api secrets backend: ${cfg.secretBackend}`);
+const images = makeImageStore(cfg, kube);
+if (kube) console.log(`drop-api secrets backend: ${cfg.secretBackend} · image backend: ${cfg.imageBackend}`);
 const orgs = new OrgStore(db);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, orgs });
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });

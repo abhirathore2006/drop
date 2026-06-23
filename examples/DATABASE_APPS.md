@@ -101,36 +101,48 @@ app:
 > `PGHOST` is `guestbook-db-rw`, not the full FQDN, because the app pod runs in the **same tenant
 > namespace** as the database. The full FQDN from `db:create` also works.
 
-### Step 3 — build the image and import it into k3s
+### Step 3 — build + deploy (one command)
 
-`drop deploy` references an image; it doesn't build one. On the local stack, build with podman and
-import into k3s's containerd (k3s runs as the podman container named `k3s`):
+Let Drop build the image and push it for you — **the same `drop` command locally and in prod**, and
+you never touch a registry or containerd by hand:
+
+```bash
+drop deploy examples/guestbook-node --build
+```
+
+```
+  ▸ building drop.local/guestbook:b… (docker build examples/guestbook-node)…
+  ▸ pushing image through Drop…
+  ▸ deploying guestbook  (drop.local/guestbook:b…)…
+  ✓ live at https://guestbook.drop.localhost
+```
+
+`--build` runs the Dockerfile build locally (`docker` by default; set `DROP_BUILDER=podman` to use
+podman), then streams a `docker save` tarball to `PUT /v1/apps/guestbook/image`. Drop makes it
+pullable by the cluster — **locally** it imports into the k3s node's containerd; **in prod** it
+pushes to a registry (ECR) — and the Deployment references the pushed tag (`IfNotPresent`, so a
+fresh tag each `--build` rolls the pods). `drop push examples/guestbook-node` does just the
+build+push and prints the ref, if you want to deploy separately.
+
+> Drop's image backend is chosen by `DROP_IMAGE_BACKEND` (`containerd` locally, `registry` in prod),
+> exactly like the secret backend — see the [WebSocket/registry roadmap](../planning/2026-06-23-websocket-support-plan.md)
+> and `Future.md` item 8 for the in-cluster-build (no local Docker) end-state.
+
+<details><summary>Manual alternative (no <code>--build</code>): build + import into k3s yourself</summary>
+
+If you'd rather build out-of-band and reference a fixed `image:` in `drop.yaml`:
 
 ```bash
 # build (use the docker.io/library/ prefix so k8s and containerd agree on the name)
 podman build -t docker.io/library/guestbook-node:1 examples/guestbook-node
-
 # import into k3s's containerd (namespace k8s.io)
 podman save docker.io/library/guestbook-node:1 \
   | podman exec -i k3s ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+drop deploy examples/guestbook-node      # uses image: guestbook-node:1 from drop.yaml
 ```
+</details>
 
-The `drop.yaml` `image: guestbook-node:1` resolves to `docker.io/library/guestbook-node:1`, which
-now exists in containerd. Because the tag isn't `:latest`, k8s uses the local image (pull policy
-`IfNotPresent`) instead of reaching for a registry.
-
-### Step 4 — deploy
-
-```bash
-drop deploy examples/guestbook-node
-```
-
-```
-  ▸ deploying guestbook  (guestbook-node:1)…
-  ✓ live at https://guestbook.drop.localhost
-```
-
-### Step 5 — set the DB password as a write-only secret, then restart
+### Step 4 — set the DB password as a write-only secret, then restart
 
 ```bash
 drop db:password guestbook-db                                # prints the password ONCE
@@ -142,7 +154,7 @@ drop restart guestbook                                       # restart to inject
 guestbook` shows the key + when it changed (never the value). The app picks up a new/changed secret
 on the next **restart** (or deploy) — that's why Step 5 ends with `drop restart`.
 
-### Step 6 — verify
+### Step 5 — verify
 
 ```bash
 # https (after `make trust-cert`); or plain http straight to the edge on :8474

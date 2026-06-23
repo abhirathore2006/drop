@@ -6,6 +6,7 @@ import { Client } from "./client.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate } from "./resolve-name.ts";
+import { buildAndPushImage } from "./build-push.ts";
 import { validateName } from "../names.ts";
 
 async function client(): Promise<Client> {
@@ -95,14 +96,31 @@ export function buildProgram(): Command {
     .command("deploy <dir> [name]")
     .description("Deploy a container app (reads the app: section from drop.yaml)")
     .option("--org <slug>", "create in this organisation (default: your personal org)")
-    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string }) => {
+    .option("--build", "build the image from dir's Dockerfile and push it through Drop (no registry needed)")
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; build?: boolean }) => {
       const { name, source, app } = await loadAppDeploy(dir, nameArg);
+      if (opts.build) {
+        const { image } = await buildAndPushImage(await client(), dir, name, opts.org);
+        app.image = image; // deploy the just-pushed image instead of the drop.yaml ref
+      }
       console.log(`  ▸ deploying ${name}  (${app.image})…`);
       const res = await (await client()).deploy(name, app, opts.org);
       console.log(`  ✓ live at ${res.url}`);
       if (source === "generated") {
         console.log(`  tip: add  name: ${name}  under app: in drop.yaml to keep this URL across deploys.`);
       }
+    });
+
+  program
+    .command("push <dir> [name]")
+    .description("Build the app image from dir's Dockerfile and push it through Drop (no registry needed); prints the in-cluster ref")
+    .option("--org <slug>", "target organisation (default: your personal org)")
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string }) => {
+      const { name } = await loadAppDeploy(dir, nameArg);
+      const { image } = await buildAndPushImage(await client(), dir, name, opts.org);
+      console.log(`  ✓ pushed ${image}`);
+      console.log(`  tip: prefer  drop deploy ${dir} --build  (build+push+deploy in one step — a fresh tag each build, so redeploys roll the pods).`);
+      console.log(`       if you instead pin  image: ${image}  in drop.yaml, bump the tag on a rebuild — reusing the same tag won't roll the pods.`);
     });
 
   program

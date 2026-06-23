@@ -38,6 +38,21 @@ export class Client {
       body: JSON.stringify(app),
     });
   }
+  /** Stream a `docker save` image tarball to the API, which makes it pullable by the cluster.
+   *  `body` is a Node Readable (the save stdout) so large images never buffer in memory. */
+  async pushImage(name: string, body: NodeJS.ReadableStream | Uint8Array, tag: string, org?: string) {
+    const q = new URLSearchParams({ tag });
+    if (org) q.set("org", org);
+    const res = await fetch(`${this.s.apiBase}/v1/apps/${name}/image?${q.toString()}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${this.s.token}`, "content-type": "application/octet-stream" },
+      body: body as any,
+      duplex: "half", // required by fetch when streaming a request body
+    } as RequestInit);
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((json as any).error ?? `image push: ${res.status}`);
+    return json;
+  }
   dbCreate(name: string, db: DatabaseConfig | Record<string, never>, org?: string) {
     return this.req("POST", `/v1/databases/${name}${this.orgQ(org)}`, {
       contentType: "application/json",

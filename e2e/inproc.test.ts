@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { FakeBlob } from "../src/blob/fake.ts";
 import { FakeSecretStore } from "../src/secrets/fake.ts";
+import { FakeImageStore } from "../src/images/fake.ts";
 import { OrgStore } from "../src/orgs/store.ts";
 import { MetaStore } from "../src/metastore/store.ts";
 import { UserStore } from "../src/users/store.ts";
@@ -28,7 +29,7 @@ beforeAll(async () => {
   db = await makeTestDb();
   const meta = new MetaStore(db);
   const users = new UserStore(db);
-  api = Bun.serve({ port: 0, fetch: createApp({ cfg, meta, blob, db, users, verifier: new DevHeaderVerifier(), secrets: new FakeSecretStore(), orgs: new OrgStore(db) }).fetch });
+  api = Bun.serve({ port: 0, fetch: createApp({ cfg, meta, blob, db, users, verifier: new DevHeaderVerifier(), secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(db) }).fetch });
   // pointerTtlMs: 0 so tests read the current pointer immediately (the 10s prod
   // cache is exercised separately and would otherwise mask same-test republishes).
   edge = Bun.serve({ port: 0, fetch: createEdge({ meta, blob, baseDomain: "drop.localhost", pointerTtlMs: 0 }).fetch });

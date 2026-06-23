@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import * as streamConsumers from "node:stream/consumers";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -25,6 +25,7 @@ import { appManifests, tenantManifests } from "../kube/manifests.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
 import { PasswordSyncError, type KubeClient } from "../kube/types.ts";
 import type { SecretStore } from "../secrets/types.ts";
+import type { ImageStore } from "../images/types.ts";
 import { fingerprint, validateSecretKey } from "../secrets/secrets.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { dashboardHtml } from "./dashboard.ts";
@@ -38,6 +39,7 @@ export interface Deps {
   verifier: Verifier;
   kube?: KubeClient; // optional: when absent, /v1/apps returns 501 (static-only instance)
   secrets: SecretStore; // app-secrets backend (kube locally, AWS Secrets Manager / etc. in prod)
+  images: ImageStore; // image-push backend (containerd-import locally, registry/ECR in prod)
   orgs: OrgStore; // organisations (resource grouping + org-level permissions)
   now?: () => Date;
 }
@@ -334,7 +336,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const verId = newVersionId(now());
     const ns = site.namespace; // per-owner tenant namespace (isolation)
     await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs })); // namespace + NetworkPolicy + quota + LimitRange
-    const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox: !appCfg.trusted });
+    const manifests = appManifests(appCfg, {
+      name,
+      namespace: ns,
+      host: `${name}.${d.cfg.baseDomain}`,
+      sandbox: !appCfg.trusted,
+      imagePullSecret: d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined,
+    });
     await d.kube.applyApp(ns, name, manifests);
     // Reconcile the secret-injection wiring (no-op for kube; (re)writes the ESO ExternalSecret for
     // external backends) using the current key registry.
@@ -346,6 +354,63 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
     await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
     return c.json({ url: siteUrl(name), name, version: verId, image: appCfg.image });
+  });
+
+  // ---- image push: CLI builds locally + streams a `docker save` tarball; we make it pullable by
+  // the cluster (containerd-import locally, registry/ECR in prod) and return the in-cluster ref.
+  // The developer never needs registry credentials. `drop deploy --build` chains this → POST /v1/apps.
+  app.put("/v1/apps/:name/image", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const nameErr = validateName(name);
+    if (nameErr) return c.json({ error: nameErr }, 400);
+
+    // resolve or claim — pushing an image is part of deploying an app; share the one name namespace
+    let site = await d.meta.getSitePlain(name);
+    if (!site) {
+      await ensureUser(email);
+      const orgRes = await resolveCreateOrg(c, email);
+      if ("err" in orgRes) return orgRes.err;
+      const claimed = await d.meta.claimSite(name, email, "app", { id: orgRes.org.id, namespace: orgRes.org.namespace });
+      site = claimed ?? (await d.meta.getSitePlain(name));
+    }
+    if (!site) return c.json({ error: "claim failed" }, 500);
+    if (site.type !== "app") return c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409);
+    const actor = await actorFor(email, site);
+    if (!can(actor, "deploy")) return c.json({ error: `app is owned by ${site.owner}` }, 403);
+
+    if (!c.req.raw.body) return c.json({ error: "empty body" }, 400);
+    // The CLI tags the built image `drop.local/<app>:<tag>` before `docker save`, so the archive
+    // carries that ref; we MUST reuse the same tag (not a server-minted one) or the imported image
+    // and the Deployment's image string would diverge → ImagePullBackOff. Validate it's a safe tag.
+    const version = c.req.query("tag") ?? "";
+    if (!/^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$/.test(version)) return c.json({ error: "missing or invalid ?tag" }, 400);
+    // Cap the upload (DoS bound): the backend imports/pushes the whole stream, so count bytes through
+    // a transform and abort past the limit rather than buffering an unbounded body.
+    const max = d.cfg.imageMaxBytes;
+    let seen = 0;
+    let tooBig = false;
+    const limit = new Transform({
+      transform(chunk, _enc, cb) {
+        seen += (chunk as Buffer).length;
+        if (seen > max) {
+          tooBig = true;
+          return cb(new Error(`image exceeds the ${max}-byte limit`));
+        }
+        cb(null, chunk);
+      },
+    });
+    const raw = Readable.fromWeb(c.req.raw.body as Parameters<typeof Readable.fromWeb>[0]);
+    raw.on("error", (e) => limit.destroy(e instanceof Error ? e : new Error(String(e)))); // client abort → don't crash
+    raw.pipe(limit);
+    try {
+      const pushed = await d.images.push({ owner: site.owner, app: name, namespace: site.namespace }, version, limit);
+      return c.json({ image: pushed.image, version });
+    } catch (e) {
+      if (tooBig) return c.json({ error: `image too large (limit ${max} bytes)` }, 413);
+      return c.json({ error: `image push failed: ${(e as Error).message}` }, 400);
+    }
   });
 
   // ---- app secrets: write-only (set/list-keys/delete; values are NEVER returned) ----
@@ -702,6 +767,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       await d.secrets
         .destroy({ owner: site.owner, app: name, namespace: site.namespace })
         .catch((e) => console.error(`delete ${name}: secrets.destroy failed (possible orphaned secret material): ${(e as Error).message}`));
+      // Remove pushed image material too (no-op for containerd; deletes registry images in prod).
+      await d.images
+        .destroy({ owner: site.owner, app: name, namespace: site.namespace })
+        .catch((e) => console.error(`delete ${name}: images.destroy failed (possible orphaned image): ${(e as Error).message}`));
     } else if (site.type === "database" && d.kube) await d.kube.deleteDatabase(site.namespace, name);
     await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);

@@ -39,6 +39,31 @@ test("appManifests builds Deployment + Service + HTTPScaledObject", () => {
   expect(h.spec.replicas).toEqual({ min: 0, max: 3 });
 });
 
+test("appManifests sets an explicit imagePullPolicy by tag + imagePullSecrets only when given", () => {
+  // versioned tag → use the present image (local-imported / already-pulled), no pull secret
+  const versioned = appManifests(base, { name: "x", namespace: "ns", host: "x.example.com" });
+  const vc = (versioned.deployment as any).spec.template.spec;
+  expect(vc.containers[0].imagePullPolicy).toBe("IfNotPresent");
+  expect(vc.imagePullSecrets).toBeUndefined();
+
+  // :latest (or untagged) → Always re-pull
+  const latest = appManifests({ ...base, image: "nginx:latest" }, { name: "x", namespace: "ns", host: "x.example.com" });
+  expect((latest.deployment as any).spec.template.spec.containers[0].imagePullPolicy).toBe("Always");
+  const untagged = appManifests({ ...base, image: "nginx" }, { name: "x", namespace: "ns", host: "x.example.com" });
+  expect((untagged.deployment as any).spec.template.spec.containers[0].imagePullPolicy).toBe("Always");
+
+  // registry backend supplies a pull secret → referenced on the pod
+  const reg = appManifests(base, { name: "x", namespace: "ns", host: "x.example.com", imagePullSecret: "drop-registry" });
+  expect((reg.deployment as any).spec.template.spec.imagePullSecrets).toEqual([{ name: "drop-registry" }]);
+
+  // local-imported drop.local/* image MUST be IfNotPresent even at :latest (no registry to pull from)
+  const local = appManifests({ ...base, image: "drop.local/x:latest" }, { name: "x", namespace: "ns", host: "x.example.com" });
+  expect((local.deployment as any).spec.template.spec.containers[0].imagePullPolicy).toBe("IfNotPresent");
+  // registry-with-port, untagged → Always (the ':5000' is a port, not a tag)
+  const port = appManifests({ ...base, image: "reg.example.com:5000/app" }, { name: "x", namespace: "ns", host: "x.example.com" });
+  expect((port.deployment as any).spec.template.spec.containers[0].imagePullPolicy).toBe("Always");
+});
+
 test("appManifests defaults scale to min:0/max:3 when unspecified", () => {
   const m = appManifests(base, { name: "x", namespace: "ns", host: "x.example.com" });
   expect((m.httpScaledObject as any).spec.replicas).toEqual({ min: 0, max: 3 });
