@@ -47,7 +47,7 @@ and prints it **once**; pipe that into `drop secrets set`.
 
 ```bash
 # 1. the local compute stack is up (k3s-on-podman + KEDA + CloudNativePG)
-make compute-up                 # or: bash .run/cluster-up.sh, then `make floci postgres`
+make compute-up                 # or: bash infra/local/compute-up.sh, then `make floci postgres`
 
 # 2. you're logged in to the API (dev-login needs DROP_DEV_AUTH=1 on the server)
 drop dev-login me you@example.com     # local dev token; or `drop login` for Google OAuth
@@ -56,8 +56,11 @@ drop dev-login me you@example.com     # local dev token; or `drop login` for Goo
 make trust-cert
 ```
 
-These examples assume the **local k3s dev stack**, where you build images with podman and import
-them into k3s's containerd. In a real cluster you'd `docker push` to a registry instead.
+These examples assume the **local k3s dev stack**. The recommended path is `drop deploy <dir>
+--build` — Drop builds the Dockerfile locally and pushes the image through Drop so the cluster can
+pull it: **locally** it imports into k3s's containerd; **in a real cluster** it pushes to a
+registry (ECR). Same command either way; you never wrangle podman/containerd or registry
+credentials by hand. (The manual build-and-import path is still available — see Step 3 below.)
 
 ---
 
@@ -77,6 +80,10 @@ drop db:create guestbook-db
 ```
 
 Note the **host**, **db** (`app`), and **user** (`app`).
+
+> By default the database (and the app you deploy in Step 3) land in your **personal** org. To put
+> them in a team org instead, add `--org <slug>` to both `drop db:create` and `drop deploy` — e.g.
+> `drop db:create guestbook-db --org acme`. Create a team org with `drop org create <slug> [name]`.
 
 ### Step 2 — the env config (already in `drop.yaml`)
 
@@ -183,7 +190,7 @@ That's the whole loop: **DB → env → image → deploy → data persists.**
 
 Identical flow with a different DB name and a heavier build. Differences from the Node app:
 
-- The image is a **multi-stage Next.js standalone** build, so `podman build` runs `next build`
+- The image is a **multi-stage Next.js standalone** build, so the Dockerfile runs `next build`
   (slower) and produces a small self-contained runtime image.
 - The image bakes `PORT=8080` and **`HOSTNAME=0.0.0.0`** (Next's standalone server binds to
   `HOSTNAME`; without `0.0.0.0` it would only listen on localhost inside the pod).
@@ -191,15 +198,11 @@ Identical flow with a different DB name and a heavier build. Differences from th
 ```bash
 drop db:create notes-db
 
-podman build -t docker.io/library/notes-next:1 examples/notes-next
-podman save docker.io/library/notes-next:1 \
-  | podman exec -i k3s ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+drop deploy examples/notes-next --build          # builds (next build) + pushes + → https://notes.drop.localhost
 
-drop deploy examples/notes-next                 # → https://notes.drop.localhost
-
-drop db:password notes-db                        # prints the password ONCE
+drop db:password notes-db                         # prints the password ONCE
 printf '<that password>' | drop secrets set notes PGPASSWORD --stdin
-drop restart notes                               # apply it
+drop restart notes                                # apply it
 ```
 
 ---
@@ -221,7 +224,7 @@ default `kube` writes the `<app>-secret` Kubernetes Secret directly; `aws` store
 Secrets Manager** at `drop/<namespace>/<app>/<KEY>` and the External Secrets Operator syncs it into
 the `<app>-secret` Secret. Locally, `aws` runs against **Floci's** Secrets-Manager emulation, so the
 local stack exercises the same path as prod. Either way the app just sees env vars. Manage secrets
-from the **console** (app drawer → Secrets) or the `secret_set`/`secret_list`/`secret_delete` **MCP**
+from the **console** (the app's page → Secrets) or the `secret_set`/`secret_list`/`secret_delete` **MCP**
 tools too. Owner/admin only.
 
 ## Rotating the password later
@@ -243,7 +246,7 @@ drop stop <app>      # true offline — scale to 0 AND won't wake on traffic
 drop start <app>     # bring it back (restores the configured scale)
 ```
 
-Also in the console (app drawer → lifecycle row) and via the `app_restart`/`app_stop`/`app_start`
+Also in the console (the app's page → lifecycle row) and via the `app_restart`/`app_stop`/`app_start`
 MCP tools. Editor+ (operational).
 
 ---

@@ -37,7 +37,7 @@ flowchart TB
     end
 
     subgraph stores["State"]
-        pg[("Postgres<br/>users · sites (site/app/db) · site_members<br/>versions · app_secret_keys · auth_handles")]
+        pg[("Postgres<br/>users · organisations · org_members<br/>sites (site/app/db) · site_members<br/>versions · app_secret_keys · auth_handles")]
         s3[("S3 / Floci<br/>sites/&lt;name&gt;/files/&lt;verId&gt;/…")]
     end
 
@@ -150,6 +150,9 @@ memory use is bounded by concurrency, not by site count.
 ```mermaid
 erDiagram
     users ||--o{ site_members : "is"
+    users ||--o{ org_members : "is"
+    organisations ||--o{ org_members : "has"
+    organisations ||--o{ sites : "owns"
     sites ||--o{ site_members : "has"
     sites ||--o{ versions : "has"
     sites ||--o{ app_secret_keys : "has"
@@ -161,9 +164,23 @@ erDiagram
         text status "active | suspended"
         timestamptz last_login_at
     }
+    organisations {
+        text id PK
+        text slug UK "unique, DNS-safe"
+        text name
+        text kind "personal | team"
+        text namespace "literal k8s tenant ns (stored, not derived)"
+        text created_by "FK → users"
+    }
+    org_members {
+        text org_id PK "FK → organisations (cascade); PK is (org_id, email)"
+        text email PK "FK → users"
+        text role "owner | admin | member | viewer"
+    }
     sites {
         text name PK
         text type "site | app | database"
+        text org_id "FK → organisations (nullable in migration window)"
         text current_version "nullable"
         text visibility "public | private | password"
         text password_hash "nullable"
@@ -203,10 +220,38 @@ erDiagram
 
 Exactly one `owner` per site is enforced by a partial unique index
 (`unique(site_name) where role='owner'`). Deleting a site cascades to its members
-and versions. Authorization is two-axis: platform role (`users.role`) + per-site
-role (`site_members.role`), resolved by `can(actor, action)` in
-`src/authz/permissions.ts`. Visibility is an independent axis (who may *view* the
-served pages) from roles (who may *manage* the site).
+and versions. Visibility is an independent axis (who may *view* the served pages)
+from roles (who may *manage* the site).
+
+**Organisations (m0004).** Every resource (`sites.org_id`) belongs to exactly one
+**organisation** — a logical group that owns resources and carries org-wide roles
+(`org_members.role` ∈ `owner | admin | member | viewer`). On first login a user's
+**personal** org is ensured (`ensurePersonalOrg`); its `namespace` is the user's
+*existing* `tenantNamespace(email)`, stored verbatim on the row (not re-derived —
+the email hash isn't recoverable from a slug), so the migration moves **no running
+workload**. **Team** orgs are created explicitly (`createOrg`) and get their own
+`orgSlugNamespace(slug)`. The id is deterministic from email/slug (idempotent,
+race-safe); a partial unique index pins one personal org per user and one `owner`
+per org. The m0004 backfill seeds a personal org per existing site **owner** and
+sets `org_id` on their sites; `org_id` stays nullable through the window, with
+`can()`/namespace resolution falling back to `site_members` + `tenantNamespace(owner)`.
+
+**Authorization** is now a three-input **union**, resolved by `can(actor, action)`
+in `src/authz/permissions.ts`:
+
+```
+can = platform-admin
+    OR org-role-on-the-resource's-org  (ORG_MAP)
+    OR per-resource site-role          (SITE_MAP)   ← additive grant layer
+```
+
+Org roles apply **org-wide** (every resource in the org): `owner`/`admin` =
+everything; `member` = read, logs, publish, deploy, db:create, rollback, configure
+(ship + manage config/secrets, but **not** share/transfer/delete a resource);
+`viewer` = read only. `site_members` survive as a per-resource additive grant — the
+broader of org-role and site-role wins, never the narrower. Resource **creation**
+(no resource exists yet) is an org-role check (`canCreateInOrg`); org member/setting
+management is `canManageOrg` (platform-admin / org owner / org admin).
 
 ---
 
@@ -286,7 +331,7 @@ both deployments.
 
 ---
 
-## 7. Compute plane (apps · databases · secrets)
+## 7. Compute plane (apps · databases · secrets · images)
 
 Opt-in (enabled by `DROP_KUBECONFIG`). The **api** is the only cluster writer; it talks to the
 Kubernetes API over plain `node:https` with **server-side apply** (no `@kubernetes/client-node`),
@@ -303,6 +348,7 @@ flowchart TB
     subgraph cp["api (control plane)"]
         K["KubeClient (https + SSA)"]
         SS["SecretStore port<br/>kube | aws"]
+        IS["ImageStore port<br/>containerd | registry"]
     end
     subgraph ns["tenant namespace drop-t-…"]
         dep["app Deployment<br/>+ Service + HTTPScaledObject"]
@@ -313,10 +359,16 @@ flowchart TB
     eso["External Secrets Operator"]
     asm[("AWS Secrets Manager<br/>/ Floci")]
     s3[("S3 / Floci<br/>(WAL + backups)")]
+    ctrd["k3s node containerd<br/>(local: ctr images import)"]
+    reg[("Registry / ECR<br/>(prod)")]
 
     K --> dep & cl
     SS -->|kube| sec
     SS -->|aws| asm --> eso --> sec
+    IS -->|containerd| ctrd
+    IS -->|registry| reg
+    ctrd -.->|"drop.local/&lt;app&gt;:&lt;ver&gt;<br/>IfNotPresent"| dep
+    reg -.->|"pull (imagePullSecret / IRSA)"| dep
     edge["edge"] -->|"&lt;app&gt; host"| keda --> dep
     dep -->|envFrom| sec
     cl --> s3
@@ -329,6 +381,15 @@ Deployment — KEDA owns the count (0..max). The edge proxies `<name>.drop.examp
 the first request. Lifecycle: **restart** bumps a pod-template annotation; **stop** pauses the
 ScaledObject (`paused-replicas: 0`) *and* scales to 0 (true offline — won't wake on traffic);
 **start** un-pauses. `runtime_state` in Postgres makes a stop survive redeploys.
+
+> **WebSocket edge limitation.** WebSocket (HTTP `Upgrade`) traffic does **not** yet traverse the
+> public edge. Two independent blockers sit on `client → edge → KEDA interceptor → pod`: the edge
+> proxy returns a Hono `Response` and never tunnels upgrades (`"upgrade"`/`"connection"` are in its
+> hop-by-hop strip list), and the KEDA HTTP add-on interceptor itself returns **HTTP 403** for WS
+> upgrades. Today a WS app (`examples/chat-ws`) is exercised via `kubectl port-forward` to the pod.
+> The fix — a raw-socket upgrade tunnel on the edge that routes `ws` apps **directly to their
+> in-cluster Service** (bypassing the interceptor, `min ≥ 1` so no scale-to-zero) — is in
+> `planning/2026-06-23-websocket-support-plan.md`.
 
 **Databases.** `drop db:create` → a **CloudNativePG** `Cluster` (Postgres 18, single instance),
 with backups via the **Barman Cloud Plugin** (`ObjectStore` + `ScheduledBackup`, method `plugin`)
@@ -345,6 +406,32 @@ siblings). **`aws`**: the api writes one **AWS Secrets Manager** secret per key 
 `<app>-secret` (listed after `<app>-env`, so a secret wins on a key collision; `optional` so an
 absent Secret never blocks startup). The metastore holds only key **names** + a fingerprint; a
 value is never returned, logged, or persisted outside the secret manager and the pod env.
+
+**Images.** A developer can build and ship an app image **through Drop** without ever holding
+registry credentials — and with the *same* command locally and in prod. The CLI builder (`docker`
+by default; `DROP_BUILDER=podman` to switch) builds the Dockerfile, tags it `drop.local/<app>:<tag>`,
+`docker save`s it, and **streams the tarball** to `PUT /v1/apps/:name/image` (Bearer). `drop deploy
+<dir> --build` does build → push → deploy; `drop push <dir> [name]` does only build+push and prints
+the in-cluster ref. Server-side, the api stores the archive behind an **`ImageStore` port** (size-
+capped by `DROP_IMAGE_MAX_BYTES`, default 2 GiB; `FakeImageStore` in tests), with the backend chosen
+at deploy time by `DROP_IMAGE_BACKEND`:
+
+- **`containerd`** (default, local k3s) — `<DROP_IMAGE_RUNTIME>` (default `podman`) execs into the
+  `DROP_K3S_CONTAINER` (default `k3s`) and runs `ctr -a <DROP_CONTAINERD_SOCK> images import -`,
+  loading the archive straight into the node's containerd. It then **verifies** the node holds the
+  exact `drop.local/<app>:<tag>` ref (some builders normalize repo tags on save) and fails loudly if
+  not. No registry, no `imagePullSecret`.
+- **`registry`** (prod) — `skopeo copy docker-archive:… docker://<DROP_IMAGE_REGISTRY>/<app>:<tag>`
+  pushes to a real registry/ECR (no Docker daemon in the api pod). Cluster auth is the cluster's
+  concern: node IRSA, or a pre-provisioned `DROP_IMAGE_REGISTRY_PULL_SECRET` in the tenant namespace.
+
+The push returns the **in-cluster image reference**, which becomes the Deployment's
+`container.image`. `appManifests` sets `imagePullPolicy` explicitly by ref — a `drop.local/*` ref
+(no registry to fall back on) is always `IfNotPresent`; otherwise `:latest`/untagged → `Always`,
+else `IfNotPresent` — and adds `imagePullSecrets` only for the registry backend
+(`imageRegistryPullSecret`, wired from operator config at deploy time, not per-push). A **BYO-image**
+(a prebuilt `app.image` in `drop.yaml`, no `--build`) still works unchanged. There is **no image-push
+MCP tool** yet (CLI only); fully in-cluster builds (no local Docker) are a future item.
 
 **Local = prod shape.** Locally the cluster is **k3s-in-podman** with KEDA, CNPG, and ESO
 installed by `make compute-up`; the `aws` secrets backend and CNPG backups run against **Floci**'s

@@ -89,17 +89,55 @@ Set `DROP_DATABASE_URL` (required), e.g. `postgres://drop:drop@localhost:5432/dr
 
 ### Roles & permissions
 
-Two role axes, with permissions defined in code (`src/authz/permissions.ts`):
+Three role axes, with permissions defined in code (`src/authz/permissions.ts`):
 
 - **Platform role** (`users.role`): `admin` can see/manage all sites and users;
   `member` is a normal user. `DROP_ADMINS` (comma-separated) seeds admins on API
   boot — thereafter they're DB-managed.
+- **Org role** (`org_members.role`, applies **org-wide** — see [Organisations](#organisations)):
+  `owner` & `admin` (everything), `member` (read, logs, publish, deploy, db:create, rollback,
+  configure — i.e. ship + manage config/**secrets**, but **not** share/transfer/delete a
+  resource), `viewer` (read only).
 - **Per-site role** (`site_members.role`): `owner` (all), `editor`
   (publish/deploy/db:create/rollback/restart-stop-start/read+logs), `viewer` (read only).
-  `can(actor, action)` is the single authority check; admins are all-powerful, non-members can
-  do nothing. Compute-relevant actions: `deploy` & `db:create` (editor+), `logs` & lifecycle
-  (editor+ — logs can echo env, so above plain `read`/viewer), `configure` (owner/admin —
-  visibility, DB password, **secrets**), `delete`/`transfer` (owner/admin).
+
+`can(actor, action)` is the single authority check; the effective permission is the **union** of
+platform-admin (all-powerful) **OR** the actor's org role on the resource's owning org **OR** any
+per-site grant — the broader of the two role layers wins, never the narrower, and `site_members`
+remains an additive grant on top of the org role. Compute-relevant actions: `deploy` & `db:create`
+(editor/member+), `logs` & lifecycle (editor/member+ — logs can echo env, so above plain
+`read`/viewer), `configure` (org member+ / site owner — visibility, DB password, **secrets**),
+`delete`/`transfer`/`share` (org owner-admin / site owner only).
+
+### Organisations
+
+Every resource (site / app / database) belongs to **exactly one organisation** — the grouping that
+carries the org-wide roles above (source: `src/orgs/store.ts`, `src/api/server.ts` `/v1/orgs*`).
+There are two kinds:
+
+- **Personal org** — auto-created for each user on first login. Its namespace is your **existing
+  tenant namespace**, so nothing moves: your current workloads already live there.
+- **Team org** — created explicitly (`drop org create <slug>`) and gets its **own** namespace.
+
+```bash
+drop org create <slug> [name]    # create a team org (you become owner)
+drop org ls                      # your orgs + your role in each
+drop org members <slug>          # show an org's members
+drop org add <slug> <email> [role]   # add/update a member (owner|admin|member|viewer; default member)
+drop org rm  <slug> <email>      # remove a member
+```
+
+Create flows take **`--org <slug>`** to target a team org; omit it and the resource lands in your
+personal org:
+
+```bash
+drop publish ./dist mysite --org acme
+drop deploy  ./api  myapi  --org acme
+drop db:create myapi-db    --org acme
+```
+
+The same is exposed over MCP as `org_create`, `org_list`, and `org_add_member` (with an `org` arg
+on `deploy`/`db_create` to choose a team org).
 
 ### Visibility
 
@@ -132,12 +170,30 @@ default-deny **NetworkPolicy**, **ResourceQuota**/**LimitRange**, and PSA labels
 
 ### Container apps
 
-Declare an `app:` section in `drop.yaml` and `drop deploy <dir>`:
+The easiest path is to let Drop **build and push the image for you** — no registry credentials on
+the client, and the *same command* works locally and in prod (source: `src/images/*`,
+`src/cli/build-push.ts`, `src/api/server.ts` `PUT /v1/apps/:name/image`):
+
+```bash
+drop deploy ./api --build      # build the Dockerfile locally → push through Drop → deploy
+drop push   ./api [name]       # just build+push; prints the in-cluster ref (drop.local/<app>:<tag>)
+```
+
+`--build` builds the Dockerfile in `<dir>`, streams a `docker save` tarball to the Drop API, which
+makes it pullable by the cluster (**local:** imports into the k3s node's containerd; **prod:**
+pushes to a registry / ECR), then deploys — so a developer never needs registry creds. The CLI
+builder is `docker` by default; set **`DROP_BUILDER=podman`** to use podman. On the server,
+`DROP_IMAGE_BACKEND` selects `containerd` (default, local) or `registry` (prod). (Image push is
+**CLI-only today** — there is no MCP tool for it yet; in-cluster builds without a local Docker are
+a future item.)
+
+The `app:` section in `drop.yaml` declares the rest. With `--build` Drop supplies the image; or
+**bring your own** prebuilt image by setting `app.image` (no `--build`):
 
 ```yaml
 app:
   name: myapi
-  image: myapi:1            # built + pushed to a registry (or imported into k3s locally)
+  image: myapi:1            # BYO prebuilt image (omit/override when you use `drop deploy --build`)
   services: [{ internal_port: 8080 }]
   scale: { min: 0, max: 3 } # min:0 = scale-to-zero
   resources: { cpu: "500m", memory: "512Mi" }
@@ -190,10 +246,24 @@ drop start <app>     # restore the configured scale
 ```
 
 Editor+. `stop` survives redeploys (`runtime_state=stopped`). All of the above are also in the
-**console** (per-app drawer: status, logs, secrets, lifecycle) and as **MCP tools**.
+**console** (the full-page `/app/<name>` view: status, logs, secrets, lifecycle) and as **MCP
+tools**.
 
-Full walkthrough with two runnable examples (Node + Next.js, each with a DB + secret):
+### Example apps
+
+A catalog of runnable DB-backed apps lives in [`examples/`](examples/) — each connects to a managed
+Drop Postgres via the standard libpq `PG*` env vars plus a write-only `PGPASSWORD` secret:
+**guestbook-node** (Node + `pg` + HTML), **tasks-node-ts** (Node + TypeScript via `tsx`),
+**blog-express** (Express 5 + EJS), **notes-next** (Next.js, list + detail/edit),
+**board-tanstack** (TanStack Start), and **chat-ws** (a WebSocket chat app). The full walkthrough —
+create a DB, map it into the app's env, build, deploy, verify — is in
 [`examples/DATABASE_APPS.md`](examples/DATABASE_APPS.md).
+
+> **WebSockets — known limitation.** `examples/chat-ws` is a real WS chat app, but WebSockets do
+> **not** yet traverse the public edge: the edge proxy doesn't tunnel HTTP `Upgrade` requests, and
+> the KEDA HTTP add-on interceptor returns `403` for WS upgrades. For now, exercise chat-ws via
+> `kubectl port-forward` straight to the pod. The fix plan is
+> [`planning/2026-06-23-websocket-support-plan.md`](planning/2026-06-23-websocket-support-plan.md).
 
 ## Local development
 
@@ -282,11 +352,14 @@ no in-image `npm install`, so they build offline / behind a TLS-inspecting proxy
 The control-plane API serves a **React** dashboard ("console") at its root — open the API URL in
 a browser (local: <http://localhost:8473/>). Click **Sign in with Google** (server-mediated, sets
 an HttpOnly cookie), then you get your workloads grouped by type (**sites / apps / databases**)
-with **live status**, and a per-workload drawer: roll back versions (sites), image/scale/**logs**
-+ **lifecycle** (restart/stop/start) and a write-only **Secrets** panel (apps), connection ref +
-**set/rotate password** (databases), plus collaborators, transfer, and delete. Admins get an
-**all-workloads** view with type/owner filters and user suspend. Same `/v1/*` endpoints and
-identity as the CLI/MCP. Publishing/deploying stays in the CLI/MCP.
+with **live status**. Clicking a workload opens it as its **own full page / route**
+(`/site/<name>`, `/app/<name>`, `/database/<name>`, plus `/admin`) — deep-linkable and
+refresh-safe — with detailed panel sections rather than an inline drawer: roll back versions
+(sites), image/scale/**logs** + **lifecycle** (restart/stop/start) and a write-only **Secrets**
+panel (apps), connection ref + **set/rotate password** (databases), plus collaborators, transfer,
+and delete. Admins get an **all-workloads** view (`/admin`) with type/owner filters and user
+suspend. Same `/v1/*` endpoints and identity as the CLI/MCP. Publishing/deploying stays in the
+CLI/MCP.
 
 ## Per-site config — `drop.yaml` (`site:`)
 
@@ -356,8 +429,10 @@ For local dev against `make start`, point it at the built server and dev-auth:
 
 Tools exposed: `login`, `dev_login`, `publish`, **`deploy`** (container app), **`db_create`**
 (managed Postgres), **`secret_set`/`secret_list`/`secret_delete`** (write-only app secrets),
-**`app_restart`/`app_stop`/`app_start`** (lifecycle), `list_sites`, `site_info`, `rollback`,
-`delete_site`, `add_collaborator`, `remove_collaborator`, `transfer_site`. (The server
+**`app_restart`/`app_stop`/`app_start`** (lifecycle), **`org_create`/`org_list`/`org_add_member`**
+(organisations), `list_sites`, `site_info`, `rollback`,
+`delete_site`, `add_collaborator`, `remove_collaborator`, `transfer_site`. (There is **no**
+image-push MCP tool yet — `drop push` / `drop deploy --build` are CLI-only.) (The server
 reads/writes the same `~/.config/drop/session.json` as the CLI, so `login` once and both work.)
 
 ## Running the CLI (any user)

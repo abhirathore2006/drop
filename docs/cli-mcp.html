@@ -71,9 +71,10 @@ drop publish ./dist myapp</code></pre>
 <tr><td><code>login</code></td><td>Sign in with Google via the Drop server; saves the session</td><td><code>drop login</code></td></tr>
 <tr><td><code>dev-login &lt;sub&gt; &lt;email&gt;</code></td><td>Local-only login (requires <code>DROP_DEV_AUTH=1</code> on the API)</td><td><code>drop dev-login alice alice@example.com</code></td></tr>
 <tr><td><code>logout</code></td><td>Clear the saved session</td><td><code>drop logout</code></td></tr>
-<tr><td><code>publish &lt;dir&gt; [name]</code></td><td>Publish a built folder; name optional — taken from <code>drop.yaml</code>, else generated</td><td><code>drop publish ./dist myapp</code></td></tr>
-<tr><td><code>deploy &lt;dir&gt; [name]</code></td><td>Deploy a container app from the <code>app:</code> section of <code>drop.yaml</code> (compute plane)</td><td><code>drop deploy ./api myapi</code></td></tr>
-<tr><td><code>db:create &lt;name&gt; [dir]</code></td><td>Provision a managed Postgres database (CloudNativePG)</td><td><code>drop db:create myapi-db</code></td></tr>
+<tr><td><code>publish &lt;dir&gt; [name]</code></td><td>Publish a built folder; name optional — taken from <code>drop.yaml</code>, else generated. <code>--org &lt;slug&gt;</code> targets a team org (default: your personal org)</td><td><code>drop publish ./dist myapp</code></td></tr>
+<tr><td><code>deploy &lt;dir&gt; [name]</code></td><td>Deploy a container app from the <code>app:</code> section of <code>drop.yaml</code> (compute plane). <code>--build</code> builds the Dockerfile locally and pushes it through Drop first (no registry creds); <code>--org &lt;slug&gt;</code> targets a team org</td><td><code>drop deploy ./api myapi --build</code></td></tr>
+<tr><td><code>push &lt;dir&gt; [name]</code></td><td>Build the image from <code>dir</code>'s Dockerfile and push it through Drop (no registry creds); prints the in-cluster ref (locally <code>drop.local/&lt;app&gt;:&lt;tag&gt;</code>). <code>--org &lt;slug&gt;</code> targets a team org</td><td><code>drop push ./api myapi</code></td></tr>
+<tr><td><code>db:create &lt;name&gt; [dir]</code></td><td>Provision a managed Postgres database (CloudNativePG). <code>--org &lt;slug&gt;</code> targets a team org</td><td><code>drop db:create myapi-db</code></td></tr>
 <tr><td><code>db:password &lt;name&gt; [pw]</code></td><td>Set/rotate the DB <code>app</code> password — printed once (or <code>--password-stdin</code>)</td><td><code>drop db:password myapi-db</code></td></tr>
 <tr><td><code>secrets set &lt;app&gt; &lt;KEY&gt;</code></td><td><strong>Write-only</strong> app secret (value via <code>--stdin</code>); never readable back, injected as an env var</td><td><code>printf "$PW" | drop secrets set myapi DB_PASSWORD --stdin</code></td></tr>
 <tr><td><code>secrets ls &lt;app&gt;</code></td><td>List an app's secret key names + metadata (never the values)</td><td><code>drop secrets ls myapi</code></td></tr>
@@ -87,9 +88,18 @@ drop publish ./dist myapp</code></pre>
 <tr><td><code>share &lt;name&gt; &lt;email&gt;</code></td><td>Add a collaborator</td><td><code>drop share myapp bob@example.com</code></td></tr>
 <tr><td><code>unshare &lt;name&gt; &lt;email&gt;</code></td><td>Remove a collaborator</td><td><code>drop unshare myapp bob@example.com</code></td></tr>
 <tr><td><code>transfer &lt;name&gt; &lt;email&gt;</code></td><td>Transfer ownership</td><td><code>drop transfer myapp bob@example.com</code></td></tr>
+<tr><td><code>org create &lt;slug&gt; [name]</code></td><td>Create a team organisation (you become owner); deploy into it with <code>--org &lt;slug&gt;</code></td><td><code>drop org create acme "Acme Inc"</code></td></tr>
+<tr><td><code>org ls</code></td><td>List your organisations + your role in each</td><td><code>drop org ls</code></td></tr>
+<tr><td><code>org members &lt;slug&gt;</code></td><td>Show an org's members</td><td><code>drop org members acme</code></td></tr>
+<tr><td><code>org add &lt;slug&gt; &lt;email&gt; [role]</code></td><td>Add/update a member (<code>owner</code>|<code>admin</code>|<code>member</code>|<code>viewer</code>; default <code>member</code>)</td><td><code>drop org add acme bob@example.com member</code></td></tr>
+<tr><td><code>org rm &lt;slug&gt; &lt;email&gt;</code></td><td>Remove a member</td><td><code>drop org rm acme bob@example.com</code></td></tr>
 </tbody>
 </table>
 <p>A global <code>--api &lt;url&gt;</code> flag sets the control-plane base URL for any command. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for who may run what, and <a href="configuration.html">Configuration</a> for how <code>drop.yaml</code> picks the publish target.</p>
+
+<div class="note"><span class="lbl">Organisations</span><p>Every resource belongs to exactly one organisation. You always have a <strong>personal</strong> org (auto-created on first login, reusing your existing namespace), so commands without <code>--org</code> behave exactly as before. Create a <strong>team</strong> org with <code>drop org create &lt;slug&gt;</code>, then pass <code>--org &lt;slug&gt;</code> to <code>publish</code>/<code>deploy</code>/<code>db:create</code> to put new resources there. Org roles apply org-wide — see <a href="roles-visibility.html">Roles &amp; Visibility</a>.</p></div>
+
+<div class="note tip"><span class="lbl">Image push</span><p><code>drop deploy &lt;dir&gt; --build</code> builds the Dockerfile locally and streams a <code>docker save</code> tarball to Drop, which makes it pullable by the cluster (locally imported into the k3s node's containerd; in prod pushed to a registry/ECR), then deploys — same command everywhere, no registry credentials on the client. <code>drop push &lt;dir&gt; [name]</code> does just the build+push and prints the in-cluster ref (locally <code>drop.local/&lt;app&gt;:&lt;tag&gt;</code>). The builder is <code>docker</code> by default; set <code>DROP_BUILDER=podman</code> to use podman. A prebuilt <code>app.image</code> in <code>drop.yaml</code> (without <code>--build</code>) still works unchanged. Image push is <strong>CLI-only</strong> for now — there is no MCP tool yet.</p></div>
 
 <h2>MCP server</h2>
 <p>Drop ships an <strong>MCP server</strong>, so any MCP client (Claude Code/Desktop, Cursor, …) can publish and manage sites in natural language. Use the <code>drop-mcp</code> command the installer puts on your PATH, or launch it on demand via <code>npx</code> — both are shown below.</p>
@@ -140,8 +150,12 @@ work without a separate build:</p>
 <tr><td><code>add_collaborator</code></td><td><code>name</code>, <code>email</code></td><td>Grant another user publish access (owner only)</td></tr>
 <tr><td><code>remove_collaborator</code></td><td><code>name</code>, <code>email</code></td><td>Revoke a collaborator (owner only)</td></tr>
 <tr><td><code>transfer_site</code></td><td><code>name</code>, <code>email</code></td><td>Transfer ownership to another user (owner only)</td></tr>
+<tr><td><code>org_create</code></td><td><code>slug</code>, <code>name?</code></td><td>Create a team organisation (you become owner)</td></tr>
+<tr><td><code>org_list</code></td><td><span class="cx">—</span></td><td>List the organisations you belong to + your role in each</td></tr>
+<tr><td><code>org_add_member</code></td><td><code>slug</code>, <code>email</code>, <code>role?</code></td><td>Add/update an org member (<code>owner</code>|<code>admin</code>|<code>member</code>|<code>viewer</code>; default <code>member</code>; owner/admin only)</td></tr>
 </tbody>
 </table>
+<p>Image push is <strong>CLI-only</strong> for now — there is no MCP tool for <code>drop push</code> / <code>deploy --build</code> yet.</p>
 
 <p>For local dev against <code>make start</code>, point the server at the built bundle and dev-auth:</p>
 <pre><code>{ "mcpServers": { "drop": {
@@ -149,7 +163,7 @@ work without a separate build:</p>
   "env": { "DROP_API": "http://localhost:8473", "DROP_DEV_AUTH": "1" } } } }</code></pre>
 
 <h2>Dashboard</h2>
-<p>The control-plane API serves a <strong>React</strong> console at its root — open the API URL in a browser (locally <code>http://localhost:8473/</code>). Click <strong>Sign in with Google</strong> (server-mediated, sets an HttpOnly cookie), then you get your workloads grouped by type (<strong>sites · apps · databases</strong>) with live status, and a per-workload drawer to:</p>
+<p>The control-plane API serves a <strong>React</strong> console at its root — open the API URL in a browser (locally <code>http://localhost:8473/</code>). Click <strong>Sign in with Google</strong> (server-mediated, sets an HttpOnly cookie), then you get your workloads grouped by type (<strong>sites · apps · databases</strong>) with live status. Each workload opens as its <strong>own full, deep-linkable page</strong> (<code>/app/&lt;name&gt;</code>, <code>/database/&lt;name&gt;</code>, <code>/site/&lt;name&gt;</code>, plus <code>/admin</code>) with detailed sections to:</p>
 <ul>
 <li><strong>sites</strong> — roll back versions, set visibility;</li>
 <li><strong>apps</strong> — see image/scale/status, view <strong>logs</strong>, manage write-only <strong>secrets</strong>, and drive <strong>lifecycle</strong> (restart / stop / start);</li>

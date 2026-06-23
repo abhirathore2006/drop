@@ -41,7 +41,8 @@
     <strong>edge</strong> is the data plane (serves bytes by hostname, read-only against Postgres).</p>
 
     <p>File <strong>bytes</strong> live in S3 (<code>sites/&lt;name&gt;/files/&lt;verId&gt;/…</code>).
-    Everything else — sites, members, versions, users, auth handles — lives in Postgres. Ports: api
+    Everything else — sites, members, versions, users, auth handles, and <strong>organisations</strong> (the
+    group that owns every resource — see <a href="#orgs">§8</a>) — lives in Postgres. Ports: api
     <code>8473</code>, edge <code>8474</code>, Postgres <code>5432</code>, S3/Floci <code>4566</code>
     (local), nginx <code>443</code> (local HTTPS, optional).</p>
 
@@ -70,13 +71,16 @@
     freed after the response, so memory use is bounded by concurrency, not by site count.</p>
     <div class="mermaid" id="m3"></div>
 
-    <h2>4. Data model</h2>
+    <h2 id="data-model">4. Data model</h2>
     <p>Exactly one <code>owner</code> per site is enforced by a partial unique index
     (<code>unique(site_name) where role='owner'</code>). Deleting a site cascades to its members and versions.
-    Authorization is two-axis — platform role (<code>users.role</code>) + per-site role
-    (<code>site_members.role</code>), resolved by <code>can(actor, action)</code> in
-    <code>src/authz/permissions.ts</code>. <a href="roles-visibility.html">Visibility</a> is an independent
-    axis (who may <em>view</em> the served pages) from roles (who may <em>manage</em> the site).</p>
+    Every resource (site/app/database) also belongs to exactly one <strong>organisation</strong> via
+    <code>sites.org_id</code> (see <a href="#orgs">§8</a>). Authorization is resolved by
+    <code>can(actor, action)</code> in <code>src/authz/permissions.ts</code> as the <strong>union</strong> of
+    three layers: platform-admin (all-powerful) <em>OR</em> the actor's org-wide role on the resource's org
+    <em>OR</em> a per-resource <code>site_members.role</code> (an additive grant — the broader of the two
+    wins, never the narrower). <a href="roles-visibility.html">Visibility</a> is an independent axis (who may
+    <em>view</em> the served pages) from roles (who may <em>manage</em> the resource).</p>
     <div class="mermaid" id="m4"></div>
 
     <h2>5. Local development topology</h2>
@@ -128,6 +132,46 @@
     <div class="note tip"><span class="lbl">Note</span><p><code>runtime_state</code> in Postgres makes a
     <code>stop</code> survive redeploys, so a stopped app stays offline until you <code>start</code> it.</p></div>
 
+    <h3>Image delivery</h3>
+    <p>An app can run a prebuilt <code>app.image</code> from <code>drop.yaml</code> (BYO-image, unchanged), or
+    you can build &amp; push <strong>through Drop</strong> with no registry credentials on the client — the same
+    command works locally and in prod. <code>drop push &lt;dir&gt; [name]</code> builds the Dockerfile locally,
+    tags it <code>drop.local/&lt;app&gt;:&lt;tag&gt;</code>, streams a <code>docker save</code> tarball to
+    <code>PUT /v1/apps/:name/image</code>, and prints the in-cluster ref; <code>drop deploy &lt;dir&gt; --build</code>
+    chains that push then deploys. The CLI builder is <code>docker</code> by default
+    (<code>DROP_BUILDER=podman</code> to switch).</p>
+    <p>The api never embeds a registry client — it depends on an <code>ImageStore</code> <strong>port</strong>
+    (<code>FakeImageStore</code> in tests) with the backend chosen at deploy time
+    (<code>DROP_IMAGE_BACKEND</code>):</p>
+    <table class="tbl">
+    <thead><tr><th>Backend</th><th>How the tarball reaches the cluster</th><th>In-cluster ref</th></tr></thead>
+    <tbody>
+      <tr><td><code>containerd</code> (default, local)</td><td>Imports the archive into the k3s node's containerd via <code>&lt;runtime&gt; exec -i &lt;k3s&gt; ctr … images import -</code>, then verifies the node holds the exact ref</td><td><code>drop.local/&lt;app&gt;:&lt;tag&gt;</code> — never resolved; non-<code>latest</code> tag → <code>IfNotPresent</code>, so the pod uses the imported image with <strong>no registry and no imagePullSecret</strong></td></tr>
+      <tr><td><code>registry</code> (prod)</td><td><code>skopeo copy docker-archive:… docker://…</code> pushes to a registry / ECR (<code>DROP_IMAGE_REGISTRY</code>) — no Docker daemon in the api pod</td><td><code>&lt;registry&gt;/&lt;app&gt;:&lt;tag&gt;</code>; the Deployment references the operator-configured <code>DROP_IMAGE_REGISTRY_PULL_SECRET</code> (or node IRSA for ECR)</td></tr>
+    </tbody>
+    </table>
+    <p>The CLI tags the image and declares the same <code>&lt;tag&gt;</code> to the api so the imported ref and the
+    Deployment's <code>image</code> string match exactly (otherwise the pod <code>ImagePullBackOff</code>s against
+    <code>drop.local</code>); a fresh tag per build rolls the pods. Uploads larger than
+    <code>DROP_IMAGE_MAX_BYTES</code> (default 2&nbsp;GiB) are rejected. Server env: <code>DROP_IMAGE_RUNTIME</code>
+    (default <code>podman</code>), <code>DROP_K3S_CONTAINER</code> (default <code>k3s</code>),
+    <code>DROP_CONTAINERD_SOCK</code>.</p>
+    <div class="note tip"><span class="lbl">CLI only</span><p>Image push is exposed on the CLI
+    (<code>push</code>, <code>deploy --build</code>), not yet as an MCP tool. In-cluster builds (no local Docker)
+    are a future item.</p></div>
+
+    <h3>WebSockets (edge limitation)</h3>
+    <div class="note warn"><span class="lbl">Known limitation</span><p>WebSockets do <strong>not</strong> yet
+    traverse the public edge. Two independent blockers sit on the path
+    <code>client → edge → KEDA interceptor → pod</code>: the edge proxy doesn't tunnel HTTP <code>Upgrade</code>
+    handshakes (<code>upgrade</code>/<code>connection</code> are in its <code>HOP_BY_HOP</code> strip set, and no
+    <code>'upgrade'</code> listener is attached to the server), and the KEDA HTTP add-on
+    <strong>interceptor returns 403</strong> for WS upgrades. The real WS app <code>examples/chat-ws</code> is
+    exercised today via <code>kubectl port-forward</code> to the pod. The fix — a raw-socket upgrade tunnel in the
+    edge that routes <code>websocket: true</code> apps straight to their in-cluster Service (bypassing the
+    interceptor, <code>min ≥ 1</code> so they never scale to zero) — is in
+    <code>planning/2026-06-23-websocket-support-plan.md</code>.</p></div>
+
     <h3>Databases</h3>
     <p><code>drop db:create</code> → a <strong>CloudNativePG</strong> <code>Cluster</code> (Postgres 18, single
     instance), with backups via the <strong>Barman Cloud Plugin</strong> (<code>ObjectStore</code> +
@@ -157,6 +201,39 @@
     <code>aws</code> secrets backend and CNPG backups run against <strong>Floci</strong>'s S3 + Secrets-Manager
     emulation, so the local stack exercises the same code paths as EKS. See
     <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for the commands and console.</p></div>
+
+    <h2 id="orgs">8. Organisations (resource grouping + permissions)</h2>
+    <p>An <strong>organisation</strong> is a logical group that owns resources, with org-level roles. Every
+    site/app/database belongs to exactly <strong>one</strong> org (<code>sites.org_id</code>, added in migration
+    <code>m0004</code>). There are two kinds:</p>
+    <ul>
+      <li><strong>Personal</strong> — auto-created (idempotently) on each user's first login. Its namespace
+      <em>is</em> the user's existing per-tenant namespace, so the backfill moves no workload. One per user
+      (<code>unique(created_by) where kind='personal'</code>).</li>
+      <li><strong>Team</strong> — created explicitly with <code>drop org create &lt;slug&gt; [name]</code>; the
+      creator becomes owner and the org gets its <em>own</em> namespace (<code>orgSlugNamespace(slug)</code>).</li>
+    </ul>
+    <p>Org roles apply <strong>org-wide</strong> (every resource in the org), resolved in
+    <code>src/authz/permissions.ts</code>:</p>
+    <table class="tbl">
+    <thead><tr><th>Org role</th><th>Can</th></tr></thead>
+    <tbody>
+      <tr><td><code>owner</code> / <code>admin</code></td><td>Everything (incl. <code>share</code>, <code>transfer</code>, <code>delete</code>, and managing org members)</td></tr>
+      <tr><td><code>member</code></td><td><code>read</code>, <code>logs</code>, <code>publish</code>, <code>deploy</code>, <code>db:create</code>, <code>rollback</code>, <code>configure</code> — i.e. ship + manage config/secrets, but <strong>not</strong> share/transfer/delete a resource</td></tr>
+      <tr><td><code>viewer</code></td><td><code>read</code> only</td></tr>
+    </tbody>
+    </table>
+    <p>The effective check is a <strong>union</strong>: <code>can()</code> returns true if the actor is a
+    platform admin, OR their org role on the resource's org allows the action, OR their per-resource
+    <code>site_members.role</code> does (<code>site_members</code> remain as an additive grant layer — see
+    <a href="#data-model">§4</a>). Create flows have no resource yet, so they check the org role directly
+    (<code>canCreateInOrg</code>); <code>publish</code>, <code>deploy</code>, and <code>db:create</code> take
+    <code>--org &lt;slug&gt;</code> and default to your personal org.</p>
+    <div class="mermaid" id="m8"></div>
+    <p>Manage orgs from any surface: CLI <code>drop org create|ls|members|add|rm</code>
+    (e.g. <code>drop org add &lt;slug&gt; &lt;email&gt; [role]</code>) over <code>/v1/orgs*</code>, or the MCP tools
+    <code>org_create</code>, <code>org_list</code>, <code>org_add_member</code>. See
+    <a href="roles-visibility.html">Roles &amp; Visibility</a>.</p>
 
     <div class="next">
       <a href="deployment.html"><div class="d">Next →</div><div class="t">Deployment</div></a>
@@ -255,6 +332,9 @@ m4: `erDiagram
     users ||--o{ site_members : "is"
     sites ||--o{ site_members : "has"
     sites ||--o{ versions : "has"
+    organisations ||--o{ sites : "owns"
+    organisations ||--o{ org_members : "has"
+    users ||--o{ org_members : "in"
     users {
         text email PK
         text name
@@ -262,8 +342,23 @@ m4: `erDiagram
         text status "active | suspended"
         timestamptz last_login_at
     }
+    organisations {
+        text id PK
+        text slug "unique"
+        text name
+        text kind "personal | team"
+        text namespace "literal k8s tenant ns"
+        text created_by "FK users"
+    }
+    org_members {
+        text org_id PK "FK orgs; PK (org_id,email)"
+        text email PK "FK users"
+        text role "owner | admin | member | viewer"
+    }
     sites {
         text name PK
+        text type "site | app | database"
+        text org_id "FK orgs (nullable in migration window)"
         text current_version "nullable"
         text visibility "public|private|password"
         text password_hash "nullable"
@@ -352,6 +447,29 @@ m7: `flowchart TB
     edge -->|"&lt;app&gt; host"| keda --> dep
     dep -->|envFrom| sec
     cl --> s3`,
+m8: `flowchart TB
+    subgraph orgs["organisations (own resources)"]
+        personal["personal org<br/>auto on first login<br/>ns = user tenant ns"]
+        team["team org<br/>drop org create<br/>own namespace"]
+    end
+    res["site / app / database<br/>sites.org_id → one org"]
+    actor["actor (request)"]
+    allow["permitted"]
+
+    personal --> res
+    team --> res
+
+    subgraph can["can(actor, action) — UNION (broader wins)"]
+        plat["platform admin?<br/>→ all"]
+        orgrole["org role on the resource's org<br/>owner/admin · member · viewer"]
+        siterole["per-resource site_members<br/>owner · editor · viewer<br/>(additive grant)"]
+    end
+    actor --> plat
+    actor --> orgrole
+    actor --> siterole
+    plat -->|OR| allow
+    orgrole -->|OR| allow
+    siterole -->|OR| allow`,
   };
   for (const [id, src] of Object.entries(diagrams)) {
     const el = document.getElementById(id);

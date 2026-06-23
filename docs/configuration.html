@@ -184,6 +184,22 @@
 </table>
 <div class="note warn"><span class="lbl">Note</span><p>App-secret <em>values</em> are write-only end to end — set/rotated/deleted via <code>drop secrets</code> but never returned by the API, CLI, MCP, logs, or the metastore. They reach only the secret manager and the pod env. See <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for the commands and tools.</p></div>
 
+<h3>Image push backend</h3>
+<p><code>drop deploy --build</code> and <code>drop push</code> stream a locally built image into Drop, which makes it pullable by the cluster — no registry credentials on the client, same command local and prod. The server picks how to ingest the image at deploy time. <code>containerd</code> (local k3s) imports the streamed <code>docker save</code> tarball into the node's containerd; <code>registry</code> (prod) pushes it to a registry/ECR.</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>Default</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>DROP_IMAGE_BACKEND</code></td><td><code>containerd</code></td><td><code>containerd</code> | <code>registry</code>. <code>containerd</code> imports the pushed image into the k3s node's containerd; <code>registry</code> pushes it to a registry/ECR.</td></tr>
+<tr><td><code>DROP_IMAGE_RUNTIME</code></td><td><code>podman</code></td><td>Container CLI the server uses to load the tarball into the node (<code>containerd</code> backend).</td></tr>
+<tr><td><code>DROP_K3S_CONTAINER</code></td><td><code>k3s</code></td><td>Name of the k3s node container the image is imported into (<code>containerd</code> backend).</td></tr>
+<tr><td><code>DROP_CONTAINERD_SOCK</code></td><td><code>/run/k3s/containerd/containerd.sock</code></td><td>containerd socket inside the k3s node used to import the image (<code>containerd</code> backend).</td></tr>
+<tr><td><code>DROP_IMAGE_REGISTRY</code></td><td><span class="cx">—</span></td><td>Target registry images are pushed to. <strong>Required</strong> when <code>DROP_IMAGE_BACKEND=registry</code>.</td></tr>
+<tr><td><code>DROP_IMAGE_REGISTRY_PULL_SECRET</code></td><td><span class="cx">—</span></td><td>Image-pull Secret the cluster uses to pull from a private registry (<code>registry</code> backend).</td></tr>
+<tr><td><code>DROP_IMAGE_MAX_BYTES</code></td><td><code>2 GiB</code> (<code>2147483648</code>)</td><td>Maximum accepted size for a streamed image tarball.</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="lbl">Note</span><p>The <strong>CLI builder</strong> is a client-side setting, not a server one: <code>DROP_BUILDER</code> selects the local container CLI used to build the image (default <code>docker</code>; set to <code>podman</code> to use Podman). Image push is CLI-only today — there is no MCP tool for it yet.</p></div>
+
 <div class="next">
   <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
   <a href="roles-visibility.html"><div class="d">Next →</div><div class="t">Roles &amp; Visibility</div></a>

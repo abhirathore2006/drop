@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Drop — self-hosted static-site publishing &amp; compute platform</title>
-<meta name="description" content="Drop is a self-hosted, Surge-style static-site publisher and a Heroku/Fly-style compute platform: push a built folder or deploy a container app with managed Postgres and write-only secrets, all on an internal HTTPS URL. Metadata in Postgres, file bytes in S3, gated by Google login.">
+<meta name="description" content="Drop is a self-hosted, Surge-style static-site publisher and a Heroku/Fly-style compute platform: push a built folder or build-and-deploy a container app with managed Postgres and write-only secrets, all on an internal HTTPS URL — grouped into organisations. Metadata in Postgres, file bytes in S3, gated by Google login.">
 <link rel="stylesheet" href="assets/style.css">
 <script defer src="drop-served.js"></script>
 <script defer src="assets/site.js"></script>
@@ -54,7 +54,7 @@
     <pre><code><span class="tok-c">$</span> drop publish ./dist myapp           <span class="tok-c"># static site</span>
   <span class="tok-s">✓ live at https://myapp.drop.example.com</span>  <span class="tok-c">(internal-only)</span>
 
-<span class="tok-c">$</span> drop deploy ./api myapi             <span class="tok-c"># container app (drop.yaml app:)</span>
+<span class="tok-c">$</span> drop deploy ./api myapi --build     <span class="tok-c"># build the Dockerfile & push it through Drop, then deploy</span>
   <span class="tok-s">✓ live at https://myapi.drop.example.com</span>
 <span class="tok-c">$</span> drop db:create myapi-db             <span class="tok-c"># managed Postgres (CloudNativePG)</span>
 <span class="tok-c">$</span> printf "$PW" | drop secrets set myapi DATABASE_PASSWORD --stdin  <span class="tok-c"># write-only secret</span>
@@ -128,6 +128,21 @@ drop publish ./dist myapp</code></pre>
         first request to <code>&lt;app&gt;.drop.example.com</code>.</p>
       </div>
       <div class="card">
+        <div class="n">BUILD &amp; SHIP</div>
+        <h3>Push images through Drop</h3>
+        <p><code>drop deploy ./app --build</code> builds your Dockerfile locally and streams the image
+        <strong>through Drop</strong> to the cluster — <strong>no registry credentials on your machine</strong>,
+        and the same command local &amp; prod. <code>drop push</code> does just build + push and prints the
+        in-cluster ref. Already have an image? Pin <code>app.image</code> in <code>drop.yaml</code> instead.</p>
+      </div>
+      <div class="card">
+        <div class="n">ORGANISATIONS</div>
+        <h3>Group &amp; share by team</h3>
+        <p>Every site, app, and database belongs to one <strong>organisation</strong>. You get a personal
+        org automatically; create <strong>team orgs</strong> with <code>drop org create</code> and grant
+        org-wide roles (owner / admin / member / viewer). Ship into one with <code>--org &lt;slug&gt;</code>.</p>
+      </div>
+      <div class="card">
         <div class="n">DATA</div>
         <h3>Managed Postgres</h3>
         <p><code>drop db:create</code> provisions a CloudNativePG cluster in your namespace with Barman
@@ -145,8 +160,10 @@ drop publish ./dist myapp</code></pre>
         <div class="n">OPERATE</div>
         <h3>Lifecycle &amp; console</h3>
         <p><code>restart</code> / <code>stop</code> (true offline) / <code>start</code> from the CLI, MCP,
-        or the React <strong>console</strong> — workloads grouped by type with live status, a per-app drawer
-        for logs/secrets/lifecycle, per-DB connection + password, and an admin all-workloads view.</p>
+        or the React <strong>console</strong> — workloads grouped by type with live status, each opening its
+        own <strong>full page</strong> (<code>/app/&lt;name&gt;</code>, <code>/database/&lt;name&gt;</code>,
+        <code>/site/&lt;name&gt;</code>) with detailed panels for logs/secrets/lifecycle and DB connection,
+        plus an admin all-workloads view at <code>/admin</code>.</p>
       </div>
     </div>
 
@@ -177,6 +194,17 @@ drop publish ./dist myapp</code></pre>
       <li><strong>Container apps</strong> — declare an <code>app:</code> section in <code>drop.yaml</code> and
         <code>drop deploy &lt;dir&gt;</code>. The API translates it to a Deployment + Service + KEDA
         HTTPScaledObject; apps scale to zero when idle and the edge wakes them on first request.</li>
+      <li><strong>Build &amp; push through Drop</strong> — <code>drop deploy &lt;dir&gt; --build</code> builds the
+        Dockerfile locally and streams the image through Drop so the cluster can pull it (local: imports into
+        k3s's containerd; prod: pushes to a registry/ECR) — <strong>no registry credentials on the client</strong>,
+        same command local &amp; prod. <code>drop push &lt;dir&gt;</code> does just build + push and prints the
+        in-cluster ref. The builder is <code>docker</code> by default (<code>DROP_BUILDER=podman</code> to switch);
+        a prebuilt <code>app.image</code> in <code>drop.yaml</code> still works unchanged.</li>
+      <li><strong>Organisations</strong> — every resource belongs to exactly one org. Each user gets a personal
+        org automatically (it reuses your existing namespace, so nothing moves); team orgs are created explicitly
+        with <code>drop org create &lt;slug&gt;</code> and get their own namespace. Org roles apply org-wide
+        (owner / admin = everything; member = ship + configure/secrets; viewer = read), and stack with per-resource
+        site roles. Create flows take <code>--org &lt;slug&gt;</code> (default: your personal org).</li>
       <li><strong>Managed databases</strong> — <code>drop db:create</code> provisions a CloudNativePG
         Postgres in your namespace with Barman backups to S3; <code>drop db:password</code> sets/rotates the
         role password. The connection ref is returned — never the password.</li>
@@ -188,8 +216,13 @@ drop publish ./dist myapp</code></pre>
       <li><strong>Per-tenant isolation</strong> — every owner gets a namespace with a default-deny
         NetworkPolicy and resource quota.</li>
     </ul>
-    <p>Full walkthrough with two runnable examples (Node + Next.js, each with a DB + secret):
-    <a href="../examples/DATABASE_APPS.md">examples/DATABASE_APPS.md</a>. Command and tool tables:
+    <p>Full walkthrough with runnable, DB-backed example apps across several stacks — <code>guestbook-node</code>
+    (Node + <code>pg</code>), <code>tasks-node-ts</code> (Node + TypeScript via <code>tsx</code>),
+    <code>blog-express</code> (Express 5 + EJS), <code>notes-next</code> (Next.js), and <code>board-tanstack</code>
+    (TanStack Start) — each binding to a managed Postgres via libpq <code>PG*</code> env + a write-only
+    <code>PGPASSWORD</code> secret: <a href="../examples/DATABASE_APPS.md">examples/DATABASE_APPS.md</a>.
+    There's also <code>chat-ws</code>, a real WebSocket chat app — note that WebSockets don't yet traverse the
+    public edge, so today you exercise it via <code>kubectl port-forward</code> to the pod. Command and tool tables:
     <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>. Cluster topology and the compute-plane diagram:
     <a href="architecture.html">Architecture</a>. Enabling it in prod: <a href="configuration.html">Configuration</a>
     and <a href="deployment.html">Deployment</a>.</p>
@@ -202,7 +235,8 @@ drop publish ./dist myapp</code></pre>
     <p>And — with the compute plane — anything that runs in a <strong>container</strong>: an HTTP API, a
     server-rendered app (Next.js, Remix), a worker fronted by HTTP. Add an <code>app:</code> section to the
     same <a href="configuration.html"><code>drop.yaml</code></a>, give it a <a href="#compute">managed
-    database</a> and <a href="#compute">write-only secrets</a>, and <code>drop deploy</code>.</p>
+    database</a> and <a href="#compute">write-only secrets</a>, and <code>drop deploy ./app --build</code> —
+    Drop builds your Dockerfile and ships it to the cluster, no registry credentials required.</p>
 
     <h2>30-second tour</h2>
     <ol>
@@ -211,8 +245,9 @@ drop publish ./dist myapp</code></pre>
         redirects, headers, password, custom site name, and the <code>app:</code> section for compute.</li>
       <li><a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> — the three ways to drive Drop, including
         <code>deploy</code>, <code>db:create</code>, <code>secrets</code>, and lifecycle.</li>
-      <li><a href="../examples/DATABASE_APPS.md">Database apps</a> — end-to-end: deploy a container app with a
-        managed Postgres and a write-only secret.</li>
+      <li><a href="../examples/DATABASE_APPS.md">Database apps</a> — end-to-end across several stacks (Node,
+        TypeScript, Express, Next.js, TanStack Start, plus a WebSocket chat): build &amp; deploy a container app
+        with a managed Postgres and a write-only secret.</li>
       <li><a href="roles-visibility.html">Roles &amp; Visibility</a> — who can manage, who can view.</li>
       <li><a href="deployment.html">Deployment</a> — EC2 or Kubernetes (Helm), Postgres, S3, OAuth,
         and enabling the compute plane.</li>

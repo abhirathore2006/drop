@@ -40,13 +40,22 @@
 <p>These are independent. A site can be public (anyone with the URL sees it) but still have a tight set of owners and editors. A site can be private (no one can view it yet) while several people manage and publish it. Roles gate the API and dashboard; visibility gates the edge.</p>
 
 <h2>Roles &amp; permissions</h2>
-<p>There are two role axes. Permissions are defined in code in <code>src/authz/permissions.ts</code> — not scattered through handlers.</p>
+<p>There are three role axes. Permissions are defined in code in <code>src/authz/permissions.ts</code> — not scattered through handlers.</p>
 
 <h3>Platform role</h3>
 <p>Stored on <code>users.role</code> as <code>admin</code> or <code>member</code>. An <code>admin</code> can see and manage all sites and users; a <code>member</code> is a normal user. The <code>DROP_ADMINS</code> env var (comma-separated emails) seeds admins when the API boots; thereafter admin status is DB-managed. See <a href="deployment.html">Deployment</a> for the env var.</p>
 
+<h3>Org role</h3>
+<p>Every resource (site, app, or database) belongs to exactly <strong>one organisation</strong>, and an org role applies <strong>org-wide</strong> — to every resource the org owns. Stored on <code>org_members.role</code> as <code>owner</code>, <code>admin</code>, <code>member</code>, or <code>viewer</code>:</p>
+<ul>
+  <li><strong>owner</strong> / <strong>admin</strong> — everything: read, logs, publish, deploy, db:create, rollback, configure, share, transfer, delete (same as a per-site owner, but across the whole org).</li>
+  <li><strong>member</strong> — the day-to-day shipping role: read, logs, publish, deploy, db:create, rollback, and <code>configure</code> (visibility · DB password · secrets) — but <strong>not</strong> share, transfer, or delete a resource.</li>
+  <li><strong>viewer</strong> — read only.</li>
+</ul>
+<p>Each user gets a <strong>personal</strong> org auto-created on first login; it reuses your existing tenant namespace, so nothing moves. <strong>Team</strong> orgs are created explicitly and get their own namespace. Only org <code>owner</code>/<code>admin</code> (or a platform admin) can manage an org's members and settings. See <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for the <code>drop org</code> commands.</p>
+
 <h3>Per-site role</h3>
-<p>Stored on <code>site_members.role</code> as <code>owner</code>, <code>editor</code>, or <code>viewer</code>. There is exactly <strong>one owner per site</strong>. The same role gates both the <a href="cli-mcp.html">static-site</a> actions and the <a href="cli-mcp.html">compute-plane</a> actions (apps, databases, secrets). The map is:</p>
+<p>Stored on <code>site_members.role</code> as <code>owner</code>, <code>editor</code>, or <code>viewer</code>. There is exactly <strong>one owner per site</strong>. This is an <strong>additive grant layer</strong> on top of the org role — a per-resource share that can widen what a specific person can do on a specific workload, regardless of their org role. The same role gates both the <a href="cli-mcp.html">static-site</a> actions and the <a href="cli-mcp.html">compute-plane</a> actions (apps, databases, secrets). The map is:</p>
 <ul>
   <li><strong>owner</strong> — everything: read, logs, publish, deploy, db:create, rollback, configure, share, transfer, delete.</li>
   <li><strong>editor</strong> — read, logs, publish, deploy, db:create, rollback, and lifecycle (restart / stop / start).</li>
@@ -80,7 +89,42 @@
   </tbody>
 </table>
 
-<div class="note"><span class="lbl">Note</span><p><code>can(actor, action)</code> is the single authority check used everywhere. Platform admins are all-powerful on every site; a non-member can do nothing. <strong>transfer</strong> hands ownership to another member and demotes the old owner to <code>editor</code> — so there is still exactly one owner.</p></div>
+<h3>Org permission matrix</h3>
+<p>The org map, applied to <em>every</em> resource the org owns:</p>
+<table class="tbl">
+  <thead>
+    <tr>
+      <th>Action</th>
+      <th>owner</th>
+      <th>admin</th>
+      <th>member</th>
+      <th>viewer</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><code>read</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td></tr>
+    <tr><td><code>logs</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
+    <tr><td><code>publish</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
+    <tr><td><code>deploy</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
+    <tr><td><code>db:create</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
+    <tr><td><code>rollback</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
+    <tr><td><code>configure</code> (visibility · DB password · secrets)</td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
+    <tr><td><code>share</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="cx">—</span></td></tr>
+    <tr><td><code>transfer</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="cx">—</span></td></tr>
+    <tr><td><code>delete</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="cx">—</span></td></tr>
+  </tbody>
+</table>
+<p>Note that an org <code>member</code> can <code>configure</code> (set visibility, the DB password, and secrets) — that is the one place its reach exceeds a per-site <em>editor</em>, who cannot. What an org <code>member</code> still cannot do is <code>share</code>, <code>transfer</code>, or <code>delete</code> a resource; those stay <code>owner</code>/<code>admin</code>-only.</p>
+
+<h3>Effective permission (the union)</h3>
+<p>For any one resource, a person's effective permission is the <strong>union</strong> of all three axes — the broader of the grants wins, never the narrower:</p>
+<pre><code>can(actor, action) =
+      platformRole === "admin"          // all-powerful everywhere
+   OR org-role-on-the-resource's-org    // org-wide grant
+   OR per-resource site-role            // additive per-site share</code></pre>
+<p>So you are allowed to do something if your platform role, your role in the resource's owning org, <em>or</em> a direct site-member grant permits it. Someone with no platform-admin, no org membership, and no site grant can do nothing.</p>
+
+<div class="note"><span class="lbl">Note</span><p><code>can(actor, action)</code> is the single authority check used everywhere. Platform admins are all-powerful on every site; a non-member can do nothing. <strong>transfer</strong> hands ownership to another member and demotes the old owner to <code>editor</code> — so there is still exactly one site owner.</p></div>
 
 <div class="note warn"><span class="lbl">Warn</span><p><strong><code>logs</code> is gated <em>above</em> plain <code>read</code>/viewer.</strong> Pod logs can echo env-injected secrets (an app's <code>DATABASE_PASSWORD</code> and friends are exposed to the process as environment variables), so reading them is an <strong>editor+</strong> action even though a viewer can already see the app's status. A viewer is deliberately metadata-only and never sees the credential-bearing log stream.</p></div>
 

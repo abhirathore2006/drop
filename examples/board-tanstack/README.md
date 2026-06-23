@@ -17,29 +17,42 @@ Pages: **list** (`/`, with an inline add form + per-item delete), **detail** (`/
 # 1. create the managed Postgres database
 drop db:create board-db
 
-# 2. build the image and import it into k3s (k3s runs as the podman container `k3s`)
-#    `vite build` runs inside the build — it generates the route tree + the .output node server.
-podman build -t docker.io/library/board-tanstack:1 examples/board-tanstack
-podman save docker.io/library/board-tanstack:1 \
-  | podman exec -i k3s ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+# 2. build + deploy in one step — Drop builds the Dockerfile (which runs `vite build` to generate
+#    the route tree + the .output node server) and pushes the image through Drop for you
+drop deploy examples/board-tanstack --build
 
-# 3. deploy (reads this folder's drop.yaml — the non-secret PG* config is already there)
-drop deploy examples/board-tanstack
-
-# 4. set the DB password as a write-only SECRET (never committed), then apply it
+# 3. set the DB password as a write-only SECRET (never committed), then apply it
 drop db:password board-db                                 # prints the password ONCE
 printf '<that password>' | drop secrets set board PGPASSWORD --stdin
 drop restart board                                        # restart to inject the new secret
 
-# 5. open it — https after `make trust-cert`, or plain http via the edge port :8474
+# 4. open it — https after `make trust-cert`, or plain http via the edge port :8474
 open https://board.drop.localhost/        # or: http://board.drop.localhost:8474/
 ```
+
+> `--build` uses `docker` by default; set `DROP_BUILDER=podman` to build with podman. To create
+> the app inside a team org instead of your personal org, add `--org <slug>` (likewise on
+> `drop db:create`). `drop push examples/board-tanstack` does just build+push and prints the ref.
+
+<details><summary>Prebuilt-image alternative (no <code>--build</code>): build + import into k3s yourself</summary>
+
+If you'd rather build out-of-band and reference a fixed `image:` in `drop.yaml`:
+
+```bash
+# build (`vite build` runs inside it — generates the route tree + .output node server)
+podman build -t docker.io/library/board-tanstack:1 examples/board-tanstack
+# import into k3s's containerd (k3s runs as the podman container `k3s`)
+podman save docker.io/library/board-tanstack:1 \
+  | podman exec -i k3s ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+drop deploy examples/board-tanstack      # uses image: board-tanstack:1 from drop.yaml
+```
+</details>
 
 The non-secret connection config (`PGHOST: board-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
 `drop db:password board-db` → `drop secrets set board PGPASSWORD --stdin` → `drop restart board`.
-Manage secrets from the console (app drawer → Secrets) or `secret_*` MCP tools too.
+Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 ## How it's wired
 

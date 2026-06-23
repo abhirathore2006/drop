@@ -5,7 +5,8 @@ app:
   # Built locally and imported into k3s (see the guide). NOT a :latest tag, so k8s uses the
   # imported image instead of trying to pull from a registry.
   image: chat-ws:1
-  # Marks this app for the edge's WebSocket routing path. The platform work that makes WS upgrades
+  # Reserved — NOT yet honored by the server (silently ignored at deploy today). Forward-looking:
+  # marks this app for the edge's WebSocket routing path. The platform work that makes WS upgrades
   # tunnel cleanly through the public edge hostname is tracked in
   # ../../planning/2026-06-23-websocket-support-plan.md — until that lands, exercise the app by
   # port-forwarding straight to the pod (see README.md → "Status").

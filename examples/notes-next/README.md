@@ -14,28 +14,42 @@ standalone image. Reads the standard libpq `PG*` env vars. The image bakes `PORT
 # 1. create the managed Postgres database
 drop db:create notes-db
 
-# 2. build the image (runs `next build` — slower) and import it into k3s
-podman build -t docker.io/library/notes-next:1 examples/notes-next
-podman save docker.io/library/notes-next:1 \
-  | podman exec -i k3s ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+# 2. build + deploy in one step — Drop builds the Dockerfile (this one runs `next build`, so it's
+#    slower) and pushes the image through Drop for you (no registry creds, no manual ctr import)
+drop deploy examples/notes-next --build
 
-# 3. deploy (reads this folder's drop.yaml — the non-secret PG* config is already there)
-drop deploy examples/notes-next
-
-# 4. set the DB password as a write-only SECRET (never committed), then apply it
+# 3. set the DB password as a write-only SECRET (never committed), then apply it
 drop db:password notes-db                                 # prints the password ONCE
 printf '<that password>' | drop secrets set notes PGPASSWORD --stdin
 drop restart notes                                        # restart to inject the new secret
 
-# 5. open it — https after `make trust-cert`, or plain http via the edge port :8474
+# 4. open it — https after `make trust-cert`, or plain http via the edge port :8474
 open https://notes.drop.localhost/            # or: http://notes.drop.localhost:8474/
 ```
+
+> `--build` uses `docker` by default; set `DROP_BUILDER=podman` to build with podman. To create
+> the app inside a team org instead of your personal org, add `--org <slug>` (likewise on
+> `drop db:create`). `drop push examples/notes-next` does just build+push and prints the ref.
+
+<details><summary>Prebuilt-image alternative (no <code>--build</code>): build + import into k3s yourself</summary>
+
+If you'd rather build out-of-band and reference a fixed `image:` in `drop.yaml`:
+
+```bash
+# build (runs `next build` — slower; use the docker.io/library/ prefix so k8s + containerd agree)
+podman build -t docker.io/library/notes-next:1 examples/notes-next
+# import into k3s's containerd (k3s runs as the podman container `k3s`)
+podman save docker.io/library/notes-next:1 \
+  | podman exec -i k3s ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -
+drop deploy examples/notes-next      # uses image: notes-next:1 from drop.yaml
+```
+</details>
 
 The non-secret connection config (`PGHOST: notes-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
 `drop db:password notes-db` → `drop secrets set notes PGPASSWORD --stdin` → `drop restart notes`.
-Manage secrets from the console (app drawer → Secrets) or `secret_*` MCP tools too.
+Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 Full walkthrough (the binding model, the Node example, troubleshooting):
 [`../DATABASE_APPS.md`](../DATABASE_APPS.md).
