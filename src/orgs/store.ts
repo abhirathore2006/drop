@@ -2,7 +2,7 @@
 // org metadata. Personal orgs reuse the user's existing tenant namespace (so backfill moves no
 // workload); team orgs get their own. Per-resource site_members survive as an additive grant layer.
 import { sql } from "kysely";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Db } from "../db/db.ts";
 import type { OrgKind, OrgRole } from "../db/schema.ts";
 import { tenantNamespace, orgSlugNamespace } from "../api/tenant.ts";
@@ -50,20 +50,41 @@ export class OrgStore {
   }
 
   /** Idempotent: ensure the user's personal org exists. namespace = their LITERAL tenant namespace
-   *  (so it equals where their existing workloads already run). Deterministic id → race-safe. */
+   *  (so it equals where their existing workloads already run) and is NEVER randomized. The id is
+   *  deterministic from the email → idempotent + race-safe. The slug carries a fresh RANDOM suffix
+   *  so it can't collide with a team org that squatted the namespace-derived name; on a slug
+   *  collision we regenerate the suffix and retry. */
   async ensurePersonalOrg(email: string): Promise<Org> {
     const e = email.toLowerCase();
     const id = personalId(e);
     const found = await this.db.selectFrom("organisations").selectAll().where("id", "=", id).executeTakeFirst();
-    if (found) return this.toOrg(found);
-    const ns = tenantNamespace(e);
-    await this.db
-      .insertInto("organisations")
-      .values({ id, slug: ns.replace(/^drop-t-/, ""), name: e, kind: "personal", namespace: ns, created_by: e })
-      .onConflict((oc) => oc.column("id").doNothing())
-      .execute();
-    await this.db.insertInto("org_members").values({ org_id: id, email: e, role: "owner" }).onConflict((oc) => oc.columns(["org_id", "email"]).doNothing()).execute();
-    return this.toOrg(await this.db.selectFrom("organisations").selectAll().where("id", "=", id).executeTakeFirstOrThrow());
+    if (found) return this.toOrg(found); // already created (with its original slug) → idempotent
+    const ns = tenantNamespace(e); // load-bearing invariant: reuse the existing tenant namespace
+    const base = e.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32); // DNS-safe, recognizable
+    const ensureMembership = () =>
+      this.db.insertInto("org_members").values({ org_id: id, email: e, role: "owner" })
+        .onConflict((oc) => oc.columns(["org_id", "email"]).doNothing()).execute();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const slug = `${base}-${randomBytes(4).toString("hex")}`; // base-<8 hex>, fresh each attempt
+      const inserted = await this.db
+        .insertInto("organisations")
+        .values({ id, slug, name: e, kind: "personal", namespace: ns, created_by: e })
+        .onConflict((oc) => oc.doNothing()) // ANY unique violation (id race OR slug squat) → no row
+        .returningAll()
+        .executeTakeFirst();
+      if (inserted) {
+        await ensureMembership();
+        return this.toOrg(inserted);
+      }
+      // No row inserted: did OUR id win a concurrent race, or did the slug collide with another org?
+      const byId = await this.db.selectFrom("organisations").selectAll().where("id", "=", id).executeTakeFirst();
+      if (byId) {
+        await ensureMembership(); // a concurrent call created our personal org → adopt it
+        return this.toOrg(byId);
+      }
+      // else: the slug collided with a DIFFERENT org → loop regenerates the random suffix and retries
+    }
+    throw new Error(`ensurePersonalOrg: could not allocate a unique slug for ${e} after 5 attempts`);
   }
 
   /** Create a TEAM org (creator becomes owner). Throws if the slug is taken. */

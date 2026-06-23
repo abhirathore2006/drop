@@ -24,6 +24,23 @@ test("ensurePersonalOrg: namespace == the user's literal tenant namespace (no wo
   await db.destroy();
 });
 
+test("ensurePersonalOrg: survives a slug squat (random suffix) — would have thrown on the old deterministic slug", async () => {
+  const { db, orgs } = await fix();
+  // Pre-occupy the OLD deterministic personal slug (namespace minus `drop-t-`) with another org.
+  // The pre-fix code derived bob's personal slug from exactly this value → unique(slug) violation.
+  const squatted = tenantNamespace("bob@paytm.com").replace(/^drop-t-/, "");
+  await orgs.createOrg(squatted, "Squatter", "alice@x.com");
+  const o = await orgs.ensurePersonalOrg("bob@paytm.com"); // must NOT throw
+  expect(o.kind).toBe("personal");
+  expect(o.namespace).toBe(tenantNamespace("bob@paytm.com")); // namespace invariant still holds
+  expect(o.slug).not.toBe(squatted); // got a distinct (random-suffixed) slug
+  expect(o.slug.startsWith("bob-paytm-com-")).toBe(true); // base preserved, recognizable
+  expect(await orgs.roleOf(o.id, "bob@paytm.com")).toBe("owner");
+  // still idempotent after the conflict path
+  expect((await orgs.ensurePersonalOrg("bob@paytm.com")).id).toBe(o.id);
+  await db.destroy();
+});
+
 test("createOrg (team) + members + roleOf", async () => {
   const { db, orgs } = await fix();
   const org = await orgs.createOrg("acme", "Acme", "alice@x.com");
