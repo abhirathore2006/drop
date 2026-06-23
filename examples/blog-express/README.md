@@ -22,8 +22,7 @@ drop db create blog-db
 drop deploy examples/blog-express --build --no-start
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
-drop db password blog-db                                 # prints the password ONCE
-printf '<that password>' | drop secrets set blog PGPASSWORD --stdin
+drop db password blog-db --set-secret blog:PGPASSWORD   # rotate + store directly; never printed
 drop start blog                                        # first boot, already has the password
 
 # 4. open it — https after `make trust-cert`, or plain http via the edge port :8474
@@ -51,7 +50,7 @@ drop deploy examples/blog-express      # uses image: blog-express:1 from drop.ya
 The non-secret connection config (`PGHOST: blog-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db password blog-db` → `drop secrets set blog PGPASSWORD --stdin` → `drop start blog`.
+`drop db password blog-db --set-secret blog:PGPASSWORD` → `drop start blog`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 Full walkthrough (the binding model, the Next.js example, troubleshooting):

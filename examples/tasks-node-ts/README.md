@@ -23,8 +23,7 @@ drop db create tasks-db
 drop deploy examples/tasks-node-ts --build --no-start
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
-drop db password tasks-db                                    # prints the password ONCE
-printf '<that password>' | drop secrets set tasks PGPASSWORD --stdin
+drop db password tasks-db --set-secret tasks:PGPASSWORD   # rotate + store directly; never printed
 drop start tasks                                           # first boot, already has the password
 
 # 4. open it — https after `make trust-cert`, or plain http via the edge port :8474
@@ -52,7 +51,7 @@ drop deploy examples/tasks-node-ts      # uses image: tasks-node-ts:1 from drop.
 The non-secret connection config (`PGHOST: tasks-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db password tasks-db` → `drop secrets set tasks PGPASSWORD --stdin` → `drop start tasks`.
+`drop db password tasks-db --set-secret tasks:PGPASSWORD` → `drop start tasks`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 Full walkthrough (the binding model, the Next.js example, troubleshooting):

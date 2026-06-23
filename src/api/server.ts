@@ -608,7 +608,29 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (site.type !== "database") return c.json({ error: `name "${name}" is a ${site.type}, not a database` }, 409);
     if (!can(await actorFor(email, site), "configure")) return c.json({ error: "owner only" }, 403);
 
-    const body = (await c.req.json().catch(() => ({}))) as { password?: unknown };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      password?: unknown;
+      setSecret?: { app?: unknown; key?: unknown }; // rotate + store straight into an app secret (never returned)
+      show?: unknown; // with setSecret, ALSO return the password
+    };
+
+    // Optional: write the rotated password directly into a target app's write-only secret, so the
+    // plaintext never returns to the client. Validate the target + authz BEFORE rotating, so a bad
+    // target never rotates the DB needlessly.
+    let secretTarget: { site: Site; key: string } | null = null;
+    if (body.setSecret) {
+      const appName = typeof body.setSecret.app === "string" ? body.setSecret.app : "";
+      const key = typeof body.setSecret.key === "string" ? body.setSecret.key : "";
+      const keyErr = validateSecretKey(key);
+      if (keyErr) return c.json({ error: keyErr }, 400);
+      const appSite = await d.meta.getSitePlain(appName);
+      if (!appSite) return c.json({ error: `no such app: ${appName}` }, 404);
+      if (appSite.type !== "app") return c.json({ error: `name "${appName}" is a ${appSite.type}, not an app` }, 409);
+      if (!can(await actorFor(email, appSite), "configure")) return c.json({ error: `not permitted to set secrets on ${appName}` }, 403);
+      secretTarget = { site: appSite, key };
+    }
+    const show = body.show === true;
+
     let password: string;
     if (body.password != null) {
       const err = validateDbPassword(body.password);
@@ -630,6 +652,27 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       return c.json({ error: `password rotation failed: ${(e as Error).message}` }, 502);
     } finally {
       rotatingPasswords.delete(name);
+    }
+
+    // Store the new password directly as the app's secret (never printed unless --show).
+    if (secretTarget) {
+      const scope = { owner: secretTarget.site.owner, app: secretTarget.site.name, namespace: secretTarget.site.namespace };
+      try {
+        await d.secrets.setSecret(scope, secretTarget.key, password);
+        const fp = fingerprint(password);
+        await d.meta.upsertSecretKey(secretTarget.site.name, secretTarget.key, fp, email);
+        await d.secrets.ensureBinding(scope, (await d.meta.listSecretKeys(secretTarget.site.name)).map((k) => k.key));
+        return c.json({
+          name,
+          user: "app",
+          secretSet: { app: secretTarget.site.name, key: secretTarget.key, fingerprint: fp },
+          note: `secret ${secretTarget.key} set on ${secretTarget.site.name} — start/restart it to apply`,
+          ...(show ? { password } : {}), // omitted unless explicitly requested
+        });
+      } catch (e) {
+        // Rotation succeeded but storing the secret failed — return the password so it isn't lost.
+        return c.json({ name, user: "app", password, warning: `password rotated but storing it as ${secretTarget.key} on ${secretTarget.site.name} failed: ${(e as Error).message} — set it manually now` });
+      }
     }
     return c.json({ name, user: "app", password }); // returned ONCE — store it now
   });

@@ -22,8 +22,7 @@ drop db create board-db
 drop deploy examples/board-tanstack --build --no-start
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
-drop db password board-db                                 # prints the password ONCE
-printf '<that password>' | drop secrets set board PGPASSWORD --stdin
+drop db password board-db --set-secret board:PGPASSWORD   # rotate + store directly; never printed
 drop start board                                        # first boot, already has the password
 
 # 4. open it — https after `make trust-cert`, or plain http via the edge port :8474
@@ -51,7 +50,7 @@ drop deploy examples/board-tanstack      # uses image: board-tanstack:1 from dro
 The non-secret connection config (`PGHOST: board-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db password board-db` → `drop secrets set board PGPASSWORD --stdin` → `drop start board`.
+`drop db password board-db --set-secret board:PGPASSWORD` → `drop start board`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 ## How it's wired

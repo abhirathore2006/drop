@@ -160,17 +160,29 @@ drop deploy examples/guestbook-node      # uses image: guestbook-node:1 from dro
 ```
 </details>
 
-### Step 4 — set the DB password (a write-only secret), then start
+### Step 4 — set the DB password straight into the app secret, then start
+
+`drop db password --set-secret` rotates the database password **and writes it directly into the
+app's write-only `PGPASSWORD` secret** — server-side, so the plaintext **never returns to your
+terminal** (no copy-paste, no shell history). Then start the app:
 
 ```bash
-drop db password guestbook-db                                # prints the password ONCE
-printf '<that password>' | drop secrets set guestbook PGPASSWORD --stdin
-drop start guestbook                                         # first boot — already has the password
+drop db password guestbook-db --set-secret guestbook:PGPASSWORD   # rotate + store; never printed
+drop start guestbook                                              # first boot — already has the password
 ```
 
-The app was deployed with `--no-start`, so `drop start` gives it its **first** (healthy) boot with
-the secret already present — no broken pod, no wasted restart. (Later, to rotate the password on a
-*running* app, set the new secret and `drop restart guestbook`.)
+Because the app was deployed `--no-start`, `drop start` gives it a healthy **first** boot with the
+secret already present — no broken pod, no live credential on your screen. Add **`--show`** if you
+also need the password printed (e.g. to use it outside Drop). The explicit two-step form still works
+if you prefer it:
+
+```bash
+drop db password guestbook-db                                     # prints the password ONCE
+printf '<that password>' | drop secrets set guestbook PGPASSWORD --stdin
+```
+
+(Later, to rotate the password on a *running* app, repeat the `--set-secret` command and then
+`drop restart guestbook` to apply it.)
 
 `drop secrets set` stores the value in the secret manager and never prints it back. `drop secrets ls
 guestbook` shows the key + when it changed (never the value). The app picks up a new/changed secret

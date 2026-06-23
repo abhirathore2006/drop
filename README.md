@@ -12,7 +12,7 @@ $ drop publish ./dist myapp           # static site
 
 $ drop db create myapi-db             # managed Postgres (CloudNativePG)
 $ drop deploy ./api myapi --no-start  # container app — deploy, but don't boot it yet
-$ printf "$PW" | drop secrets set myapi DATABASE_PASSWORD --stdin   # write-only secret
+$ drop db password myapi-db --set-secret myapi:PGPASSWORD   # rotate DB pw straight into the app secret (never printed)
 $ drop start myapi                    # first boot — already has the secret
   ✓ live at https://myapi.drop.example.com
 ```
@@ -196,9 +196,14 @@ pod crash-loop. Use **`--no-start`** to deploy without booting, set the secret, 
 
 ```bash
 drop deploy ./api --build --no-start             # build + push + register, but don't start
-printf "$PW" | drop secrets set api PGPASSWORD --stdin
+drop db password api-db --set-secret api:PGPASSWORD   # rotate the DB pw straight into the app secret (never printed)
 drop start api                                   # first boot — already has the secret
 ```
+
+`drop db password <db> --set-secret <app>:<KEY>` rotates the database password and writes it
+**directly** into the app's write-only secret — the plaintext never returns to your terminal. Add
+`--show` to also print it; or use the two-step `drop db password <db>` → `drop secrets set` if you
+prefer.
 
 The `app:` section in `drop.yaml` declares the rest. With `--build` Drop supplies the image; or
 **bring your own** prebuilt image by setting `app.image` (no `--build`):

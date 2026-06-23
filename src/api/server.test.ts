@@ -768,6 +768,28 @@ test("transfer: a database is rejected (409) — stateful, can't be moved by a m
 
 // ---- Phase D1: read-model (type everywhere) + per-type live detail + admin filters + suspension ----
 
+test("db password --set-secret: rotates + stores as the app secret, never returned (--show opts in)", async () => {
+  const { app, secrets, meta, db } = await mk();
+  await call(app, "POST", "/v1/apps/blog", "alice", { image: "x:1" });
+  await call(app, "POST", "/v1/databases/blog-db", "alice", {});
+  // rotate + store directly into blog:PGPASSWORD — the plaintext is NOT returned to the client
+  const j = await (await call(app, "POST", "/v1/databases/blog-db/password", "alice", { setSecret: { app: "blog", key: "PGPASSWORD" } })).json();
+  expect(j.password).toBeUndefined();
+  expect(j.secretSet).toMatchObject({ app: "blog", key: "PGPASSWORD" });
+  expect([...secrets.values.values()].some((bag) => bag.has("PGPASSWORD"))).toBe(true); // actually stored in the backend
+  expect((await meta.listSecretKeys("blog")).map((k: any) => k.key)).toContain("PGPASSWORD"); // + registered
+
+  // --show opts into returning it as well
+  const shown = await (await call(app, "POST", "/v1/databases/blog-db/password", "alice", { setSecret: { app: "blog", key: "PGPASSWORD" }, show: true })).json();
+  expect(typeof shown.password).toBe("string");
+  expect(shown.password.length).toBeGreaterThan(0);
+
+  // target is validated BEFORE rotating: unknown app → 404, bad key → 400
+  expect((await call(app, "POST", "/v1/databases/blog-db/password", "alice", { setSecret: { app: "ghost", key: "PGPASSWORD" } })).status).toBe(404);
+  expect((await call(app, "POST", "/v1/databases/blog-db/password", "alice", { setSecret: { app: "blog", key: "bad key!" } })).status).toBe(400);
+  await db.destroy();
+});
+
 test("read-model: list + detail + admin all carry the workload `type`", async () => {
   const { app, db } = await mk({ admins: ["alice@example.com"] });
   await pub(app, "alice", "mysite", await tgz({ "index.html": "x" }));

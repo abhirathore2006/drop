@@ -79,10 +79,10 @@ export class Client {
   removeOrgMember(slug: string, email: string) {
     return this.req("DELETE", `/v1/orgs/${slug}/members/${encodeURIComponent(email)}`);
   }
-  dbPassword(name: string, password?: string) {
+  dbPassword(name: string, password?: string, setSecret?: { app: string; key: string }, show?: boolean) {
     return this.req("POST", `/v1/databases/${name}/password`, {
       contentType: "application/json",
-      body: JSON.stringify(password ? { password } : {}),
+      body: JSON.stringify({ ...(password ? { password } : {}), ...(setSecret ? { setSecret } : {}), ...(show ? { show: true } : {}) }),
     });
   }
   setSecret(app: string, key: string, value: string) {

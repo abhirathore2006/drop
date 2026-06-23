@@ -41,8 +41,7 @@ drop db create chat-db
 drop deploy examples/chat-ws --build --no-start
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
-drop db password chat-db                                # prints the password ONCE
-printf '<that password>' | drop secrets set chat PGPASSWORD --stdin
+drop db password chat-db --set-secret chat:PGPASSWORD   # rotate + store directly; never printed
 drop start chat                                       # first boot, already has the password
 
 # 4. open it — see the "Status" note above: today, port-forward to the pod (the public edge
@@ -73,7 +72,7 @@ drop deploy examples/chat-ws      # uses image: chat-ws:1 from drop.yaml
 The non-secret connection config (`PGHOST: chat-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db password chat-db` → `drop secrets set chat PGPASSWORD --stdin` → `drop start chat`.
+`drop db password chat-db --set-secret chat:PGPASSWORD` → `drop start chat`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 ## How the chat works

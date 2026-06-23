@@ -152,7 +152,12 @@ export function buildProgram(): Command {
     .command("password <name> [password]")
     .description("Set/rotate the managed database's `app` password (owner only; generates one if omitted)")
     .option("--password-stdin", "read the new password from stdin (avoids shell history / process listing)")
-    .action(async (name: string, password: string | undefined, opts: { passwordStdin?: boolean }) => {
+    .option(
+      "--set-secret <app:KEY>",
+      "rotate + store the new password DIRECTLY as app <app>'s write-only secret <KEY> (e.g. blog:PGPASSWORD) — never printed, never touches your terminal",
+    )
+    .option("--show", "also print the password (use with --set-secret; without it the password is always printed)")
+    .action(async (name: string, password: string | undefined, opts: { passwordStdin?: boolean; setSecret?: string; show?: boolean }) => {
       const err = validateName(name);
       if (err) throw new Error(err);
       let pw = password;
@@ -162,10 +167,24 @@ export function buildProgram(): Command {
       } else if (password) {
         console.error("  ⚠ a password passed as an argument is saved to your shell history and visible in process listings — prefer --password-stdin, or omit it to generate a strong one.");
       }
+      let setSecret: { app: string; key: string } | undefined;
+      if (opts.setSecret) {
+        const i = opts.setSecret.indexOf(":");
+        const app = i > 0 ? opts.setSecret.slice(0, i) : "";
+        const key = i > 0 ? opts.setSecret.slice(i + 1) : "";
+        if (!app || !key) throw new Error("--set-secret must be <app>:<KEY>, e.g. blog:PGPASSWORD");
+        setSecret = { app, key };
+      }
       console.log(`  ▸ rotating password for ${name}…`);
-      const res = await (await client()).dbPassword(name, pw);
-      console.log(`  ✓ password set for user '${res.user}' — shown once, store it now:`);
-      console.log(`     ${res.password}`);
+      const res = await (await client()).dbPassword(name, pw, setSecret, opts.show);
+      if (res.secretSet) {
+        console.log(`  ✓ rotated + stored as secret ${res.secretSet.key} on ${res.secretSet.app} (${res.secretSet.fingerprint}) — not printed`);
+        if (res.password) console.log(`     ${res.password}`); // only when --show
+        console.log(`     ${res.note ?? `start/restart ${res.secretSet.app} to apply`}`);
+      } else {
+        console.log(`  ✓ password set for user '${res.user}' — shown once, store it now:`);
+        console.log(`     ${res.password}`);
+      }
       if (res.warning) console.error(`  ⚠ ${res.warning}`);
     });
 
