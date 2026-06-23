@@ -790,6 +790,48 @@ test("db password --set-secret: rotates + stores as the app secret, never return
   await db.destroy();
 });
 
+test("ls ?org=<slug>: filters workloads to one org (members only)", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" });
+  await call(app, "POST", "/v1/apps/personalapp", "alice", { image: "x:1" }); // personal org
+  await call(app, "POST", "/v1/apps/acmeapp?org=acme", "alice", { image: "x:1" }); // team org
+  const all = (await (await call(app, "GET", "/v1/sites", "alice")).json()).sites.map((s: any) => s.name).sort();
+  expect(all).toEqual(["acmeapp", "personalapp"]);
+  const acme = (await (await call(app, "GET", "/v1/sites?org=acme", "alice")).json()).sites.map((s: any) => s.name);
+  expect(acme).toEqual(["acmeapp"]);
+  expect((await call(app, "GET", "/v1/sites?org=ghost", "alice")).status).toBe(404); // unknown org
+  expect((await call(app, "GET", "/v1/sites?org=acme", "bob")).status).toBe(403); // not a member
+  await db.destroy();
+});
+
+test("transfer --org: re-homes a site into a team org; app tears down workload; db blocked; guards", async () => {
+  const { app, orgs, meta, db } = await mk();
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" });
+  const acmeId = (await orgs.getOrgBySlug("acme"))!.id;
+  // a SITE re-homes cleanly (no workload)
+  await pub(app, "alice", "mysite", await tgz({ "index.html": "x" }));
+  const rs = await (await call(app, "POST", "/v1/sites/mysite/transfer", "alice", { toOrg: "acme" })).json();
+  expect(rs.org).toBe("acme");
+  expect((await meta.getSitePlain("mysite"))!.orgId).toBe(acmeId);
+  expect(rs.secretsDropped).toBe(false);
+  // an APP: workload + secrets torn down (owner redeploys into the new org)
+  await call(app, "POST", "/v1/apps/myapp", "alice", { image: "x:1" });
+  const ra = await (await call(app, "POST", "/v1/sites/myapp/transfer", "alice", { toOrg: "acme" })).json();
+  expect(ra.org).toBe("acme");
+  expect(ra.secretsDropped).toBe(true);
+  expect((await meta.getSitePlain("myapp"))!.orgId).toBe(acmeId);
+  // already in that org → 409
+  expect((await call(app, "POST", "/v1/sites/mysite/transfer", "alice", { toOrg: "acme" })).status).toBe(409);
+  // databases are blocked (stateful)
+  await call(app, "POST", "/v1/databases/mydb", "alice", {});
+  expect((await call(app, "POST", "/v1/sites/mydb/transfer", "alice", { toOrg: "acme" })).status).toBe(409);
+  // can't dump into an org you're not a member of
+  await call(app, "POST", "/v1/orgs", "bob", { slug: "other", name: "Other" });
+  await call(app, "POST", "/v1/apps/app2", "alice", { image: "x:1" });
+  expect((await call(app, "POST", "/v1/sites/app2/transfer", "alice", { toOrg: "other" })).status).toBe(403);
+  await db.destroy();
+});
+
 test("read-model: list + detail + admin all carry the workload `type`", async () => {
   const { app, db } = await mk({ admins: ["alice@example.com"] });
   await pub(app, "alice", "mysite", await tgz({ "index.html": "x" }));

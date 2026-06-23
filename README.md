@@ -127,14 +127,27 @@ drop org add <slug> <email> [role]   # add/update a member (owner|admin|member|v
 drop org rm  <slug> <email>      # remove a member
 ```
 
-Create flows take **`--org <slug>`** to target a team org; omit it and the resource lands in your
-personal org:
+`--org <slug>` shows up exactly where an org is a **choice**, never as redundant noise:
 
 ```bash
+# create target — where a NEW resource lands (omit → your personal org)
 drop publish ./dist mysite --org acme
 drop deploy  ./api  myapi  --org acme
 drop db create myapi-db    --org acme
+
+# list filter — only this org's resources
+drop ls --org acme
+
+# re-home — move an existing resource into a team org (app workload torn down → redeploy + re-set
+# secrets in the new org; databases are stateful and blocked)
+drop transfer myapp --org acme        # vs `drop transfer myapp bob@example.com` (to a user)
 ```
+
+Per-resource commands — `share`/`unshare`, `secrets`, `restart`/`stop`/`start`, `rollback`,
+`info`, `rm`, `db password` — take a **globally-unique resource name** that already identifies the
+resource and its org, so they don't take `--org`. Org-*wide* access is granted with `drop org add`
+(an org role applies to every resource in the org), which is the additive layer over per-resource
+collaborators (`drop share`).
 
 The same is exposed over MCP as `org_create`, `org_list`, and `org_add_member` (with an `org` arg
 on `deploy`/`db_create` to choose a team org).

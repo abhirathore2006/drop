@@ -838,11 +838,22 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // ---- list my sites ----
   app.get("/v1/sites", async (c) => {
     const email = c.get("identity").email;
+    // Optional ?org=<slug> filter: show only resources in that org (caller must be a member, or admin).
+    const orgSlug = c.req.query("org");
+    let orgFilterId: string | null = null;
+    if (orgSlug) {
+      const org = await d.orgs.getOrgBySlug(orgSlug);
+      if (!org) return c.json({ error: `no such org: ${orgSlug}` }, 404);
+      if (!(await d.orgs.roleOf(org.id, email)) && !(await isPlatformAdmin(email))) return c.json({ error: `not a member of org ${orgSlug}` }, 403);
+      orgFilterId = org.id;
+    }
     const names = await d.meta.listUserSites(email);
     const out: unknown[] = [];
     for (const name of names) {
       const s = await d.meta.getSitePlain(name);
-      if (s) out.push({ name: s.name, type: s.type, owner: s.owner, visibility: s.visibility, url: siteUrl(name), current: s.currentVersion, org: await orgOf(s.orgId) });
+      if (!s) continue;
+      if (orgFilterId && s.orgId !== orgFilterId) continue;
+      out.push({ name: s.name, type: s.type, owner: s.owner, visibility: s.visibility, url: siteUrl(name), current: s.currentVersion, org: await orgOf(s.orgId) });
     }
     return c.json({ sites: out });
   });
@@ -935,8 +946,39 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (site.type === "database") {
       return c.json({ error: "databases cannot be transferred (stateful); back up and recreate under the new owner" }, 409);
     }
-    const body = (await c.req.json().catch(() => ({}))) as { email?: string };
-    if (!body.email) return c.json({ error: "email required" }, 400);
+    const body = (await c.req.json().catch(() => ({}))) as { email?: string; toOrg?: string };
+
+    // Re-home into a TEAM org (vs transferring to a user, below). Changes the resource's org — and
+    // thus its namespace — so an app's workload + secrets are torn down in the old namespace and the
+    // owner redeploys into the new org (mirrors the user-transfer path; DBs are already blocked above).
+    // The site_member owner is unchanged: the caller stays owner, and the org grants org-wide access.
+    if (body.toOrg) {
+      const org = await d.orgs.getOrgBySlug(body.toOrg);
+      if (!org) return c.json({ error: `no such org: ${body.toOrg}` }, 404);
+      const role = await d.orgs.roleOf(org.id, email);
+      const platformRole = (await d.users.getUser(email))?.role ?? "member";
+      if (!canCreateInOrg(role, platformRole)) return c.json({ error: `not a member of org ${body.toOrg} with create rights` }, 403);
+      if (org.id === site.orgId) return c.json({ error: `${name} is already in org ${body.toOrg}` }, 409);
+      await d.meta.setSiteOrg(name, org.id);
+      let secretsDropped = false;
+      if (site.type === "app" && d.kube) {
+        await d.kube.deleteApp(site.namespace, name);
+        await d.secrets
+          .destroy({ owner: site.owner, app: name, namespace: site.namespace })
+          .catch((e) => console.error(`transfer ${name} → org ${body.toOrg}: secrets.destroy failed (orphaned material in ${site.namespace}): ${(e as Error).message}`));
+        await d.meta.clearSecretKeys(name);
+        secretsDropped = true;
+      }
+      return c.json({
+        name,
+        org: org.slug,
+        type: site.type,
+        secretsDropped,
+        ...(site.type === "app" ? { note: `app workload torn down in the old namespace — redeploy into ${org.slug} (drop deploy …) and re-set its secrets` } : {}),
+      });
+    }
+
+    if (!body.email) return c.json({ error: "email or --org required" }, 400);
     const newOwner = body.email.toLowerCase(); // canonical principal — must match the lowercased identity
     await ensureUser(newOwner); // FK
     const oldOwner = site.owner;

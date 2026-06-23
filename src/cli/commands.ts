@@ -247,11 +247,23 @@ export function buildProgram(): Command {
 
   program.command("info <name>").description("Show site metadata").action(async (name: string) => show(await (await client()).info(name)));
   program.command("members <name>").description("Show owner + collaborators").action(async (name: string) => show(await (await client()).info(name)));
-  program.command("ls").description("List your sites").action(async () => show(await (await client()).list()));
+  program
+    .command("ls")
+    .description("List your workloads (sites, apps, databases)")
+    .option("--org <slug>", "show only resources in this organisation")
+    .action(async (opts: { org?: string }) => show(await (await client()).list(opts.org)));
   program.command("rm <name>").description("Unpublish a site").action(async (name: string) => show(await (await client()).remove(name)));
   program.command("share <name> <email>").description("Add a collaborator").action(async (name: string, email: string) => show(await (await client()).share(name, email)));
   program.command("unshare <name> <email>").description("Remove a collaborator").action(async (name: string, email: string) => show(await (await client()).unshare(name, email)));
-  program.command("transfer <name> <email>").description("Transfer ownership").action(async (name: string, email: string) => show(await (await client()).transfer(name, email)));
+  program
+    .command("transfer <name> [email]")
+    .description("Transfer a resource to a USER (their personal org), or move it into a TEAM org with --org")
+    .option("--org <slug>", "move the resource into this team org (instead of transferring to a user)")
+    .action(async (name: string, email: string | undefined, opts: { org?: string }) => {
+      if (!email && !opts.org) throw new Error("specify a target: an <email> (transfer to a user) or --org <slug> (move into a team org)");
+      if (email && opts.org) throw new Error("specify either an <email> or --org, not both");
+      show(await (await client()).transfer(name, email ? { email } : { toOrg: opts.org }));
+    });
 
   return program;
 }

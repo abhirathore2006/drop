@@ -115,8 +115,8 @@ export class Client {
   info(name: string) {
     return this.req("GET", `/v1/sites/${name}`);
   }
-  list() {
-    return this.req("GET", `/v1/sites`);
+  list(org?: string) {
+    return this.req("GET", `/v1/sites${org ? `?org=${encodeURIComponent(org)}` : ""}`);
   }
   remove(name: string) {
     return this.req("DELETE", `/v1/sites/${name}`);
@@ -130,10 +130,10 @@ export class Client {
   unshare(name: string, email: string) {
     return this.req("DELETE", `/v1/sites/${name}/collaborators/${encodeURIComponent(email)}`);
   }
-  transfer(name: string, email: string) {
+  transfer(name: string, target: { email?: string; toOrg?: string }) {
     return this.req("POST", `/v1/sites/${name}/transfer`, {
       contentType: "application/json",
-      body: JSON.stringify({ email }),
+      body: JSON.stringify(target),
     });
   }
 }
