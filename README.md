@@ -175,14 +175,17 @@ the client, and the *same command* works locally and in prod (source: `src/image
 `src/cli/build-push.ts`, `src/api/server.ts` `PUT /v1/apps/:name/image`):
 
 ```bash
-drop deploy ./api --build      # build the Dockerfile locally → push through Drop → deploy
-drop push   ./api [name]       # just build+push; prints the in-cluster ref (drop.local/<app>:<tag>)
+drop deploy ./api --build                      # build ./api/Dockerfile → push through Drop → deploy
+drop deploy ./api --build -f Dockerfile.prod    # build a specific Dockerfile (per-env); implies --build
+drop push   ./api [name]                        # just build+push; prints the in-cluster ref (drop.local/<app>:<tag>)
 ```
 
 `--build` builds the Dockerfile in `<dir>`, streams a `docker save` tarball to the Drop API, which
 makes it pullable by the cluster (**local:** imports into the k3s node's containerd; **prod:**
 pushes to a registry / ECR), then deploys — so a developer never needs registry creds. The CLI
-builder is `docker` by default; set **`DROP_BUILDER=podman`** to use podman. On the server,
+builder is `docker` by default; set **`DROP_BUILDER=podman`** to use podman. To build a specific
+Dockerfile (e.g. multiple per-env files), pass **`-f, --dockerfile <path>`** (relative to your
+CWD, like docker's `-f`; it implies `--build`). On the server,
 `DROP_IMAGE_BACKEND` selects `containerd` (default, local) or `registry` (prod). (Image push is
 **CLI-only today** — there is no MCP tool for it yet; in-cluster builds without a local Docker are
 a future item.)

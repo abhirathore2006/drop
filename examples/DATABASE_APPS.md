@@ -129,7 +129,9 @@ podman), then streams a `docker save` tarball to `PUT /v1/apps/guestbook/image`.
 pullable by the cluster — **locally** it imports into the k3s node's containerd; **in prod** it
 pushes to a registry (ECR) — and the Deployment references the pushed tag (`IfNotPresent`, so a
 fresh tag each `--build` rolls the pods). `drop push examples/guestbook-node` does just the
-build+push and prints the ref, if you want to deploy separately.
+build+push and prints the ref, if you want to deploy separately. To build a **specific Dockerfile**
+(e.g. per-env files), add `-f, --dockerfile <path>` — e.g. `drop deploy ./api -f Dockerfile.prod`
+(the path is relative to your CWD, like docker's `-f`; passing it implies `--build`).
 
 > Drop's image backend is chosen by `DROP_IMAGE_BACKEND` (`containerd` locally, `registry` in prod),
 > exactly like the secret backend — see the [WebSocket/registry roadmap](../planning/2026-06-23-websocket-support-plan.md)

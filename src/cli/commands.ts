@@ -97,10 +97,11 @@ export function buildProgram(): Command {
     .description("Deploy a container app (reads the app: section from drop.yaml)")
     .option("--org <slug>", "create in this organisation (default: your personal org)")
     .option("--build", "build the image from dir's Dockerfile and push it through Drop (no registry needed)")
-    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; build?: boolean }) => {
+    .option("-f, --dockerfile <path>", "build from a specific Dockerfile (e.g. Dockerfile.prod); implies --build")
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; build?: boolean; dockerfile?: string }) => {
       const { name, source, app } = await loadAppDeploy(dir, nameArg);
-      if (opts.build) {
-        const { image } = await buildAndPushImage(await client(), dir, name, opts.org);
+      if (opts.build || opts.dockerfile) {
+        const { image } = await buildAndPushImage(await client(), dir, name, { org: opts.org, dockerfile: opts.dockerfile });
         app.image = image; // deploy the just-pushed image instead of the drop.yaml ref
       }
       console.log(`  ▸ deploying ${name}  (${app.image})…`);
@@ -115,9 +116,10 @@ export function buildProgram(): Command {
     .command("push <dir> [name]")
     .description("Build the app image from dir's Dockerfile and push it through Drop (no registry needed); prints the in-cluster ref")
     .option("--org <slug>", "target organisation (default: your personal org)")
-    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string }) => {
+    .option("-f, --dockerfile <path>", "build from a specific Dockerfile (e.g. Dockerfile.prod)")
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; dockerfile?: string }) => {
       const { name } = await loadAppDeploy(dir, nameArg);
-      const { image } = await buildAndPushImage(await client(), dir, name, opts.org);
+      const { image } = await buildAndPushImage(await client(), dir, name, { org: opts.org, dockerfile: opts.dockerfile });
       console.log(`  ✓ pushed ${image}`);
       console.log(`  tip: prefer  drop deploy ${dir} --build  (build+push+deploy in one step — a fresh tag each build, so redeploys roll the pods).`);
       console.log(`       if you instead pin  image: ${image}  in drop.yaml, bump the tag on a rebuild — reusing the same tag won't roll the pods.`);
