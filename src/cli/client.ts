@@ -32,8 +32,12 @@ export class Client {
       body: tarball,
     });
   }
-  deploy(name: string, app: AppConfig, org?: string) {
-    return this.req("POST", `/v1/apps/${name}${this.orgQ(org)}`, {
+  deploy(name: string, app: AppConfig, org?: string, noStart?: boolean) {
+    const q = new URLSearchParams();
+    if (org) q.set("org", org);
+    if (noStart) q.set("start", "false");
+    const qs = q.toString();
+    return this.req("POST", `/v1/apps/${name}${qs ? `?${qs}` : ""}`, {
       contentType: "application/json",
       body: JSON.stringify(app),
     });

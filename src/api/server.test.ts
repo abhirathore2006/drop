@@ -314,6 +314,21 @@ test("deploy: claims an app, applies manifests, sets pointer type=app", async ()
   await db.destroy();
 });
 
+test("deploy --no-start: app deploys STOPPED (no broken first boot); start brings it up", async () => {
+  const { app, kube, meta, db } = await mk();
+  const res = await call(app, "POST", "/v1/apps/blog?start=false", "alice", { image: "x:1", scale: { min: 1, max: 1 } });
+  expect(res.status).toBe(200);
+  expect((await res.json()).started).toBe(false); // never rolled out a running (secret-less) pod
+  expect((await meta.getSitePlain("blog"))!.runtimeState).toBe("stopped");
+  expect([...kube.stopped].some((k) => k.includes("blog"))).toBe(true); // pinned to 0 in the cluster
+  // configure (secrets) happens here while stopped, then start → healthy first boot
+  expect((await (await call(app, "POST", "/v1/apps/blog/start", "alice")).json()).state).toBe("running");
+  expect((await meta.getSitePlain("blog"))!.runtimeState).toBe("running");
+  // a plain deploy (no flag) still starts normally
+  expect((await (await call(app, "POST", "/v1/apps/web2", "alice", { image: "x:1" })).json()).started).toBe(true);
+  await db.destroy();
+});
+
 test("deploy: app and site names don't collide (409 both ways)", async () => {
   const { app, db } = await mk();
   await pub(app, "alice", "shared", await tgz({ "index.html": "x" })); // a site

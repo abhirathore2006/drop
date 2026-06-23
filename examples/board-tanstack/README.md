@@ -19,12 +19,12 @@ drop db create board-db
 
 # 2. build + deploy in one step — Drop builds the Dockerfile (which runs `vite build` to generate
 #    the route tree + the .output node server) and pushes the image through Drop for you
-drop deploy examples/board-tanstack --build
+drop deploy examples/board-tanstack --build --no-start
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
 drop db password board-db                                 # prints the password ONCE
 printf '<that password>' | drop secrets set board PGPASSWORD --stdin
-drop restart board                                        # restart to inject the new secret
+drop start board                                        # first boot, already has the password
 
 # 4. open it — https after `make trust-cert`, or plain http via the edge port :8474
 open https://board.drop.localhost/        # or: http://board.drop.localhost:8474/
@@ -51,7 +51,7 @@ drop deploy examples/board-tanstack      # uses image: board-tanstack:1 from dro
 The non-secret connection config (`PGHOST: board-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db password board-db` → `drop secrets set board PGPASSWORD --stdin` → `drop restart board`.
+`drop db password board-db` → `drop secrets set board PGPASSWORD --stdin` → `drop start board`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 ## How it's wired

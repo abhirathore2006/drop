@@ -354,12 +354,20 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // external backends) using the current key registry.
     const secretKeys = (await d.meta.listSecretKeys(name)).map((k) => k.key);
     await d.secrets.ensureBinding({ owner: site.owner, app: name, namespace: ns }, secretKeys);
-    // A redeploy must not silently wake a STOPPED app — re-apply the offline state.
-    if (site.runtimeState === "stopped") await d.kube.stopApp(ns, name);
+    // Don't roll out a running pod until the operator opts in. A fresh app often needs its
+    // secrets/config set BEFORE first boot (e.g. a DB password) or it crash-loops — `--no-start`
+    // (?start=false) deploys it STOPPED so you can configure it, then `drop start` gives it a
+    // healthy first boot. A redeploy of an already-stopped app likewise stays down until `drop start`.
+    let stopped = site.runtimeState === "stopped";
+    if (c.req.query("start") === "false" && !stopped) {
+      await d.meta.setRuntimeState(name, "stopped");
+      stopped = true;
+    }
+    if (stopped) await d.kube.stopApp(ns, name);
 
     await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
     await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
-    return c.json({ url: siteUrl(name), name, version: verId, image: appCfg.image });
+    return c.json({ url: siteUrl(name), name, version: verId, image: appCfg.image, started: !stopped });
   });
 
   // ---- image push: CLI builds locally + streams a `docker save` tarball; we make it pullable by

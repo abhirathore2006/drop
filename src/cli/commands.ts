@@ -98,15 +98,23 @@ export function buildProgram(): Command {
     .option("--org <slug>", "create in this organisation (default: your personal org)")
     .option("--build", "build the image from dir's Dockerfile and push it through Drop (no registry needed)")
     .option("-f, --dockerfile <path>", "build from a specific Dockerfile (e.g. Dockerfile.prod); implies --build")
-    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; build?: boolean; dockerfile?: string }) => {
+    .option("--no-start", "deploy without starting the pod (set secrets/config first, then `drop start <app>`) — avoids a broken first boot")
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; build?: boolean; dockerfile?: string; start?: boolean }) => {
       const { name, source, app } = await loadAppDeploy(dir, nameArg);
       if (opts.build || opts.dockerfile) {
         const { image } = await buildAndPushImage(await client(), dir, name, { org: opts.org, dockerfile: opts.dockerfile });
         app.image = image; // deploy the just-pushed image instead of the drop.yaml ref
       }
-      console.log(`  ▸ deploying ${name}  (${app.image})…`);
-      const res = await (await client()).deploy(name, app, opts.org);
-      console.log(`  ✓ live at ${res.url}`);
+      // commander maps `--no-start` to opts.start === false
+      const noStart = opts.start === false;
+      console.log(`  ▸ deploying ${name}  (${app.image})${noStart ? " — not starting yet" : ""}…`);
+      const res = await (await client()).deploy(name, app, opts.org, noStart);
+      if (res.started === false) {
+        console.log(`  ✓ deployed ${name} (stopped). Set its secrets/config, then start it:`);
+        console.log(`      drop start ${name}`);
+      } else {
+        console.log(`  ✓ live at ${res.url}`);
+      }
       if (source === "generated") {
         console.log(`  tip: add  name: ${name}  under app: in drop.yaml to keep this URL across deploys.`);
       }

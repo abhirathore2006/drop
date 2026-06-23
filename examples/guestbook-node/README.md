@@ -15,12 +15,12 @@ drop db create guestbook-db
 
 # 2. build + deploy in one step — Drop builds the Dockerfile and pushes the image through
 #    Drop for you (no registry creds, no manual ctr import; same command locally and in prod)
-drop deploy examples/guestbook-node --build
+drop deploy examples/guestbook-node --build --no-start
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
 drop db password guestbook-db                                # prints the password ONCE
 printf '<that password>' | drop secrets set guestbook PGPASSWORD --stdin
-drop restart guestbook                                       # restart to inject the new secret
+drop start guestbook                                       # first boot, already has the password
 
 # 4. open it — https after `make trust-cert`, or plain http via the edge port :8474
 open https://guestbook.drop.localhost/        # or: http://guestbook.drop.localhost:8474/
@@ -47,7 +47,7 @@ drop deploy examples/guestbook-node      # uses image: guestbook-node:1 from dro
 The non-secret connection config (`PGHOST: guestbook-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db password guestbook-db` → `drop secrets set guestbook PGPASSWORD --stdin` → `drop restart guestbook`.
+`drop db password guestbook-db` → `drop secrets set guestbook PGPASSWORD --stdin` → `drop start guestbook`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 Full walkthrough (the binding model, the Next.js example, troubleshooting):

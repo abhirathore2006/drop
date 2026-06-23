@@ -10,11 +10,11 @@ file bytes in S3**; gated by Google login. (Bun is used only to run the test sui
 $ drop publish ./dist myapp           # static site
   ✓ live at https://myapp.drop.example.com
 
-$ drop deploy ./api myapi             # container app (drop.yaml app:)
-  ✓ live at https://myapi.drop.example.com
 $ drop db create myapi-db             # managed Postgres (CloudNativePG)
+$ drop deploy ./api myapi --no-start  # container app — deploy, but don't boot it yet
 $ printf "$PW" | drop secrets set myapi DATABASE_PASSWORD --stdin   # write-only secret
-$ drop restart myapi                  # apply it
+$ drop start myapi                    # first boot — already has the secret
+  ✓ live at https://myapi.drop.example.com
 ```
 
 > **Two planes, one product.** *Static sites* serve bytes from S3 at the edge. *Compute*
@@ -189,6 +189,16 @@ CWD, like docker's `-f`; it implies `--build`). On the server,
 `DROP_IMAGE_BACKEND` selects `containerd` (default, local) or `registry` (prod). (Image push is
 **CLI-only today** — there is no MCP tool for it yet; in-cluster builds without a local Docker are
 a future item.)
+
+**Deploying an app that needs secrets at first boot** (e.g. a DB password): an app with `scale.min:
+1` starts a pod the moment it's deployed, so deploying *before* its secret exists makes that first
+pod crash-loop. Use **`--no-start`** to deploy without booting, set the secret, then `drop start`:
+
+```bash
+drop deploy ./api --build --no-start             # build + push + register, but don't start
+printf "$PW" | drop secrets set api PGPASSWORD --stdin
+drop start api                                   # first boot — already has the secret
+```
 
 The `app:` section in `drop.yaml` declares the rest. With `--build` Drop supplies the image; or
 **bring your own** prebuilt image by setting `app.image` (no `--build`):

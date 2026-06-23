@@ -108,20 +108,23 @@ app:
 > `PGHOST` is `guestbook-db-rw`, not the full FQDN, because the app pod runs in the **same tenant
 > namespace** as the database. The full FQDN from `db create` also works.
 
-### Step 3 — build + deploy (one command)
+### Step 3 — build + deploy (without starting yet)
 
 Let Drop build the image and push it for you — **the same `drop` command locally and in prod**, and
-you never touch a registry or containerd by hand:
+you never touch a registry or containerd by hand. We pass **`--no-start`** so the app is registered
+and its image pushed, but **no pod rolls out yet** — its first boot would otherwise crash-loop
+because the `PGPASSWORD` secret isn't set until Step 4:
 
 ```bash
-drop deploy examples/guestbook-node --build
+drop deploy examples/guestbook-node --build --no-start
 ```
 
 ```
   ▸ building drop.local/guestbook:b… (docker build examples/guestbook-node)…
   ▸ pushing image through Drop…
-  ▸ deploying guestbook  (drop.local/guestbook:b…)…
-  ✓ live at https://guestbook.drop.localhost
+  ▸ deploying guestbook  (drop.local/guestbook:b…) — not starting yet…
+  ✓ deployed guestbook (stopped). Set its secrets/config, then start it:
+      drop start guestbook
 ```
 
 `--build` runs the Dockerfile build locally (`docker` by default; set `DROP_BUILDER=podman` to use
@@ -132,6 +135,12 @@ fresh tag each `--build` rolls the pods). `drop push examples/guestbook-node` do
 build+push and prints the ref, if you want to deploy separately. To build a **specific Dockerfile**
 (e.g. per-env files), add `-f, --dockerfile <path>` — e.g. `drop deploy ./api -f Dockerfile.prod`
 (the path is relative to your CWD, like docker's `-f`; passing it implies `--build`).
+
+> **Why `--no-start`?** A container app with `scale.min: 1` starts a pod the instant it's deployed.
+> Deploy it *before* its DB password exists and that first pod crash-loops until you later restart
+> it. `--no-start` registers + builds the app but keeps it stopped; you set its secrets (Step 4)
+> and `drop start` it for a healthy first boot. (For an app with no required secrets, omit
+> `--no-start` and it goes live immediately.)
 
 > Drop's image backend is chosen by `DROP_IMAGE_BACKEND` (`containerd` locally, `registry` in prod),
 > exactly like the secret backend — see the [WebSocket/registry roadmap](../planning/2026-06-23-websocket-support-plan.md)
@@ -151,13 +160,17 @@ drop deploy examples/guestbook-node      # uses image: guestbook-node:1 from dro
 ```
 </details>
 
-### Step 4 — set the DB password as a write-only secret, then restart
+### Step 4 — set the DB password (a write-only secret), then start
 
 ```bash
 drop db password guestbook-db                                # prints the password ONCE
 printf '<that password>' | drop secrets set guestbook PGPASSWORD --stdin
-drop restart guestbook                                       # restart to inject the new secret
+drop start guestbook                                         # first boot — already has the password
 ```
+
+The app was deployed with `--no-start`, so `drop start` gives it its **first** (healthy) boot with
+the secret already present — no broken pod, no wasted restart. (Later, to rotate the password on a
+*running* app, set the new secret and `drop restart guestbook`.)
 
 `drop secrets set` stores the value in the secret manager and never prints it back. `drop secrets ls
 guestbook` shows the key + when it changed (never the value). The app picks up a new/changed secret

@@ -19,12 +19,12 @@ drop db create blog-db
 
 # 2. build + deploy in one step — Drop builds the Dockerfile and pushes the image through
 #    Drop for you (no registry creds, no manual ctr import; same command locally and in prod)
-drop deploy examples/blog-express --build
+drop deploy examples/blog-express --build --no-start
 
 # 3. set the DB password as a write-only SECRET (never committed), then apply it
 drop db password blog-db                                 # prints the password ONCE
 printf '<that password>' | drop secrets set blog PGPASSWORD --stdin
-drop restart blog                                        # restart to inject the new secret
+drop start blog                                        # first boot, already has the password
 
 # 4. open it — https after `make trust-cert`, or plain http via the edge port :8474
 open https://blog.drop.localhost/             # or: http://blog.drop.localhost:8474/
@@ -51,7 +51,7 @@ drop deploy examples/blog-express      # uses image: blog-express:1 from drop.ya
 The non-secret connection config (`PGHOST: blog-db-rw`, `PGUSER`/`PGDATABASE: app`, `PGSSLMODE`)
 lives in [`drop.yaml`](./drop.yaml); **`PGPASSWORD` is a secret** — set write-only via `drop secrets`
 (stored in the secret manager, injected as an env var, never readable again). To rotate later:
-`drop db password blog-db` → `drop secrets set blog PGPASSWORD --stdin` → `drop restart blog`.
+`drop db password blog-db` → `drop secrets set blog PGPASSWORD --stdin` → `drop start blog`.
 Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP tools too.
 
 Full walkthrough (the binding model, the Next.js example, troubleshooting):
