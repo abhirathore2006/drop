@@ -9,6 +9,7 @@ import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate } from "./resolve-name.ts";
 import { buildAndPushImage } from "./build-push.ts";
 import { validateName } from "../names.ts";
+import { VERSION } from "../version.ts";
 
 async function client(): Promise<Client> {
   try {
@@ -27,6 +28,19 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** Ask the instance which CLI version it serves (so `update` can show current → target). Best-effort. */
+async function fetchServerVersion(installUrl: string): Promise<string | null> {
+  try {
+    const origin = installUrl.replace(/\/install\.sh$/, "");
+    const res = await fetch(`${origin}/version`);
+    if (!res.ok) return null;
+    const j = (await res.json()) as { version?: unknown };
+    return typeof j.version === "string" ? j.version : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Re-run the installer: fetch install.sh (curl or wget) and pipe it to sh. The URL is passed as a
  *  positional ($1) — never interpolated into the command string — and is validated http(s) upstream. */
 function runInstaller(url: string): Promise<void> {
@@ -40,6 +54,7 @@ function runInstaller(url: string): Promise<void> {
 export function buildProgram(): Command {
   const program = new Command();
   program.name("drop").description("Publish static sites to *.drop.example.com");
+  program.version(VERSION, "-v, --version", "print the drop CLI version");
   program.option("--api <url>", "control plane base URL");
 
   // Set the control-plane URL once, so you don't pass --api on every command.
@@ -65,9 +80,17 @@ export function buildProgram(): Command {
   program
     .command("update")
     .description("Update the drop CLI to the latest version (re-runs the installer from where it was installed)")
-    .action(async () => {
+    .option("--force", "re-install even if already on the latest version")
+    .action(async (opts: { force?: boolean }) => {
       const url = resolveUpdateUrl(await loadConfig(), { api: program.opts().api });
-      console.log(`  ▸ updating drop from ${url} …`);
+      const target = await fetchServerVersion(url);
+      console.log(`  current version:  ${VERSION}`);
+      console.log(`  update to:        ${target ?? "(latest — the server didn't report a version)"}`);
+      if (target && target === VERSION && !opts.force) {
+        console.log(`  ✓ already up to date — nothing to do (use --force to re-install)`);
+        return;
+      }
+      console.log(`  ▸ updating from ${url} …`);
       await runInstaller(url);
       console.log(`  ✓ drop updated — re-run your command to pick up the new version`);
     });

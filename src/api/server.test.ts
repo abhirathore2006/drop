@@ -832,6 +832,14 @@ test("transfer --org: re-homes a site into a team org; app tears down workload; 
   await db.destroy();
 });
 
+test("/version is public and reports the served CLI version", async () => {
+  const { app, db } = await mk();
+  const res = await app.request("/version"); // no auth header — public, so `drop update` can read it
+  expect(res.status).toBe(200);
+  expect((await res.json()).version).toBe("dev"); // unbundled (test) build → "dev"
+  await db.destroy();
+});
+
 test("read-model: list + detail + admin all carry the workload `type`", async () => {
   const { app, db } = await mk({ admins: ["alice@example.com"] });
   await pub(app, "alice", "mysite", await tgz({ "index.html": "x" }));

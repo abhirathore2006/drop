@@ -68,7 +68,8 @@ drop publish ./dist myapp</code></pre>
 <tbody>
 <tr><td><code>config set-api &lt;url&gt;</code></td><td>Save the control-plane URL once (the served installer does this for you)</td><td><code>drop config set-api https://api.drop.example.com</code></td></tr>
 <tr><td><code>config show</code></td><td>Print the saved config and the resolved API base</td><td><code>drop config show</code></td></tr>
-<tr><td><code>update</code></td><td>Update the CLI to the latest version — re-runs the installer recorded at install time (<code>installUrl</code> in config); override the source with <code>--api &lt;url&gt;</code></td><td><code>drop update</code></td></tr>
+<tr><td><code>--version</code> / <code>-v</code></td><td>Print the installed CLI version (e.g. <code>0.1.0+&lt;sha&gt;</code>)</td><td><code>drop --version</code></td></tr>
+<tr><td><code>update</code></td><td>Update the CLI — prints <strong>current → target</strong> version (fetched from the instance's <code>/version</code>), then re-runs the installer recorded at install time (<code>installUrl</code>). No-op if already current (<code>--force</code> to re-install); override the source with <code>--api &lt;url&gt;</code></td><td><code>drop update</code></td></tr>
 <tr><td><code>login</code></td><td>Sign in with Google via the Drop server; saves the session</td><td><code>drop login</code></td></tr>
 <tr><td><code>dev-login &lt;sub&gt; &lt;email&gt;</code></td><td>Local-only login (requires <code>DROP_DEV_AUTH=1</code> on the API)</td><td><code>drop dev-login alice alice@example.com</code></td></tr>
 <tr><td><code>logout</code></td><td>Clear the saved session</td><td><code>drop logout</code></td></tr>

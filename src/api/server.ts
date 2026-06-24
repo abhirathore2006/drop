@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { hashPassword, parseDropYaml, CONFIG_FILE_YAML, type SiteConfig } from "../site-config.ts";
 import { installScript } from "./install.ts";
+import { VERSION } from "../version.ts";
 import type { Config } from "../config.ts";
 import type { BlobStore } from "../blob/types.ts";
 import type { Db } from "../db/db.ts";
@@ -111,6 +112,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   };
   app.get("/cli/drop.mjs", () => serveCli("drop.js"));
   app.get("/cli/mcp.mjs", () => serveCli("mcp.js"));
+  // Public: the version of the CLI this instance serves (built from the same commit as the API),
+  // so `drop update` can show "current → target" before re-installing.
+  app.get("/version", (c) => c.json({ version: VERSION }));
   // The admin console bundle (React; built to <cliDir>/ui/app.js by build.mjs).
   app.get("/ui/app.js", () => serveCli("ui/app.js"));
 

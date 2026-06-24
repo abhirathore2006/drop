@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { buildProgram } from "./commands.ts";
+import { VERSION } from "../version.ts";
 
 test("db is a command group with create + password subcommands (colon commands removed)", () => {
   const p = buildProgram();
@@ -35,4 +36,8 @@ test("--org is on the create/filter/re-home commands, NOT on per-resource ops", 
 test("`update` is a top-level command (self-updates the CLI)", () => {
   const p = buildProgram();
   expect(p.commands.map((c) => c.name())).toContain("update");
+});
+
+test("the program exposes a version (drop --version / -v)", () => {
+  expect(buildProgram().version()).toBe(VERSION);
 });

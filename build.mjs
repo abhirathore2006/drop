@@ -2,13 +2,28 @@
 //   node build.mjs            → builds everything (cli + mcp + api + edge)
 //   node build.mjs cli mcp    → builds only the named targets (prepare uses this for npx)
 import { build } from "esbuild";
+import { readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 
 const only = process.argv.slice(2);
+
+// Version baked into every node bundle: <pkg.version>+<git-short-sha>. The sha makes it change per
+// commit so `drop --version` / `drop update` are meaningful; falls back to bare pkg.version off-git.
+const pkgVersion = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+let gitSha = "";
+try {
+  gitSha = execSync("git rev-parse --short HEAD", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+} catch {
+  /* not a git checkout — ship the bare version */
+}
+const VERSION = gitSha ? `${pkgVersion}+${gitSha}` : pkgVersion;
+
 const banner = {
   // Bundled CJS deps (commander, parts of aws-sdk) use require(); provide one in ESM.
   js: "import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);",
 };
-const common = { bundle: true, platform: "node", format: "esm", target: "node24", banner };
+const common = { bundle: true, platform: "node", format: "esm", target: "node24", banner, define: { __DROP_VERSION__: JSON.stringify(VERSION) } };
+console.log(`building drop ${VERSION}`);
 
 const targets = [
   { tag: "cli", entry: "bin/drop.ts", out: "dist/drop.js" },
