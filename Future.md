@@ -144,3 +144,31 @@ the opposite of a Heroku/Fly PaaS.
 per-tenant registry provisioning), `cli/commands.ts` + `cli/client.ts` + `mcp/server.ts` (a
 `build`/`push` surface), `infra/terraform` (tenant ECR + pull IAM/IRSA) and `infra/local`
 (`registry:2` + k3s registry config). Steps 1→3 ship independently; each removes manual work.
+
+## 9. `db migrate` — move a managed database across orgs/owners (data-safe)
+
+**Problem.** `drop transfer` re-homes a **site** (metadata) and an **app** (tear down + redeploy —
+stateless), but **blocks databases**. A DB's CNPG `Cluster` + PVCs are namespace-scoped, and a
+resource's namespace is org/owner-derived, so a metadata-only org/owner flip would orphan the data in
+the old namespace (or point the new namespace at an empty DB). The handler refuses with *"databases
+cannot be transferred (stateful); back up and recreate"*. Today the only way to move a DB to another
+org is manual: `drop db create <new> --org <slug>` → `pg_dump`/restore (or restore the Barman backup)
+→ repoint the app's `PGHOST` + `PGPASSWORD` → delete the old.
+
+**Proposal.** `drop db migrate <db> --org <slug>` (and/or `--to <email>`) orchestrates that as ONE
+data-safe flow instead of a pointer flip:
+
+1. Provision a fresh CNPG `Cluster` in the target org's namespace.
+2. Restore from the DB's latest **Barman backup** (CNPG `bootstrap.recovery` from the ObjectStore;
+   point-in-time capable) — never a live volume move.
+3. Verify (row counts / a checksum) before any cutover.
+4. Optionally **cut over**: rotate the app's `PGHOST` + `PGPASSWORD` secret to the new DB and
+   redeploy (pairs naturally with first-class DB binding, item 1).
+5. Drop the **old** `Cluster` only after the operator confirms — explicit + reversible; the source is
+   never deleted implicitly.
+
+**Why / touch points.** Completes the org model: an app *and* its database can both live in a team
+org, and both can move. Touches `api/server.ts` (a migrate route driving create→restore→verify→
+cutover→cleanup), `kube/cnpg.ts` (bootstrap-from-backup into a new namespace), `cli/commands.ts`
+(`db migrate`), and builds directly on the existing Barman backups (item 3's backup/restore surface
+is the foundation). Heavier than a flag — sequence after item 1 so the app re-point is declarative.
