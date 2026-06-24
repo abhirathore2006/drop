@@ -34,8 +34,9 @@ printf '#!/bin/sh\\nexec node "%s/drop.mjs" "$@"\\n' "$LIB" > "$BIN/drop"
 printf '#!/bin/sh\\nexec node "%s/mcp.mjs" "$@"\\n'  "$LIB" > "$BIN/drop-mcp"
 chmod +x "$BIN/drop" "$BIN/drop-mcp"
 
-# auto-configure the control-plane URL (so 'drop login' / 'drop publish' just work)
-printf '{ "apiBase": "%s" }\\n' "$API" > "$CFG/config.json"
+# auto-configure the control-plane URL + record the install source so 'drop update' can re-fetch
+# the CLI from here later (re-running this same installer).
+printf '{ "apiBase": "%s", "installUrl": "%s/install.sh" }\\n' "$API" "$API" > "$CFG/config.json"
 chmod 600 "$CFG/config.json"
 
 # make sure the bin dir is on PATH for future shells
@@ -53,5 +54,6 @@ esac
 
 echo "drop: installed -> $BIN/drop   (API: $API)"
 echo "drop: next -> drop login    (then: drop publish ./dist myapp)"
+echo "drop: update later -> drop update    (re-fetches the CLI from $API)"
 `;
 }

@@ -492,6 +492,15 @@ drop publish ./dist myapp
 
 Installs Bun if missing, installs deps, and puts a `drop` command on your PATH.
 
+### Updating the CLI
+
+- **Server-served install** (`curl <API>/install.sh | sh` — the installer the deployed API serves):
+  just run **`drop update`**. The installer records where it installed from (`installUrl` in
+  `~/.config/drop/config.json`), and `drop update` re-runs it to pull the latest CLI this instance
+  serves. Override the source with `drop --api <url> update`.
+- **`npx` (Option 1)**: nothing to update — each run fetches the pinned ref.
+- **Dev clone (Option 2)**: the wrapper runs the repo's live source, so `git pull` updates it.
+
 ### Why not a single compiled binary?
 
 `bun run build:binary` *can* produce one (`dist/drop`), but standalone binaries are

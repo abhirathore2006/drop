@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 export interface CliConfig {
   apiBase?: string;
+  installUrl?: string; // where `drop update` re-fetches the CLI from (the install.sh URL); recorded by install.sh
 }
 
 const DEFAULT_API = "https://api.drop.example.com";
@@ -32,4 +33,17 @@ export async function resolveApiBase(opts: { api?: string }, path = defaultConfi
   if (process.env.DROP_API) return process.env.DROP_API.replace(/\/$/, "");
   const cfg = await loadConfig(path);
   return (cfg.apiBase ?? DEFAULT_API).replace(/\/$/, "");
+}
+
+/** Resolve the install.sh URL `drop update` re-runs: --api/<origin>/install.sh > recorded installUrl
+ *  > apiBase/install.sh. Throws if none is known (CLI wasn't installed via install.sh and no --api).
+ *  Only http(s) URLs are allowed — the result is fed to a shell installer. */
+export function resolveUpdateUrl(cfg: CliConfig, opts: { api?: string } = {}): string {
+  let url: string | undefined;
+  if (opts.api) url = `${opts.api.replace(/\/+$/, "")}/install.sh`;
+  else if (cfg.installUrl) url = cfg.installUrl;
+  else if (cfg.apiBase) url = `${cfg.apiBase.replace(/\/+$/, "")}/install.sh`;
+  if (!url) throw new Error("no install source recorded — install/update with:  curl -fsSL <API>/install.sh | sh  (or pass --api <url>)");
+  if (!/^https?:\/\//.test(url)) throw new Error(`refusing to update from a non-http(s) URL: ${url}`);
+  return url;
 }

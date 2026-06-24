@@ -1,7 +1,8 @@
 import { Command } from "commander";
 import { rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { defaultSessionPath, loadSession, saveSession } from "./session.ts";
-import { loadConfig, saveConfig, resolveApiBase } from "./config.ts";
+import { loadConfig, saveConfig, resolveApiBase, resolveUpdateUrl } from "./config.ts";
 import { Client } from "./client.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
@@ -26,6 +27,16 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** Re-run the installer: fetch install.sh (curl or wget) and pipe it to sh. The URL is passed as a
+ *  positional ($1) — never interpolated into the command string — and is validated http(s) upstream. */
+function runInstaller(url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const p = spawn("sh", ["-c", 'if command -v curl >/dev/null 2>&1; then curl -fsSL "$1"; else wget -qO- "$1"; fi | sh', "sh", url], { stdio: "inherit" });
+    p.on("error", (e) => reject(new Error(`update failed to start (need sh + curl or wget): ${e.message}`)));
+    p.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`update failed (installer exited ${code})`))));
+  });
+}
+
 export function buildProgram(): Command {
   const program = new Command();
   program.name("drop").description("Publish static sites to *.drop.example.com");
@@ -47,6 +58,18 @@ export function buildProgram(): Command {
     .description("Show the saved config and the resolved API URL")
     .action(async () => {
       show({ configured: await loadConfig(), resolvedApi: await resolveApiBase(program.opts()) });
+    });
+
+  // Update the CLI itself — re-runs the installer recorded in config at install time (installUrl),
+  // which re-fetches the latest CLI bundle this instance serves. Override the source with --api.
+  program
+    .command("update")
+    .description("Update the drop CLI to the latest version (re-runs the installer from where it was installed)")
+    .action(async () => {
+      const url = resolveUpdateUrl(await loadConfig(), { api: program.opts().api });
+      console.log(`  ▸ updating drop from ${url} …`);
+      await runInstaller(url);
+      console.log(`  ✓ drop updated — re-run your command to pick up the new version`);
     });
 
   program

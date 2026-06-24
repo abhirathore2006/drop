@@ -31,3 +31,8 @@ test("--org is on the create/filter/re-home commands, NOT on per-resource ops", 
   // transfer takes an OPTIONAL email (email OR --org)
   expect(cmd("transfer").registeredArguments.some((a: any) => a.name() === "email" && !a.required)).toBe(true);
 });
+
+test("`update` is a top-level command (self-updates the CLI)", () => {
+  const p = buildProgram();
+  expect(p.commands.map((c) => c.name())).toContain("update");
+});

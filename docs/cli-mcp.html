@@ -49,7 +49,7 @@
 <p>The CLI is <code>bin/drop.ts</code>, bundled to <code>dist/drop.js</code>. It targets <code>*.drop.example.com</code> and stores its session in <code>~/.config/drop/session.json</code> — the same file the MCP server uses.</p>
 
 <h3>Install options</h3>
-<p><strong>Option 1 — one-line install from your Drop server (recommended).</strong> The deployed API serves its own installer at <code>/install.sh</code>, already templated with that instance's URL. It downloads the CLI bundles the same API serves, drops a <code>drop</code> command on your PATH (no sudo, no git, no npm), and <strong>auto-configures the API URL</strong> — so <code>drop login</code> and <code>drop publish</code> work immediately. Idempotent; re-run any time to update. Needs only Node 18+.</p>
+<p><strong>Option 1 — one-line install from your Drop server (recommended).</strong> The deployed API serves its own installer at <code>/install.sh</code>, already templated with that instance's URL. It downloads the CLI bundles the same API serves, drops a <code>drop</code> command on your PATH (no sudo, no git, no npm), and <strong>auto-configures the API URL</strong> — so <code>drop login</code> and <code>drop publish</code> work immediately. It also records where it installed from, so later you just run <code>drop update</code> (which re-runs this installer). Idempotent; re-run any time to update. Needs only Node 18+.</p>
 <pre><code>curl -fsSL https://api.drop.example.com/install.sh | sh
 drop login
 drop publish ./dist myapp</code></pre>
@@ -68,6 +68,7 @@ drop publish ./dist myapp</code></pre>
 <tbody>
 <tr><td><code>config set-api &lt;url&gt;</code></td><td>Save the control-plane URL once (the served installer does this for you)</td><td><code>drop config set-api https://api.drop.example.com</code></td></tr>
 <tr><td><code>config show</code></td><td>Print the saved config and the resolved API base</td><td><code>drop config show</code></td></tr>
+<tr><td><code>update</code></td><td>Update the CLI to the latest version — re-runs the installer recorded at install time (<code>installUrl</code> in config); override the source with <code>--api &lt;url&gt;</code></td><td><code>drop update</code></td></tr>
 <tr><td><code>login</code></td><td>Sign in with Google via the Drop server; saves the session</td><td><code>drop login</code></td></tr>
 <tr><td><code>dev-login &lt;sub&gt; &lt;email&gt;</code></td><td>Local-only login (requires <code>DROP_DEV_AUTH=1</code> on the API)</td><td><code>drop dev-login alice alice@example.com</code></td></tr>
 <tr><td><code>logout</code></td><td>Clear the saved session</td><td><code>drop logout</code></td></tr>
