@@ -83,3 +83,27 @@ variable "service_account_name" {
   type        = string
   default     = "drop"
 }
+
+# ---------------------------------------------------------------------------
+# Compute plane. Leave compute_enabled = false for a STATIC-SITES-ONLY deploy
+# (identical feature set to the ecs/ config). Set true for the full Drop PaaS:
+# it installs the cluster operators (compute.tf) and turns on the Drop chart's
+# compute.enabled. See compute.tf for what gets installed.
+# ---------------------------------------------------------------------------
+variable "compute_enabled" {
+  description = "Install the compute plane (KEDA/CNPG/ESO/gvisor) and run Drop as a full PaaS. false = static-sites-only."
+  type        = bool
+  default     = false
+}
+
+variable "image_registry" {
+  description = "Registry for tenant app images, e.g. <acct>.dkr.ecr.<region>.amazonaws.com/drop-apps. Required when compute_enabled."
+  type        = string
+  default     = ""
+}
+
+variable "blocked_egress_cidrs" {
+  description = "Cluster pod+service CIDRs excluded from the tenant HTTPS egress allowlist (NetworkPolicy). REQUIRED when compute_enabled, e.g. \"10.0.0.0/8,172.20.0.0/16\"."
+  type        = string
+  default     = ""
+}

@@ -15,6 +15,33 @@ collide — see [One AWS account, many states](#one-aws-account-many-states).
 
 ---
 
+## Which config: static sites vs the full PaaS
+
+Drop runs in two modes, and the runtime choice maps directly onto them:
+
+| You want…                                                  | Use            | Mode |
+| ---------------------------------------------------------- | -------------- | ---- |
+| **Just the static-site host** — publish/serve sites, orgs, custom domains | `ecs/` **or** `eks/` (default) | **static-only** |
+| **The full PaaS** — static sites **plus** container apps, managed Postgres, write-only app secrets | `eks/` with `compute_enabled = true` | **compute** |
+
+- **`ecs/` (Fargate) is always static-only.** It runs the `api` + `edge` tasks
+  behind an ALB. There is no Kubernetes, so `/v1/apps`, `/v1/databases` and the
+  app-secret routes return `501`. This is the simplest, cheapest "just a web app"
+  deploy — pick it if you only need to publish sites.
+
+- **`eks/` defaults to static-only too** (`compute_enabled = false`): same feature
+  set as ECS, just on Kubernetes. Set **`compute_enabled = true`** to switch it
+  into the full PaaS — that installs the cluster operators (`eks/compute.tf`:
+  KEDA + KEDA HTTP add-on, CloudNativePG + Barman Cloud, External Secrets, a
+  `gvisor` RuntimeClass) and grants the Drop API the in-cluster RBAC to drive
+  them. See the [compute prerequisites](#compute-plane-prerequisites-eks-only)
+  below.
+
+So: **need container apps or managed databases → `eks/` with `compute_enabled =
+true`.** Otherwise either runtime works and ECS is the lighter pick.
+
+---
+
 ## Prerequisites
 
 Before running any `terraform`/`tofu` command you need the following to already
@@ -168,6 +195,46 @@ terraform apply -var-file=prod.tfvars
 ```
 
 Swap `eks` for `ecs` to deploy on Fargate instead.
+
+To bring `eks` up as the **full PaaS** instead of static-only, set
+`compute_enabled = true` in your tfvars (plus `image_registry` and
+`blocked_egress_cidrs`) — see the next section.
+
+---
+
+## Compute-plane prerequisites (EKS only)
+
+Setting `compute_enabled = true` is what turns the EKS deploy from a static-site
+host into the full Drop PaaS. When it's on, the `eks/` config additionally:
+
+1. **Installs the cluster operators** (`eks/compute.tf`), mirroring the verified
+   local stack (`infra/local/compute-up.sh`):
+   - **KEDA** + the **KEDA HTTP add-on** — scale-to-zero + HTTP routing for apps;
+   - **CloudNativePG** + the **Barman Cloud Plugin** — managed Postgres + backups;
+   - **External Secrets Operator** — only used by the `aws` secret backend;
+   - a **`gvisor` RuntimeClass** — sandbox for untrusted tenant images. NOTE: the
+     `runsc` handler must also be installed on the nodes (a gVisor-enabled node
+     group / DaemonSet); the config only registers the class.
+2. **Turns on the Drop chart's `compute.enabled`**, which grants the API
+   ServiceAccount the in-cluster RBAC (`infra/helm/drop/templates/rbac.yaml`) and
+   sets `DROP_KUBECONFIG=in-cluster` so the API drives the cluster via its pod SA.
+
+Two extra variables are **required** when `compute_enabled = true`:
+
+| Variable               | What it is |
+| ---------------------- | ---------- |
+| `image_registry`       | Registry for **tenant app images**, e.g. `<acct>.dkr.ecr.<region>.amazonaws.com/drop-apps`. Keep this **separate** from the `drop` platform-image repo. |
+| `blocked_egress_cidrs` | Your cluster's pod + service CIDRs (e.g. `10.0.0.0/8,172.20.0.0/16`), excluded from the tenant HTTPS egress allowlist so tenant pods can't reach in-cluster services. |
+
+The `barman_plugin` step shells out to `kubectl apply` (the plugin's documented
+install path), so the apply environment needs **`kubectl` on PATH with credentials
+for the new cluster**. Everything else is pure Terraform.
+
+> **Not live-applied here.** The compute layer is mirrored from the verified local
+> stack but has not been `terraform apply`-tested against a real EKS cluster in this
+> repo. The in-cluster auth code and the Helm chart rendering *are* verified
+> (`bun test`, `helm template`). Treat the operator versions as a starting point and
+> reconcile against your cluster's Kubernetes version before applying.
 
 ---
 

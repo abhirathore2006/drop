@@ -1,0 +1,68 @@
+{{- if .Values.compute.enabled }}
+# Compute-plane RBAC: lets the API ServiceAccount (in-cluster) manage tenant namespaces + workloads.
+# Mirrors exactly what src/kube/client.ts creates (apps via KEDA, databases via CNPG, isolation via
+# NetworkPolicies, secrets via the kube/ESO backends). Only rendered when compute.enabled.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "drop.fullname" . }}-compute
+  labels:
+    {{- include "drop.labels" . | nindent 4 }}
+rules:
+  # Per-tenant namespaces + their guardrails (applyTenant: namespace, ResourceQuota, LimitRange).
+  - apiGroups: [""]
+    resources: ["namespaces", "resourcequotas", "limitranges"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # App + database building blocks (Service, the *-env / *-secret / DB creds Secrets, ConfigMaps).
+  - apiGroups: [""]
+    resources: ["services", "secrets", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read pod status + logs (workload status + `drop logs`).
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # App Deployments + the in-namespace DB password-rotation Job.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Tenant isolation (default-deny + per-app/db allow policies).
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # KEDA HTTP add-on — scale-to-zero for apps.
+  - apiGroups: ["http.keda.sh"]
+    resources: ["httpscaledobjects"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["get", "list", "watch"]
+  # CloudNativePG + Barman Cloud Plugin — managed databases + scheduled backups.
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters", "scheduledbackups"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["barmancloud.cnpg.io"]
+    resources: ["objectstores"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # External Secrets Operator — only used by the "aws" secret backend.
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "drop.fullname" . }}-compute
+  labels:
+    {{- include "drop.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "drop.fullname" . }}-compute
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "drop.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -48,6 +48,8 @@ Terraform <strong>&ge; 1.10</strong> or OpenTofu <strong>&ge; 1.10</strong>.</p>
 this one declares the same infrastructure as code. Pick one. Substitute <code>tofu</code> for <code>terraform</code>
 throughout if you use OpenTofu.</p></div>
 
+<div class="note tip"><span class="lbl">Static-only vs the full PaaS</span><p>Both roots deploy a <strong>static-site host</strong> by default. The <strong>full PaaS</strong> (container apps, managed Postgres, write-only app secrets) is <strong>EKS-only</strong>: set <code>compute_enabled = true</code> in the <code>eks</code> root and it additionally installs the cluster operators (KEDA, CloudNativePG, External Secrets, a <code>gvisor</code> RuntimeClass — in <code>eks/compute.tf</code>) and flips the chart's <code>compute.enabled</code>. The <code>ecs</code> root is <strong>always static-only</strong> (no Kubernetes). See <a href="#eks-compute">the compute plane</a> below.</p></div>
+
 <h2>Layout</h2>
 <p>The configuration is split into independent <strong>configs</strong>, each with its own state file:</p>
 <table class="tbl">
@@ -173,13 +175,27 @@ edge connects read-only and never migrates.</p></div>
 <tr><td><code>node_instance_types</code></td><td><code>["t3.large"]</code></td><td>Managed node group instance types.</td></tr>
 <tr><td><code>node_desired_size</code> / <code>min</code> / <code>max</code></td><td><code>2</code> / <code>2</code> / <code>4</code></td><td>Worker node group sizing.</td></tr>
 <tr><td><code>namespace</code> / <code>service_account_name</code></td><td><code>drop</code> / <code>drop</code></td><td>Where Drop runs; the SA is the IRSA target.</td></tr>
+<tr><td><strong><code>compute_enabled</code></strong></td><td><code>false</code></td><td><code>false</code> = static-only (same as ECS). <code>true</code> = full PaaS: installs the operators + flips the chart's <code>compute.enabled</code>.</td></tr>
+<tr><td><code>image_registry</code></td><td><code>""</code></td><td>Registry for <strong>tenant app images</strong> (e.g. <code>…/drop-apps</code>). Required when <code>compute_enabled</code>.</td></tr>
+<tr><td><code>blocked_egress_cidrs</code></td><td><code>""</code></td><td>Cluster pod + service CIDRs excluded from tenant HTTPS egress. Required when <code>compute_enabled</code>.</td></tr>
 </tbody>
 </table>
 <p>Outputs include <code>cluster_name</code>, <code>api_url</code>, <code>drop_irsa_role_arn</code>,
 <code>ingress_alb_hostname</code>, and a ready-to-run <code>kubeconfig_command</code>.</p>
 
-<h2>Variant B — ECS (Fargate)</h2>
-<p>Provider: <code>aws</code> only — no Kubernetes. It builds the runtime directly: ALB + app security groups (and an
+<h3 id="eks-compute">The compute plane (<code>compute_enabled = true</code>)</h3>
+<p>By default the <code>eks</code> root is static-only — identical feature set to <code>ecs</code>, just on Kubernetes. Setting <code>compute_enabled = true</code> turns it into the full Drop PaaS. The root then (in <code>eks/compute.tf</code>, mirroring the verified local <code>infra/local/compute-up.sh</code>):</p>
+<ul>
+<li>installs <strong>KEDA</strong> + the <strong>KEDA HTTP add-on</strong> (apps: scale-to-zero + HTTP routing);</li>
+<li>installs <strong>CloudNativePG</strong> + the <strong>Barman Cloud Plugin</strong> (managed Postgres + backups) — the plugin via <code>kubectl apply</code>, so <code>kubectl</code> + cluster creds must be on PATH at apply time;</li>
+<li>installs the <strong>External Secrets Operator</strong> (only used by <code>compute.secretBackend=aws</code>);</li>
+<li>registers a <code>gvisor</code> <strong>RuntimeClass</strong> (the <code>runsc</code> handler must also exist on the nodes);</li>
+<li>sets <code>compute.enabled=true</code>, <code>compute.imageRegistry</code>, and <code>compute.blockedEgressCidrs</code> on the Drop chart, which grants the API ServiceAccount its in-cluster RBAC.</li>
+</ul>
+<div class="note warn"><span class="lbl">Not live-applied</span><p>The compute layer is mirrored from the verified local stack but has <strong>not</strong> been <code>terraform apply</code>-tested against a real EKS cluster. The in-cluster auth code (<code>bun test</code>) and the Helm chart rendering (<code>helm template</code>) <em>are</em> verified. Reconcile the operator versions against your cluster's Kubernetes version before applying.</p></div>
+
+<h2>Variant B — ECS (Fargate, static-only)</h2>
+<p>Provider: <code>aws</code> only — no Kubernetes, so this root is <strong>static-only</strong>: it has no compute plane and <code>/v1/apps</code>, <code>/v1/databases</code> and the app-secret routes return <code>501</code>. Need those? Use the <code>eks</code> root with <code>compute_enabled = true</code>. It builds the runtime directly: ALB + app security groups (and an
 RDS ingress rule from the app SG), an <strong>internal ALB</strong> with <code>api</code> and <code>edge</code> target
 groups and an HTTPS listener (host rule routes <code>api.&lt;base_domain&gt;</code> → api, everything else → edge), an
 ECS cluster, execution + task IAM roles (the task role gets the foundation's S3 policy; the execution role reads the

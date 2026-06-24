@@ -37,6 +37,8 @@
 <h1>Deployment</h1>
 <p class="lead">Run Drop on EC2 or Kubernetes — the <strong>api</strong> and <strong>edge</strong> behind one ingress, with external managed Postgres (RDS / CloudSQL) and S3.</p>
 
+<div class="note tip"><span class="lbl">Two modes</span><p>Drop ships in two modes. <strong>Static-only</strong> (the default everywhere — and the <em>only</em> mode on EC2 / ECS) publishes and serves sites; <code>/v1/apps</code>, <code>/v1/databases</code> and the app-secret routes return <code>501</code>. <strong>Compute</strong> (Kubernetes only, opt-in via <code>compute.enabled=true</code>) adds container apps, managed Postgres, and write-only app secrets on top. Everything below is the static-only base; the <a href="#compute">Compute plane</a> section adds the PaaS.</p></div>
+
 <div class="note tip"><span class="lbl">AWS</span><p>Want copy-pasteable AWS CLI commands for every component (ECR, S3, RDS, ACM, Secrets, security groups, ALB, Route 53) with two variants — <strong>EKS</strong> and <strong>ECS Fargate (no Kubernetes)</strong>? See <a href="aws-deployment.html">AWS deployment</a>, or the <a href="terraform.html">Terraform</a> page for the same components as code.</p></div>
 
 <p>Drop is two processes from one image: a control-plane <strong>api</strong> and a read-only serving <strong>edge</strong>. Both sit behind a single ingress. All metadata lives in an external managed Postgres; the served file bytes live in S3 (the chart bundles neither — backups and HA are the platform's responsibility). The api runs schema migrations on boot under a Postgres <code>pg_advisory_lock</code>, so a multi-replica rollout is safe: one pod migrates while the rest wait, then serve. The edge connects read-only and never migrates.</p>
@@ -75,7 +77,29 @@
 <tr><td><code>*.&lt;baseDomain&gt;</code></td><td>ingress / ALB</td><td>Every published site (edge, wildcard)</td></tr>
 </tbody>
 </table>
-<div class="note"><span class="lbl">Note</span><p>Run <code>helm lint</code> / <code>helm template</code> to preview the rendered manifests, and see <code>values.yaml</code> for every knob. Keep the edge reachable only on the internal network.</p></div>
+<div class="note"><span class="lbl">Note</span><p>Run <code>helm lint</code> / <code>helm template</code> to preview the rendered manifests, and see <code>values.yaml</code> for every knob. Keep the edge reachable only on the internal network. The install above is <strong>static-only</strong> — see <a href="#compute">Compute plane</a> to enable the PaaS.</p></div>
+
+<h2 id="compute">Compute plane (full PaaS)</h2>
+<p>By default <code>compute.enabled=false</code> and Drop is a static-site host (same feature set as the EC2 / ECS deploys). Set <code>compute.enabled=true</code> to add <strong>container apps</strong> (<code>drop deploy</code>), <strong>managed Postgres</strong> (<code>drop db</code>), and <strong>write-only app secrets</strong>. This is <strong>Kubernetes-only</strong>: it sets <code>DROP_KUBECONFIG=in-cluster</code> so the API drives the cluster through its pod ServiceAccount, and renders a ClusterRole granting that SA the RBAC to manage tenant namespaces + workloads.</p>
+<div class="note warn"><span class="lbl">Cluster operators required</span><p>Compute mode needs operators installed in the cluster <em>first</em> — the <a href="terraform.html">EKS Terraform</a> does this when <code>compute_enabled=true</code>; locally <code>infra/local/compute-up.sh</code> does. They are: <strong>KEDA</strong> + the <strong>KEDA HTTP add-on</strong> (apps), <strong>CloudNativePG</strong> + the <strong>Barman Cloud Plugin</strong> (databases + backups), <strong>External Secrets Operator</strong> (only for <code>compute.secretBackend=aws</code>), and a <code>gvisor</code> <strong>RuntimeClass</strong> (untrusted-image sandbox).</p></div>
+<pre><code>helm upgrade --install drop infra/helm/drop \
+  --namespace drop --create-namespace \
+  ...                                   # all the static-only flags above, plus:
+  --set compute.enabled=true \
+  --set compute.secretBackend=kube \    # "kube" (no deps) or "aws" (via ESO)
+  --set compute.imageBackend=registry \ # push tenant images to ECR
+  --set compute.imageRegistry=&lt;acct&gt;.dkr.ecr.&lt;region&gt;.amazonaws.com/drop-apps \
+  --set compute.blockedEgressCidrs="10.0.0.0/8\,172.20.0.0/16"</code></pre>
+<table class="tbl">
+<thead><tr><th>Value</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>compute.enabled</code></td><td>Master switch. <code>false</code> = static-only; <code>true</code> = full PaaS (requires the operators above).</td></tr>
+<tr><td><code>compute.secretBackend</code></td><td><code>kube</code> (app secrets as Kubernetes Secrets, no extra deps) or <code>aws</code> (AWS Secrets Manager via External Secrets).</td></tr>
+<tr><td><code>compute.imageBackend</code></td><td><code>registry</code> (push built app images to ECR — the prod default) or <code>containerd</code>.</td></tr>
+<tr><td><code>compute.imageRegistry</code></td><td>Registry for <strong>tenant app images</strong>, e.g. <code>&lt;acct&gt;.dkr.ecr.&lt;region&gt;.amazonaws.com/drop-apps</code>. Keep separate from the platform-image repo. Required when <code>imageBackend=registry</code>.</td></tr>
+<tr><td><code>compute.blockedEgressCidrs</code></td><td>Cluster pod + service CIDRs excluded from the tenant HTTPS egress allowlist (so tenant pods can't reach in-cluster services). <strong>Required on EKS.</strong></td></tr>
+</tbody>
+</table>
 
 <h2>Environment variables</h2>
 <p>Non-secret values render into a ConfigMap (pod env); secrets are read from the referenced Secret. The key <code>DROP_*</code> variables:</p>

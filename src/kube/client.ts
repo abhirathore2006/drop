@@ -37,10 +37,29 @@ function loadKubeconfig(path: string): KubeConn {
   };
 }
 
+/** In-cluster connection from the pod's ServiceAccount (used when DROP_KUBECONFIG="in-cluster" — the
+ *  EKS/Helm deployment path). Reads the SA token + CA that Kubernetes projects into every pod and the
+ *  API server address from the injected env. Params injectable for tests. */
+export function inClusterConn(
+  env: Record<string, string | undefined> = process.env,
+  read: (p: string) => Buffer = readFileSync,
+  saDir = "/var/run/secrets/kubernetes.io/serviceaccount",
+): KubeConn {
+  const host = env.KUBERNETES_SERVICE_HOST;
+  if (!host) throw new Error('DROP_KUBECONFIG="in-cluster" but KUBERNETES_SERVICE_HOST is unset — not running inside a pod');
+  const port = env.KUBERNETES_SERVICE_PORT_HTTPS ?? env.KUBERNETES_SERVICE_PORT ?? "443";
+  return {
+    server: `https://${host}:${port}`,
+    ca: read(`${saDir}/ca.crt`),
+    token: read(`${saDir}/token`).toString("utf8").trim(),
+  };
+}
+
 export class KubeApiClient implements KubeClient {
   private conn: KubeConn;
+  /** `kubeconfigPath` is a file path, or the sentinel "in-cluster" to use the pod ServiceAccount. */
   constructor(kubeconfigPath: string) {
-    this.conn = loadKubeconfig(kubeconfigPath);
+    this.conn = kubeconfigPath === "in-cluster" ? inClusterConn() : loadKubeconfig(kubeconfigPath);
   }
 
   private call(method: string, path: string, opts: { body?: string; contentType?: string } = {}): Promise<{ status: number; body: string }> {

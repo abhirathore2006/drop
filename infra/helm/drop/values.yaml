@@ -85,3 +85,20 @@ ingress:
 nameOverride: ""
 fullnameOverride: ""
 podAnnotations: {}
+
+# Compute plane — container apps + managed databases + write-only app secrets.
+# OFF by default → Drop is STATIC-SITES-ONLY (the same feature set as the ECS/Fargate deploy):
+# /v1/apps, /v1/databases and the secret routes return 501. Turn this ON for the full PaaS on
+# Kubernetes: it sets DROP_KUBECONFIG=in-cluster (the API talks to the cluster via its pod
+# ServiceAccount) and grants that SA the RBAC to manage tenant namespaces + workloads.
+#
+# REQUIRES the cluster operators to be installed separately (the eks/ Terraform does this; locally
+# infra/local/compute-up.sh does): KEDA + the KEDA HTTP add-on, CloudNativePG + the Barman Cloud
+# Plugin, External Secrets Operator (only for secretBackend: aws), and a `gvisor` RuntimeClass.
+compute:
+  enabled: false
+  secretBackend: kube # "kube" (k8s Secrets, no extra deps) or "aws" (AWS Secrets Manager via ESO)
+  imageBackend: registry # "registry" (push to ECR — the prod default) or "containerd"
+  imageRegistry: "" # <acct>.dkr.ecr.<region>.amazonaws.com/drop-apps  (required when imageBackend=registry)
+  imageRegistryPullSecret: "" # name of a pre-provisioned imagePullSecret in tenant namespaces (optional; ECR-via-IRSA needs none)
+  blockedEgressCidrs: "" # pod+service CIDRs excluded from the tenant HTTPS egress allowlist — REQUIRED on EKS (e.g. "10.0.0.0/8,172.20.0.0/16")

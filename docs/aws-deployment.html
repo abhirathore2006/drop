@@ -37,6 +37,8 @@
 <h1>AWS deployment</h1>
 <p class="lead">Deploy Drop on AWS two ways from <strong>one</strong> container image: <strong>Variant A</strong> on Amazon EKS via the Helm chart, or <strong>Variant B</strong> on ECS Fargate (no Kubernetes). Both share a foundation — one ECR image, a private S3 bucket, an ACM wildcard cert, RDS PostgreSQL 18, and three Secrets Manager secrets — and both put Drop behind <strong>one internal ALB</strong>. Drop is internal/confidential: nothing here is internet-facing; the ALB is reachable only from the corp network / VPN.</p>
 
+<div class="note tip"><span class="lbl">Static-only vs the full PaaS</span><p>Both variants below deploy Drop as a <strong>static-site host</strong> (publish + serve sites). The <strong>full PaaS</strong> — container apps (<code>drop deploy</code>), managed Postgres (<code>drop db</code>), write-only app secrets — needs Kubernetes and is <strong>EKS-only</strong>: do Variant A, then enable <a href="#eks-compute">the compute plane</a>. <strong>ECS Fargate (Variant B) is always static-only</strong> — there is no compute plane without Kubernetes.</p></div>
+
 <div class="note tip"><span class="lbl">Terraform</span><p>Prefer infrastructure-as-code? The same components are scaffolded as Terraform in <code>infra/terraform/</code> — a <code>foundation</code> config plus <code>eks</code> and <code>ecs</code> root configs that read it via remote state (S3-native locking, no DynamoDB). See the <a href="terraform.html">Terraform</a> page. The AWS CLI commands below are the click-by-click equivalent.</p></div>
 
 <h2>Shared foundation</h2>
@@ -440,9 +442,55 @@ aws route53 change-resource-record-sets \
 
 <div class="note"><span class="lbl">Note</span><p>One ALB, host-based routing: requests to <code>api.$BASE_DOMAIN</code> hit the api target group (8080), and everything else under <code>*.$BASE_DOMAIN</code> hits the edge target group (8080). Both records are ALIASes to the same internal ALB; the wildcard cert covers both. Because the ALB is internal it resolves to private IPs — use a private hosted zone associated with <code>$VPC_ID</code> (or internal DNS) for these records. Verify from inside the corp network / VPN: <code>curl -I https://api.$BASE_DOMAIN/healthz</code> should return <code>200</code>.</p></div>
 
-<h2>Variant B — Without Kubernetes (ECS Fargate)</h2>
+<h3 id="eks-compute">7. (Optional) Enable the compute plane — the full PaaS</h3>
+<p>Steps 1–6 give you a <strong>static-site host</strong>. To add <strong>container apps</strong> (<code>drop deploy</code>), <strong>managed Postgres</strong> (<code>drop db</code>), and <strong>write-only app secrets</strong>, enable the compute plane. This is EKS-only. Two pieces: install the cluster operators, then re-run Helm with <code>compute.enabled=true</code>.</p>
+<p>First, a second ECR repo for <strong>tenant app images</strong> (kept separate from the platform <code>drop</code> image), and the cluster's pod + service CIDRs you'll exclude from tenant egress:</p>
+<pre><code><span class="tok-c"># Tenant app-image registry (separate from $ECR_URI, the platform image)</span>
+aws ecr create-repository --repository-name drop-apps --region $REGION >/dev/null 2>&1 || true
+export APPS_ECR=$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/drop-apps
+
+<span class="tok-c"># Your VPC CIDR + the EKS service CIDR — tenant pods are blocked from these</span>
+export BLOCKED_CIDRS="10.0.0.0/8,172.20.0.0/16"</code></pre>
+<p>Install the operators (mirrors <code>infra/local/compute-up.sh</code>; the <a href="terraform.html">EKS Terraform</a> does this automatically when <code>compute_enabled=true</code>):</p>
+<pre><code>helm repo add kedacore https://kedacore.github.io/charts
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+helm repo add external-secrets https://charts.external-secrets.io
+helm repo update
+
+<span class="tok-c"># Apps: scale-to-zero + HTTP routing</span>
+helm upgrade --install keda kedacore/keda -n keda --create-namespace --wait
+helm upgrade --install keda-add-ons-http kedacore/keda-add-ons-http -n keda --wait
+
+<span class="tok-c"># Databases: managed Postgres + scheduled backups</span>
+helm upgrade --install cnpg cnpg/cloudnative-pg -n cnpg-system --create-namespace --version 0.28.3 --wait
+kubectl apply -f https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.13.0/manifest.yaml
+
+<span class="tok-c"># Only needed if you set compute.secretBackend=aws (app secrets in Secrets Manager via ESO)</span>
+helm upgrade --install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace --wait
+
+<span class="tok-c"># Sandbox RuntimeClass for untrusted tenant images (needs the runsc handler on the nodes)</span>
+kubectl apply -f - &lt;&lt;'YAML'
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata: { name: gvisor }
+handler: runsc
+YAML</code></pre>
+<p>Then re-run the Helm install from step 4 with the compute flags appended:</p>
+<pre><code>helm upgrade --install drop infra/helm/drop \
+  --namespace drop \
+  ...                                   <span class="tok-c"># every flag from step 4, plus:</span>
+  --set compute.enabled=true \
+  --set compute.secretBackend=kube \
+  --set compute.imageBackend=registry \
+  --set compute.imageRegistry=$APPS_ECR \
+  --set compute.blockedEgressCidrs="$BLOCKED_CIDRS"</code></pre>
+<div class="note warn"><span class="lbl">IRSA for tenant images</span><p>The compute plane sets <code>DROP_KUBECONFIG=in-cluster</code>; the chart grants the API ServiceAccount a ClusterRole to manage tenant namespaces, KEDA/CNPG/ESO objects, and NetworkPolicies. For ECR pushes/pulls of tenant images, extend the IRSA role (step 2) with ECR permissions on <code>drop-apps</code>, or provision an <code>imagePullSecret</code> and set <code>compute.imageRegistryPullSecret</code>.</p></div>
+
+<h2>Variant B — Without Kubernetes (ECS Fargate, static-only)</h2>
 
 <p class="lead">If you don't want to run EKS, you can deploy the exact same Drop image on <strong>ECS Fargate</strong>: two services (<code>api</code> and <code>edge</code>) running the one container image (<code>infra/Dockerfile</code>, port <code>8080</code>) with a per-service command override, both fronted by one <strong>internal</strong> Application Load Balancer that host-routes <code>api.&lt;baseDomain&gt;</code> to the api target group and everything else to the edge target group. This variant assumes you've already built and pushed the image to ECR, created the RDS PostgreSQL 18 instance, the private S3 bucket, the ACM wildcard cert, and the three Secrets Manager secrets (see the shared foundation section).</p>
+
+<div class="note"><span class="lbl">Static-only</span><p>ECS Fargate runs Drop as a <strong>static-site host</strong> only — there is no Kubernetes, so the compute plane (container apps, managed Postgres, app secrets) is not available and <code>/v1/apps</code>, <code>/v1/databases</code> and the app-secret routes return <code>501</code>. Need those? Use <a href="#eks-compute">Variant A with the compute plane</a>.</p></div>
 
 <p>The shell variables below are consistent with every other section of this guide. Set them once before running the commands:</p>
 

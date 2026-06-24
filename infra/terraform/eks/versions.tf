@@ -29,6 +29,11 @@ terraform {
       source  = "hashicorp/http"
       version = "~> 3.0"
     }
+    # Used by the compute plane to kubectl-apply the Barman Cloud Plugin manifest.
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
 }
 

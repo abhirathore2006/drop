@@ -62,6 +62,25 @@ spec:
                 secretKeyRef:
                   name: {{ include "drop.secretName" . }}
                   key: {{ .Values.secret.databaseUrlKey }}
+            {{- if .Values.compute.enabled }}
+            # Compute plane ON: reach the cluster via the pod ServiceAccount (RBAC in rbac.yaml).
+            - name: DROP_KUBECONFIG
+              value: "in-cluster"
+            - name: DROP_SECRET_BACKEND
+              value: {{ .Values.compute.secretBackend | quote }}
+            - name: DROP_IMAGE_BACKEND
+              value: {{ .Values.compute.imageBackend | quote }}
+            {{- with .Values.compute.imageRegistry }}
+            - name: DROP_IMAGE_REGISTRY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.compute.imageRegistryPullSecret }}
+            - name: DROP_IMAGE_REGISTRY_PULL_SECRET
+              value: {{ . | quote }}
+            {{- end }}
+            - name: DROP_BLOCKED_EGRESS_CIDRS
+              value: {{ .Values.compute.blockedEgressCidrs | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz

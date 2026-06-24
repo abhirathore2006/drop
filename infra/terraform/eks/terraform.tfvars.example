@@ -25,3 +25,14 @@ admins           = "admin@example.com"
 # Kubernetes placement (optional — defaults shown).
 # namespace            = "drop"
 # service_account_name = "drop"
+
+# ---------------------------------------------------------------------------
+# Compute plane (optional). Leave compute_enabled = false (the default) for a
+# STATIC-SITES-ONLY deploy — same feature set as the ecs/ Fargate config, just
+# on Kubernetes. Set true for the full Drop PaaS (container apps + managed
+# Postgres + write-only secrets); this installs KEDA/CNPG/ESO/gvisor (compute.tf)
+# and requires the two settings below.
+# ---------------------------------------------------------------------------
+# compute_enabled      = true
+# image_registry       = "REPLACE_ME.dkr.ecr.us-east-1.amazonaws.com/drop-apps"
+# blocked_egress_cidrs = "10.0.0.0/8,172.20.0.0/16" # your VPC + service CIDRs

@@ -373,10 +373,46 @@ resource "helm_release" "drop" {
     value = "/healthz"
   }
 
+  # Compute plane — OFF unless var.compute_enabled. When on, this grants the API
+  # the in-cluster RBAC and tells it which ECR + egress CIDRs to use for tenants.
+  # The operators it depends on are installed in compute.tf.
+  #
+  # Emitted ONLY when enabled: Helm treats the string "false" as truthy
+  # ({{- if "false" }} is true), so setting compute.enabled=false would wrongly
+  # turn compute ON. Omitting the keys lets the chart default (bool false) hold.
+  dynamic "set" {
+    for_each = var.compute_enabled ? [1] : []
+    content {
+      name  = "compute.enabled"
+      value = "true"
+    }
+  }
+  dynamic "set" {
+    for_each = var.compute_enabled ? [var.image_registry] : []
+    content {
+      name  = "compute.imageRegistry"
+      value = set.value
+    }
+  }
+  dynamic "set" {
+    for_each = var.compute_enabled ? [var.blocked_egress_cidrs] : []
+    content {
+      name  = "compute.blockedEgressCidrs"
+      value = set.value
+    }
+  }
+
   depends_on = [
     helm_release.alb_controller,
     kubernetes_secret.drop,
     module.drop_irsa,
+    # Compute operators (empty list when compute disabled, so no-op for static deploys).
+    helm_release.keda,
+    helm_release.keda_http_add_on,
+    helm_release.cnpg,
+    helm_release.external_secrets,
+    null_resource.barman_plugin,
+    kubernetes_manifest.gvisor_runtimeclass,
   ]
 }
 
