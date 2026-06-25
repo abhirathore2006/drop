@@ -147,29 +147,39 @@ handler: runsc
 YAML
 echo "✓ gvisor RuntimeClass registered"
 
-# ── DATABASES + SECRETS plane (opt-in: DROP_COMPUTE_FULL=1) ─────────────────────
-if [ "${DROP_COMPUTE_FULL:-0}" = "1" ]; then
-  say "Full plane: cert-manager $CERT_MANAGER_VERSION + CNPG $CNPG_VERSION + Barman $BARMAN_VERSION + ESO $ESO_VERSION"
+# ── DATABASES plane (DEFAULT; skip with DROP_APPS_ONLY=1) ───────────────────────
+# cert-manager + CloudNativePG + the Barman Cloud Plugin → `drop db create` works.
+if [ "${DROP_APPS_ONLY:-0}" != "1" ]; then
+  say "Databases: cert-manager $CERT_MANAGER_VERSION + CNPG $CNPG_VERSION + Barman $BARMAN_VERSION"
   helm repo add cnpg https://cloudnative-pg.github.io/charts >/dev/null 2>&1 || true
   helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
-  helm repo add external-secrets https://charts.external-secrets.io >/dev/null 2>&1 || true
   helm repo update >/dev/null 2>&1
-
   # cert-manager is a hard prerequisite of the Barman Cloud Plugin (issues its gRPC TLS certs).
   helm upgrade --install cert-manager jetstack/cert-manager --namespace cert-manager --create-namespace \
-    --version "$CERT_MANAGER_VERSION" --set crds.enabled=true --wait
+    --version "$CERT_MANAGER_VERSION" --set crds.enabled=true --wait --timeout 10m
   helm upgrade --install cnpg cnpg/cloudnative-pg --namespace cnpg-system --create-namespace \
-    --version "$CNPG_VERSION" --wait
+    --version "$CNPG_VERSION" --wait --timeout 10m
   kubectl apply -f "https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/${BARMAN_VERSION}/manifest.yaml"
   kubectl -n cnpg-system rollout status deploy/barman-cloud --timeout=180s || true
+  kubectl apply -f "$SCRIPT_DIR/db-hibernation.yaml" >/dev/null 2>&1 || true
+  echo "✓ databases plane ready (cert-manager + CNPG + Barman)"
+else
+  echo "· DROP_APPS_ONLY=1 — skipping the databases plane (cert-manager / CNPG / Barman)"
+fi
 
-  # External Secrets (only needed for DROP_SECRET_BACKEND=aws). Point its AWS client at the
-  # in-cluster-reachable Floci endpoint (host alias differs per engine; override to taste).
+# ── SECRETS plane via External Secrets (only for the 'aws' secret backend) ──────
+# Default secret backend is 'kube' (plain k8s Secrets, no ESO). Install ESO only when the API will
+# run with DROP_SECRET_BACKEND=aws (or force with DROP_ESO=1 / the legacy DROP_COMPUTE_FULL=1).
+if [ "${DROP_SECRET_BACKEND:-}" = "aws" ] || [ "${DROP_ESO:-0}" = "1" ] || [ "${DROP_COMPUTE_FULL:-0}" = "1" ]; then
+  say "External Secrets $ESO_VERSION + 'floci' ClusterSecretStore (aws secret backend)"
+  helm repo add external-secrets https://charts.external-secrets.io >/dev/null 2>&1 || true
+  helm repo update >/dev/null 2>&1
+  # Point ESO's AWS client at the in-cluster-reachable Floci endpoint (host alias differs per engine).
   ESO_ENDPOINT="${DROP_SECRET_MANAGER_IN_CLUSTER_ENDPOINT:-http://${HOST_ALIAS}:${FLOCI_PORT}}"
   helm upgrade --install external-secrets external-secrets/external-secrets --namespace external-secrets --create-namespace \
     --version "$ESO_VERSION" --set installCRDs=true \
     --set "extraEnv[0].name=AWS_ENDPOINT_URL" --set "extraEnv[0].value=${ESO_ENDPOINT}" \
-    --set "extraEnv[1].name=AWS_REGION" --set "extraEnv[1].value=${REGION}" --wait
+    --set "extraEnv[1].name=AWS_REGION" --set "extraEnv[1].value=${REGION}" --wait --timeout 10m
   kubectl -n external-secrets create secret generic floci-aws-creds \
     --from-literal=access-key-id="${AWS_ACCESS_KEY_ID:-test}" --from-literal=secret-access-key="${AWS_SECRET_ACCESS_KEY:-test}" \
     --dry-run=client -o yaml | kubectl apply -f -
@@ -187,9 +197,7 @@ spec:
           accessKeyIDSecretRef: { name: floci-aws-creds, key: access-key-id, namespace: external-secrets }
           secretAccessKeySecretRef: { name: floci-aws-creds, key: secret-access-key, namespace: external-secrets }
 YAML
-
-  kubectl apply -f "$SCRIPT_DIR/db-hibernation.yaml" || true
-  echo "✓ databases + secrets plane ready"
+  echo "✓ secrets plane ready (ESO + 'floci' ClusterSecretStore)"
 fi
 
 # ── Local S3 + metadata DB (same engine) ───────────────────────────────────────
@@ -203,7 +211,9 @@ echo "    DROP_KUBECONFIG=$KUBECONFIG_PATH \\"
 echo "    DROP_S3_ENDPOINT=http://localhost:${FLOCI_PORT} DROP_S3_BUCKET=drop DROP_S3_KEY_ID=test DROP_S3_SECRET=test \\"
 echo "    DROP_DATABASE_URL=postgres://drop:drop@localhost:5432/drop node dist/api.js"
 echo "  (or 'make start' for the static-only stack — no cluster needed)"
-if [ "${DROP_COMPUTE_FULL:-0}" != "1" ]; then
-  echo "  apps plane only — re-run with DROP_COMPUTE_FULL=1 to add managed databases + the aws secret backend"
+if [ "${DROP_APPS_ONLY:-0}" = "1" ]; then
+  echo "  apps-only — drop a database needs the DB plane: re-run without DROP_APPS_ONLY=1"
+else
+  echo "  databases ready (drop db create). aws secret backend? re-run with DROP_SECRET_BACKEND=aws"
 fi
-echo "  tear down:            make cluster-down"
+echo "  tear down:            make down   (preserves cluster) · make nuke (wipes it)"

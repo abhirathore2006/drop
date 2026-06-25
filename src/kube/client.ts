@@ -122,7 +122,7 @@ export class KubeApiClient implements KubeClient {
   /** Fail fast if a CRD's API group isn't served yet (SSA returns a bare 404 otherwise). */
   private async assertCrd(group: string): Promise<void> {
     const r = await this.call("GET", `/apis/${group}`);
-    if (r.status >= 300) throw new Error(`compute not ready: ${group} CRD not installed (run make compute-up)`);
+    if (r.status >= 300) throw new Error(`compute not ready: ${group} CRD not installed (locally: 'make up' / 'make cluster-up' — not DROP_APPS_ONLY; in prod: install the operator)`);
   }
 
   async applyTenant(namespace: string, t: TenantManifests): Promise<void> {
