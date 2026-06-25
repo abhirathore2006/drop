@@ -123,10 +123,12 @@ setup:
 	  if [ "$$(podman machine inspect --format '{{.Rootful}}' 2>/dev/null)" != "true" ]; then echo "▸ switching podman VM to rootful (required for the k3s compute plane)…"; podman machine stop >/dev/null 2>&1 || true; podman machine set --rootful >/dev/null 2>&1 || true; fi; \
 	  podman machine start >/dev/null 2>&1 || true; \
 	  if [ -n "$(CORP_CA)" ]; then \
-	    echo "▸ injecting corp CA $(CORP_CA) into the podman VM…"; \
-	    cat $(CORP_CA) | podman machine ssh "sudo tee /etc/pki/ca-trust/source/anchors/corp-ca.crt >/dev/null && sudo update-ca-trust" && \
+	    ca=$$(eval echo $(CORP_CA)); \
+	    if [ ! -f "$$ca" ]; then echo "✗ CORP_CA file not found: $$ca  (check the path/filename)"; exit 1; fi; \
+	    echo "▸ injecting corp CA $$ca into the podman VM…"; \
+	    cat "$$ca" | podman machine ssh "sudo tee /etc/pki/ca-trust/source/anchors/corp-ca.crt >/dev/null && sudo update-ca-trust" && \
 	    podman machine stop >/dev/null 2>&1 && podman machine start >/dev/null 2>&1 && echo "✓ corp CA trusted"; \
-	    mkdir -p $(RUN); ca=$$(eval echo $(CORP_CA)); printf '%s\n' "$$ca" > $(RUN)/corp-ca && echo "✓ corp CA recorded — 'make up' will auto-mount it into k3s ($$ca)"; \
+	    mkdir -p $(RUN); printf '%s\n' "$$ca" > $(RUN)/corp-ca && echo "✓ corp CA recorded — 'make up' will auto-mount it into k3s ($$ca)"; \
 	  fi; \
 	else \
 	  $(CE) info >/dev/null 2>&1 || { echo "✗ '$(CE)' daemon not reachable — start Docker Desktop / Rancher Desktop (dockerd) / colima, then re-run"; exit 1; }; \

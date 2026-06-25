@@ -33,6 +33,12 @@ if [ -z "${DROP_CORP_CA:-}" ] && [ -f .run/corp-ca ]; then
   DROP_CORP_CA="$(cat .run/corp-ca 2>/dev/null)"
 fi
 case "${DROP_CORP_CA:-}" in "~/"*) DROP_CORP_CA="$HOME/${DROP_CORP_CA#\~/}";; esac
+# A set-but-missing CA path (e.g. a stale recording or a typo) → warn and ignore, so we fall
+# through to the proxy hint + the x509 preflight rather than silently mounting nothing.
+if [ -n "${DROP_CORP_CA:-}" ] && [ ! -f "${DROP_CORP_CA}" ]; then
+  echo "! corp CA path not found: ${DROP_CORP_CA} — ignoring (fix: make setup CORP_CA=/correct/path)"
+  DROP_CORP_CA=""
+fi
 export DROP_CORP_CA
 
 # ── Pinned versions (override via env) ─────────────────────────────────────────
