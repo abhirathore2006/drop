@@ -1,0 +1,49 @@
+# Publish the docs/ static site to GitHub Pages.
+#
+# Auto-runs on every push to main that touches docs/ (i.e. on merge), and can be triggered
+# manually (workflow_dispatch) to publish the current state on demand.
+#
+# ONE-TIME SETUP (repo Settings → Pages): set Source = "GitHub Actions".
+# The site is served from docs/ exactly as committed (the artifact method does NOT run Jekyll,
+# so files under docs/assets, drop-served.js, etc. are published verbatim).
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-flight publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload docs/ as the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
