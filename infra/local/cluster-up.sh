@@ -26,6 +26,15 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/../.." || { echo "✗ cannot find repo root"; exit 1; }
 
+# Auto-use the corp CA recorded by `make setup CORP_CA=…` so `make up` trusts it without
+# re-specifying DROP_CORP_CA every time (behind a TLS-inspecting proxy this is what lets k3s
+# pull images). Explicit DROP_CORP_CA still wins.
+if [ -z "${DROP_CORP_CA:-}" ] && [ -f .run/corp-ca ]; then
+  DROP_CORP_CA="$(cat .run/corp-ca 2>/dev/null)"
+fi
+case "${DROP_CORP_CA:-}" in "~/"*) DROP_CORP_CA="$HOME/${DROP_CORP_CA#\~/}";; esac
+export DROP_CORP_CA
+
 # ── Pinned versions (override via env) ─────────────────────────────────────────
 K3S_IMAGE="${DROP_K3S_IMAGE:-docker.io/rancher/k3s:v1.34.1-k3s1}"
 KEDA_VERSION="${DROP_KEDA_VERSION:-2.20.1}"
@@ -125,6 +134,28 @@ mkdir -p "$(dirname "$KUBECONFIG_PATH")"
 "$CE" exec "$K3S_NAME" cat /etc/rancher/k3s/k3s.yaml > "$KUBECONFIG_PATH"
 export KUBECONFIG="$KUBECONFIG_PATH"
 kubectl get nodes || { echo "✗ cluster not reachable at 127.0.0.1:6443 (port forward?)"; exit 1; }
+
+# ── Preflight: can the cluster actually PULL images? ────────────────────────────
+# Without this, an untrusted corp CA (x509) leaves every operator pod stuck in
+# ContainerCreating and `helm --wait` hangs for its full 10-minute timeout. Probe with a
+# tiny image (also warms the pause image) and fail FAST with the fix if it's a TLS error.
+say "Preflight: cluster image pull"
+_pl="$(mktemp)"
+if "$CE" exec "$K3S_NAME" k3s ctr images pull docker.io/rancher/mirrored-pause:3.6 >"$_pl" 2>&1; then
+  echo "✓ image pull works"
+else
+  if grep -qiE "x509|certificate signed by unknown|tls: failed to verify" "$_pl"; then
+    rm -f "$_pl"
+    echo "✗ in-cluster image pull failed: TLS certificate not trusted (x509)."
+    echo "  k3s can't pull through your TLS-inspecting proxy — it needs your corp CA. Either:"
+    echo "    • make setup CORP_CA=/path/to/ca-bundle.pem   (records it; future 'make up' auto-uses it), or"
+    echo "    • DROP_CORP_CA=/path/to/ca-bundle.pem make up  (one-off)"
+    echo "  Then drop this half-built cluster and retry:  make nuke && make up"
+    exit 1
+  fi
+  echo "! preflight pull failed (not a TLS error) — continuing; operators may still work:"; tail -2 "$_pl"
+fi
+rm -f "$_pl"
 
 # ── APPS plane (always): KEDA + HTTP add-on + gvisor ───────────────────────────
 say "Operators: KEDA $KEDA_VERSION + HTTP add-on $KEDA_HTTP_VERSION"

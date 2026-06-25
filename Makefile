@@ -126,6 +126,7 @@ setup:
 	    echo "▸ injecting corp CA $(CORP_CA) into the podman VM…"; \
 	    cat $(CORP_CA) | podman machine ssh "sudo tee /etc/pki/ca-trust/source/anchors/corp-ca.crt >/dev/null && sudo update-ca-trust" && \
 	    podman machine stop >/dev/null 2>&1 && podman machine start >/dev/null 2>&1 && echo "✓ corp CA trusted"; \
+	    mkdir -p $(RUN); ca=$$(eval echo $(CORP_CA)); printf '%s\n' "$$ca" > $(RUN)/corp-ca && echo "✓ corp CA recorded — 'make up' will auto-mount it into k3s ($$ca)"; \
 	  fi; \
 	else \
 	  $(CE) info >/dev/null 2>&1 || { echo "✗ '$(CE)' daemon not reachable — start Docker Desktop / Rancher Desktop (dockerd) / colima, then re-run"; exit 1; }; \
