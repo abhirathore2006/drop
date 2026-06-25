@@ -48,7 +48,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down
+.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down nuke
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -68,7 +68,8 @@ help:
 	@echo ""
 	@echo "Compute plane (container apps + DBs).  Engine: $(CE)  (override: make CE=docker)"
 	@echo "  make up                         FULL platform: cluster + Floci/PG + api/edge wired to k3s"
-	@echo "  make down                       FULL platform down: cluster + api/edge + Floci/PG"
+	@echo "  make down                       stop everything (k3s cluster PRESERVED → up resumes fast)"
+	@echo "  make nuke                       like down but WIPE the cluster (rebuilt fresh next up)"
 	@echo "  make cluster-up                 k3s-in-a-container + KEDA  — ANY engine (podman/docker/rancher)"
 	@echo "  make cluster-down               tear it down"
 	@echo "  make compute-up                 Floci EKS (AWS-faithful: ECR/RDS/IAM) — Docker only"
@@ -223,8 +224,15 @@ stop:
 # Just static sites (no cluster)?  use 'make start'.
 up: cluster-up start
 
-# Full platform DOWN: removes the k3s cluster, then stops api/edge (+ port-forward) + Floci/Postgres.
+# Full platform DOWN: STOPS the k3s cluster (state preserved → next 'make up' resumes in seconds),
+# then stops api/edge (+ port-forward) + Floci/Postgres. Data volumes persist.
 down: cluster-down stop
+
+# Like down, but WIPES the k3s cluster (KEDA, apps, DBs, imported images) — next 'make up' rebuilds
+# it from scratch. Data volumes still persist (use 'make reset' to wipe Floci/Postgres data).
+nuke:
+	@DROP_CONTAINER_ENGINE=$(CE) DROP_WIPE=1 ./infra/local/cluster-down.sh
+	@$(MAKE) --no-print-directory CE=$(CE) stop
 
 stop-all: stop
 	@if [ "$(CE)" = "podman" ]; then podman machine stop >/dev/null 2>&1 && echo "✓ podman machine stopped" || true; \

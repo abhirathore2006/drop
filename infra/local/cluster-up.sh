@@ -39,6 +39,12 @@ BARMAN_VERSION="${DROP_BARMAN_VERSION:-v0.13.0}"
 # backend (podman exec <name> ctr images import) finds it with no extra env.
 K3S_NAME="${DROP_K3S_NAME:-k3s}"
 KUBECONFIG_PATH="${DROP_KUBECONFIG:-$HOME/.kube/drop-k3s.yaml}"
+# Static node IP on a dedicated network. Without this, a stopped k3s container gets a NEW IP on
+# restart and k3s dies ("failed to find interface with specified node ip"). A fixed --ip + matching
+# --node-ip makes `make down`/`up` (stop/start) resume cleanly.
+K3S_NET="${DROP_K3S_NET:-drop-net}"
+K3S_IP="${DROP_K3S_IP:-10.89.0.2}"
+K3S_SUBNET="${DROP_K3S_SUBNET:-10.89.0.0/24}"
 FLOCI_PORT="${FLOCI_PORT:-4566}"
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
@@ -80,24 +86,31 @@ fi
 HOST_ALIAS="host.docker.internal"; [ "$CE" = "podman" ] && HOST_ALIAS="host.containers.internal"
 
 # ── k3s as a container (idempotent) ────────────────────────────────────────────
+# Reuse a running container; RESTART a stopped one (preserves the cluster — KEDA, apps, DBs,
+# imported images — so `make down`/`up` cycles in seconds); else create fresh. The operator
+# install below is idempotent (helm upgrade --install), so it's a fast no-op on a restart.
 say "k3s cluster '$K3S_NAME' ($K3S_IMAGE)"
 if "$CE" ps --format '{{.Names}}' 2>/dev/null | grep -qx "$K3S_NAME"; then
   echo "✓ already running — reusing"
+elif "$CE" ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$K3S_NAME"; then
+  echo "  restarting stopped k3s container (cluster preserved)…"
+  "$CE" start "$K3S_NAME" >/dev/null
 else
-  "$CE" rm -f "$K3S_NAME" >/dev/null 2>&1 || true
+  # Dedicated network with a fixed subnet so we can pin the node IP (stable across restarts).
+  "$CE" network inspect "$K3S_NET" >/dev/null 2>&1 || "$CE" network create --subnet "$K3S_SUBNET" "$K3S_NET" >/dev/null
   # Optional corp CA so k3s can pull through a TLS-inspecting proxy.
   if [ -n "${DROP_CORP_CA:-}" ] && [ -f "${DROP_CORP_CA:-}" ]; then
     echo "  mounting corp CA ${DROP_CORP_CA}"
-    "$CE" run -d --name "$K3S_NAME" --privileged -p 6443:6443 \
+    "$CE" run -d --name "$K3S_NAME" --privileged --network "$K3S_NET" --ip "$K3S_IP" -p 6443:6443 \
       -v "${DROP_CORP_CA}:/etc/ssl/certs/ca-certificates.crt:ro" \
-      -e K3S_KUBECONFIG_MODE=644 "$K3S_IMAGE" server --disable traefik --tls-san 127.0.0.1 >/dev/null
+      -e K3S_KUBECONFIG_MODE=644 "$K3S_IMAGE" server --disable traefik --node-ip "$K3S_IP" --tls-san 127.0.0.1 >/dev/null
   else
     echo "  (behind a TLS-inspecting proxy? in-cluster image pulls will fail x509 —"
     echo "   set DROP_CORP_CA=/path/to/ca-bundle.pem so k3s trusts your corp CA)"
-    "$CE" run -d --name "$K3S_NAME" --privileged -p 6443:6443 \
-      -e K3S_KUBECONFIG_MODE=644 "$K3S_IMAGE" server --disable traefik --tls-san 127.0.0.1 >/dev/null
+    "$CE" run -d --name "$K3S_NAME" --privileged --network "$K3S_NET" --ip "$K3S_IP" -p 6443:6443 \
+      -e K3S_KUBECONFIG_MODE=644 "$K3S_IMAGE" server --disable traefik --node-ip "$K3S_IP" --tls-san 127.0.0.1 >/dev/null
   fi
-  echo "  started"
+  echo "  started (fresh cluster, node-ip $K3S_IP)"
 fi
 
 echo -n "  waiting for node Ready"

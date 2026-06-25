@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Tear down the engine-agnostic local compute plane created by cluster-up.sh.
-# Removes the k3s container (its cluster state — apps, databases, PVCs — is
-# ephemeral and goes with it). Floci + Postgres are left running unless you also
-# pass DROP_STOP_DATA=1 (then `make stop` stops them too). The kubeconfig file is
-# left in place; it just stops resolving once the container is gone.
+# Bring the engine-agnostic local compute plane (cluster-up.sh) down.
+#
+# DEFAULT: STOPS the k3s container — the cluster state (KEDA, apps, databases,
+# imported images) is PRESERVED in the stopped container, so the next cluster-up
+# restarts it in seconds with no operator reinstall.
+# DROP_WIPE=1: REMOVES the container instead → the cluster is destroyed and the
+# next cluster-up rebuilds it from scratch.
+# Floci + Postgres are left running unless DROP_STOP_DATA=1 (then `make stop`).
 set -uo pipefail
 
 K3S_NAME="${DROP_K3S_NAME:-k3s}"
@@ -15,8 +18,13 @@ if [ -z "$CE" ]; then
   else echo "✗ no container engine found"; exit 1; fi
 fi
 
-echo "▸ removing k3s container '$K3S_NAME' ($CE)"
-"$CE" rm -f "$K3S_NAME" >/dev/null 2>&1 && echo "✓ k3s removed" || echo "(no k3s container)"
+if [ "${DROP_WIPE:-0}" = "1" ]; then
+  echo "▸ removing k3s container '$K3S_NAME' ($CE) [DROP_WIPE=1 — cluster will be rebuilt next up]"
+  "$CE" rm -f "$K3S_NAME" >/dev/null 2>&1 && echo "✓ k3s removed (cluster wiped)" || echo "(no k3s container)"
+else
+  echo "▸ stopping k3s container '$K3S_NAME' ($CE)"
+  "$CE" stop "$K3S_NAME" >/dev/null 2>&1 && echo "✓ k3s stopped (cluster preserved; next 'make up' restarts in seconds — DROP_WIPE=1 to remove)" || echo "(no k3s container)"
+fi
 
 if [ "${DROP_STOP_DATA:-0}" = "1" ]; then
   echo "▸ stopping Floci + Postgres"
