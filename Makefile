@@ -39,10 +39,11 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine
+.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
+	@echo "  make doctor                     validate all tools + deps + VM/cluster needed to run"
 	@echo "  make setup                      one-time: node $(NODE_VERSION) + deps + podman VM + floci image"
 	@echo "  make start                      start Floci + api(:$(API_PORT)) + edge(:$(EDGE_PORT))"
 	@echo "  make stop                       stop api + edge + Floci"
@@ -82,6 +83,10 @@ compute-up:
 
 compute-down:
 	@./infra/local/compute-down.sh
+
+# Validate the full local toolchain + environment (non-destructive). Exits non-zero on failures.
+doctor:
+	@DROP_CONTAINER_ENGINE=$(CE) ./infra/local/doctor.sh
 
 # Ensure the container engine is reachable: podman → start its VM; docker → verify the daemon.
 engine:
@@ -200,6 +205,7 @@ stop-all: stop
 restart: stop start
 
 status:
+	@if [ "$(CE)" = "podman" ]; then echo "engine: podman (rootful=$$(podman machine inspect --format '{{.Rootful}}' 2>/dev/null || echo '?'), $$(podman machine inspect --format '{{.State}}' 2>/dev/null || echo 'no machine'))"; else echo "engine: $(CE)"; fi
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && echo "api:   up    (:$(API_PORT))" || echo "api:   down"
 	@curl -s -o /dev/null http://localhost:$(EDGE_PORT)/ 2>/dev/null && echo "edge:  up    (:$(EDGE_PORT))" || echo "edge:  down"
 	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' && echo "floci: up    (:$(FLOCI_PORT))") || echo "floci: down"
