@@ -28,6 +28,15 @@ VM_CPUS   ?= 6
 VM_MEMORY ?= 8192
 VM_DISK   ?= 100
 
+# Compute wiring — `start` auto-detects a running local k3s cluster and wires the API to it
+# (so `make up` = cluster-up + start gives the full PaaS, not a static API beside an idle cluster).
+# These are recursively expanded: the $(shell) re-runs when the `start` recipe executes, so it sees
+# the cluster `cluster-up` just created. Empty (no cluster) → static-only.
+KUBECONFIG_LOCAL := $(HOME)/.kube/drop-k3s.yaml
+INTERCEPTOR_PORT ?= 18080
+COMPUTE_ENV       = $(shell [ -f $(KUBECONFIG_LOCAL) ] && $(CE) ps --format '{{.Names}}' 2>/dev/null | grep -qx k3s && echo DROP_KUBECONFIG=$(KUBECONFIG_LOCAL) DROP_IMAGE_BACKEND=containerd DROP_IMAGE_RUNTIME=$(CE) DROP_K3S_CONTAINER=k3s)
+EDGE_COMPUTE_ENV  = $(shell [ -f $(KUBECONFIG_LOCAL) ] && $(CE) ps --format '{{.Names}}' 2>/dev/null | grep -qx k3s && echo DROP_INTERCEPTOR_URL=http://localhost:$(INTERCEPTOR_PORT))
+
 NODE_VERSION := $(shell cat .nvmrc 2>/dev/null)
 NODE_BIN     := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin
 NODE         := $(NODE_BIN)/node
@@ -39,7 +48,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor
+.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -58,6 +67,8 @@ help:
 	@echo "  make untrust-cert               remove it again"
 	@echo ""
 	@echo "Compute plane (container apps + DBs).  Engine: $(CE)  (override: make CE=docker)"
+	@echo "  make up                         FULL platform: cluster + Floci/PG + api/edge wired to k3s"
+	@echo "  make down                       FULL platform down: cluster + api/edge + Floci/PG"
 	@echo "  make cluster-up                 k3s-in-a-container + KEDA  — ANY engine (podman/docker/rancher)"
 	@echo "  make cluster-down               tear it down"
 	@echo "  make compute-up                 Floci EKS (AWS-faithful: ECR/RDS/IAM) — Docker only"
@@ -183,20 +194,37 @@ reset:
 start: floci postgres
 	@mkdir -p $(RUN)
 	@$(NODE) build.mjs >/dev/null && echo "✓ built bundles"
-	@$(LOADENV) $(ENV) DROP_HTTP_PORT=$(API_PORT)  nohup $(NODE) dist/api.js  > $(RUN)/api.log  2>&1 & echo $$! > $(RUN)/api.pid
-	@$(LOADENV) $(ENV) DROP_HTTP_PORT=$(EDGE_PORT) DROP_EDGE_DISK_CACHE=$(RUN)/edge-cache nohup $(NODE) dist/edge.js > $(RUN)/edge.log 2>&1 & echo $$! > $(RUN)/edge.pid
+	@$(LOADENV) $(ENV) $(COMPUTE_ENV) DROP_HTTP_PORT=$(API_PORT)  nohup $(NODE) dist/api.js  > $(RUN)/api.log  2>&1 & echo $$! > $(RUN)/api.pid
+	@$(LOADENV) $(ENV) $(EDGE_COMPUTE_ENV) DROP_HTTP_PORT=$(EDGE_PORT) DROP_EDGE_DISK_CACHE=$(RUN)/edge-cache nohup $(NODE) dist/edge.js > $(RUN)/edge.log 2>&1 & echo $$! > $(RUN)/edge.pid
+	@if [ -n "$(COMPUTE_ENV)" ]; then \
+	  pkill -f 'port-forward.*interceptor' 2>/dev/null || true; \
+	  KUBECONFIG=$(KUBECONFIG_LOCAL) nohup kubectl -n keda port-forward svc/keda-add-ons-http-interceptor-proxy $(INTERCEPTOR_PORT):8080 > $(RUN)/pf-interceptor.log 2>&1 & echo $$! > $(RUN)/pf.pid; \
+	fi
 	@for i in $$(seq 1 30); do curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && break; sleep 1; done
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && echo "✓ api    http://localhost:$(API_PORT)" || { echo "✗ api failed — see $(RUN)/api.log"; tail -5 $(RUN)/api.log; exit 1; }
 	@echo "✓ edge   http://localhost:$(EDGE_PORT)  (routes by  Host: <name>.$(BASE_DOMAIN))"
+	@if [ -n "$(COMPUTE_ENV)" ]; then echo "✓ compute mode — API wired to k3s; interceptor → :$(INTERCEPTOR_PORT)  (drop deploy works)"; \
+	 else echo "· static-only — run 'make up' (or 'make cluster-up') for container apps / databases"; fi
 	@echo "next:  make publish DIR=./yourdist NAME=myapp"
 
 stop:
 	@-if [ -f $(RUN)/api.pid ];  then kill `cat $(RUN)/api.pid`  2>/dev/null; rm -f $(RUN)/api.pid;  fi
 	@-if [ -f $(RUN)/edge.pid ]; then kill `cat $(RUN)/edge.pid` 2>/dev/null; rm -f $(RUN)/edge.pid; fi
+	@-if [ -f $(RUN)/pf.pid ];   then kill `cat $(RUN)/pf.pid`   2>/dev/null; rm -f $(RUN)/pf.pid;   fi
 	@-pkill -f 'dist/api.js'  2>/dev/null || true
 	@-pkill -f 'dist/edge.js' 2>/dev/null || true
+	@-pkill -f 'port-forward.*interceptor' 2>/dev/null || true
 	@-$(CE) stop drop-floci drop-postgres >/dev/null 2>&1 || true
 	@echo "✓ stopped api + edge + floci + postgres  ('make stop-all' also stops the podman VM)"
+
+# Full platform UP: compute cluster (k3s + KEDA) + Floci/Postgres + api/edge wired to the cluster.
+# Behind a TLS-inspecting proxy:  DROP_CORP_CA=~/certs/ca-bundle.pem make up
+# Add managed databases + the aws secret backend:  DROP_COMPUTE_FULL=1 make up
+# Just static sites (no cluster)?  use 'make start'.
+up: cluster-up start
+
+# Full platform DOWN: removes the k3s cluster, then stops api/edge (+ port-forward) + Floci/Postgres.
+down: cluster-down stop
 
 stop-all: stop
 	@if [ "$(CE)" = "podman" ]; then podman machine stop >/dev/null 2>&1 && echo "✓ podman machine stopped" || true; \
