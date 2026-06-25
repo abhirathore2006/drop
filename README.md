@@ -301,12 +301,18 @@ create a DB, map it into the app's env, build, deploy, verify — is in
 Uses Node (version in `.nvmrc`): `nvm use` (or `nvm install`) first.
 
 ```bash
-make setup        # one-time: node (via nvm) + deps + podman VM + Floci & Postgres images
+make setup        # one-time: node (via nvm) + deps + container engine + Floci & Postgres images
                   # behind a TLS-inspecting proxy:  make setup CORP_CA=~/certs/your-root-ca.cer
 make start        # Floci (S3) + Postgres + api(:8473) + edge(:8474), dev-auth on
 make publish DIR=./your/dist NAME=myapp
 curl -H "Host: myapp.drop.localhost" http://localhost:8474/
 ```
+
+**Container engine — Docker / Rancher Desktop / podman all work.** The engine is
+auto-detected (podman first, else `docker`); override with `DROP_CONTAINER_ENGINE=docker`
+(env) or `make start CE=docker`. Rancher Desktop must use its **dockerd/moby** engine
+(not containerd). podman uses a managed VM (`make` starts/stops it for you); Docker/Rancher
+Desktop are daemon-managed (start/stop the app yourself).
 
 Other targets: `make status`, `make logs`, `make restart`, `make stop`
 (`make stop-all` also stops the podman VM), `make reset` (wipe the Floci + Postgres
@@ -316,22 +322,38 @@ either curl with `-H "Host: <name>.drop.localhost"` or add
 
 ### Compute plane (local)
 
-The static stack above needs no cluster. To exercise **apps / databases / secrets**, bring up the
-local Kubernetes compute plane — a single-node **k3s** (in podman) with **KEDA** + the HTTP
-add-on (scale-to-zero), **CloudNativePG** + the Barman Cloud Plugin (managed Postgres), and the
-**External Secrets Operator** + a `floci` `ClusterSecretStore` (so the `aws` secrets backend runs
-against Floci's Secrets-Manager emulation):
+The static stack above needs no cluster. To exercise **apps / databases / secrets**, bring up a
+local Kubernetes compute plane. There are **two ways**, and they differ only in *how the cluster
+is created* — the Drop API is engine-agnostic and just needs `DROP_KUBECONFIG`:
+
+| | `make cluster-up` | `make compute-up` |
+|---|---|---|
+| **k3s created by** | a privileged k3s **container** | **Floci's `aws eks`** (nests k3s via the Docker socket) |
+| **Engines** | **any** — podman / Docker / Rancher Desktop (dockerd) / colima | **Docker only** (Floci refuses podman) |
+| **Faithfulness** | apps plane (+ DBs/secrets with `DROP_COMPUTE_FULL=1`) | AWS-faithful: real `aws eks` + ECR + RDS + IAM + Secrets |
+| **kubeconfig** | `~/.kube/drop-k3s.yaml` | `~/.kube/drop-local.config` |
 
 ```bash
-make compute-up                  # k3s + KEDA + CNPG + ESO (runs infra/local/compute-up.sh; writes ~/.kube/drop-local.config)
-# run the API with the cluster + the aws-on-Floci secrets backend:
-DROP_KUBECONFIG=~/.kube/drop-local.config DROP_SECRET_BACKEND=aws \
-  DROP_SECRET_MANAGER_ENDPOINT=http://localhost:4566 DROP_SECRET_STORE_NAME=floci ... node dist/api.js
+# Engine-agnostic (recommended for local dev) — works on podman/docker/rancher:
+make cluster-up                  # k3s-in-a-container + KEDA + HTTP add-on + gvisor
+DROP_COMPUTE_FULL=1 make cluster-up   # ...also CNPG + Barman + ESO (managed DBs + aws secrets)
+make cluster-up CE=docker        # force a specific engine
+# behind a TLS-inspecting proxy, give k3s your corp CA so in-cluster image pulls don't x509:
+DROP_CORP_CA=~/certs/ca-bundle.pem make cluster-up
+
+# AWS-faithful (Docker only) — mirrors prod EKS/ECR/RDS/IAM via Floci:
+make compute-up                  # runs infra/local/compute-up.sh; writes ~/.kube/drop-local.config
+
+# then run the API against whichever cluster you brought up:
+DROP_KUBECONFIG=~/.kube/drop-k3s.yaml node dist/api.js
+# (add DROP_SECRET_BACKEND=aws DROP_SECRET_MANAGER_ENDPOINT=http://localhost:4566
+#  DROP_SECRET_STORE_NAME=floci for the aws-on-Floci secrets backend — needs the full plane)
 ```
 
 Then `drop deploy`, `drop db create`, `drop secrets set`, and `drop restart/stop/start` work
-locally exactly as in prod. See [`examples/DATABASE_APPS.md`](examples/DATABASE_APPS.md) for the
-end-to-end flow (build an image, import it into k3s, create a DB, set a secret, deploy).
+locally exactly as in prod. Tear down with `make cluster-down` / `make compute-down`. See
+[`examples/DATABASE_APPS.md`](examples/DATABASE_APPS.md) for the end-to-end flow (build an image,
+import it into k3s, create a DB, set a secret, deploy).
 
 ### Trusted local HTTPS (optional, via nginx in containers)
 

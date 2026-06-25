@@ -14,6 +14,14 @@ BUCKET       ?= drop
 RUN          := .run
 CERT         := infra/nginx/certs/drop.localhost.pem
 
+# Container engine — works with podman (default if present), Docker Desktop,
+# Rancher Desktop (dockerd/moby engine), or colima. Override with
+# `DROP_CONTAINER_ENGINE=docker` (env) or `make CE=docker`.
+CE ?= $(DROP_CONTAINER_ENGINE)
+ifeq ($(strip $(CE)),)
+CE := $(shell command -v podman >/dev/null 2>&1 && echo podman || (command -v docker >/dev/null 2>&1 && echo docker))
+endif
+
 NODE_VERSION := $(shell cat .nvmrc 2>/dev/null)
 NODE_BIN     := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin
 NODE         := $(NODE_BIN)/node
@@ -25,7 +33,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down
+.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -42,42 +50,69 @@ help:
 	@echo "  make trust-cert                 trust the local HTTPS cert in the OS store (sudo)"
 	@echo "  make untrust-cert               remove it again"
 	@echo ""
-	@echo "Compute plane (container apps + DBs) — reproducible AWS-on-Floci, needs Docker Desktop:"
-	@echo "  make compute-up                 Floci EKS (real k3s) + KEDA + CloudNativePG"
+	@echo "Compute plane (container apps + DBs).  Engine: $(CE)  (override: make CE=docker)"
+	@echo "  make cluster-up                 k3s-in-a-container + KEDA  — ANY engine (podman/docker/rancher)"
+	@echo "  make cluster-down               tear it down"
+	@echo "  make compute-up                 Floci EKS (AWS-faithful: ECR/RDS/IAM) — Docker only"
 	@echo "  make compute-down               tear it down"
 	@echo ""
-	@echo "  corporate CA for podman pulls:  make setup CORP_CA=~/certs/your-root-ca.cer"
+	@echo "  corporate CA for image pulls:   make setup CORP_CA=~/certs/your-root-ca.cer"
 
-# Compute plane: a reproducible local copy of the prod AWS/EKS architecture via
-# Floci. Needs a real Docker daemon (Floci nests k3s); see infra/local/compute-up.sh.
+# Compute plane — ENGINE-AGNOSTIC. Runs k3s directly as a container (podman / Docker
+# Desktop / Rancher Desktop dockerd / colima), installs the Drop operators, and brings
+# up Floci + Postgres. This is the reproducible local env; see infra/local/cluster-up.sh.
+# Add managed databases + the aws secret backend with: DROP_COMPUTE_FULL=1 make cluster-up
+cluster-up:
+	@DROP_CONTAINER_ENGINE=$(CE) ./infra/local/cluster-up.sh
+
+cluster-down:
+	@DROP_CONTAINER_ENGINE=$(CE) ./infra/local/cluster-down.sh
+
+# Compute plane — AWS-FAITHFUL via Floci EKS (real `aws eks` + ECR + RDS + IAM +
+# Secrets emulation). Needs a real Docker daemon (Floci nests k3s via the Docker
+# socket and refuses podman); see infra/local/compute-up.sh.
 compute-up:
 	@./infra/local/compute-up.sh
 
 compute-down:
 	@./infra/local/compute-down.sh
 
-# One-time local setup: Node (via nvm + .nvmrc), deps, podman VM, Floci image.
-# Behind a TLS-inspecting proxy, pass CORP_CA=<root.cer> so the podman VM can pull images.
+# Ensure the container engine is reachable: podman → start its VM; docker → verify the daemon.
+engine:
+	@if [ "$(CE)" = "podman" ]; then podman machine start >/dev/null 2>&1 || true; \
+	elif [ -z "$(CE)" ]; then echo "✗ no container engine found — install podman or Docker"; exit 1; \
+	else $(CE) info >/dev/null 2>&1 || { echo "✗ '$(CE)' daemon not reachable — start Docker Desktop / Rancher Desktop (dockerd) / colima"; exit 1; }; fi
+
+# One-time local setup: Node (via nvm + .nvmrc), deps, container engine, Floci image.
+# Engine is auto-detected (podman/docker); override with `make setup CE=docker`. Behind a
+# TLS-inspecting proxy, pass CORP_CA=<root.cer> so the podman VM can pull images (podman only;
+# for Docker/Rancher Desktop add the CA in the app's settings).
 setup:
-	@command -v podman >/dev/null 2>&1 || { echo "✗ podman not found — install Podman Desktop, then re-run"; exit 1; }
+	@[ -n "$(CE)" ] || { echo "✗ no container engine found — install podman, Docker Desktop, Rancher Desktop, or colima, then re-run"; exit 1; }
+	@echo "▸ container engine: $(CE)"
 	@echo "▸ ensuring node $(NODE_VERSION) (via nvm)…"
 	@export NVM_DIR="$(HOME)/.nvm"; [ -s "$$NVM_DIR/nvm.sh" ] && . "$$NVM_DIR/nvm.sh" && nvm install >/dev/null 2>&1 || true
 	@test -x $(NODE) || { echo "✗ node $(NODE_VERSION) not at $(NODE_BIN) — install nvm, then 'nvm install'"; exit 1; }
 	@echo "✓ node $$($(NODE) -v)"
 	@echo "▸ installing dependencies…"; $(NPM) install >/dev/null 2>&1 && echo "✓ deps installed"
-	@podman machine inspect >/dev/null 2>&1 || { echo "▸ initializing podman VM (downloads an image, ~1-3 min)…"; podman machine init; }
-	@podman machine start >/dev/null 2>&1 || true
-	@if [ -n "$(CORP_CA)" ]; then \
-	  echo "▸ injecting corp CA $(CORP_CA) into the podman VM…"; \
-	  cat $(CORP_CA) | podman machine ssh "sudo tee /etc/pki/ca-trust/source/anchors/corp-ca.crt >/dev/null && sudo update-ca-trust" && \
-	  podman machine stop >/dev/null 2>&1 && podman machine start >/dev/null 2>&1 && echo "✓ corp CA trusted"; \
+	@if [ "$(CE)" = "podman" ]; then \
+	  podman machine inspect >/dev/null 2>&1 || { echo "▸ initializing podman VM (downloads an image, ~1-3 min)…"; podman machine init; }; \
+	  podman machine start >/dev/null 2>&1 || true; \
+	  if [ -n "$(CORP_CA)" ]; then \
+	    echo "▸ injecting corp CA $(CORP_CA) into the podman VM…"; \
+	    cat $(CORP_CA) | podman machine ssh "sudo tee /etc/pki/ca-trust/source/anchors/corp-ca.crt >/dev/null && sudo update-ca-trust" && \
+	    podman machine stop >/dev/null 2>&1 && podman machine start >/dev/null 2>&1 && echo "✓ corp CA trusted"; \
+	  fi; \
+	else \
+	  $(CE) info >/dev/null 2>&1 || { echo "✗ '$(CE)' daemon not reachable — start Docker Desktop / Rancher Desktop (dockerd) / colima, then re-run"; exit 1; }; \
+	  [ -n "$(CORP_CA)" ] && echo "! CORP_CA with $(CE): add the CA in the engine's app settings (Docker/Rancher Desktop), not via podman machine"; \
 	fi
-	@echo "▸ pulling Floci image…"; podman pull docker.io/floci/floci:latest >/dev/null 2>&1 \
+	@echo "▸ pulling Floci image…"; $(CE) pull docker.io/floci/floci:latest >/dev/null 2>&1 \
 	  && echo "✓ floci image ready" \
-	  || echo "! could not pull floci — if behind a TLS-inspecting proxy:  make setup CORP_CA=~/certs/your-root-ca.cer"
-	@echo "▸ pulling Postgres image…"; podman pull $(PG_IMAGE) >/dev/null 2>&1 \
+	  || echo "! could not pull floci — if behind a TLS-inspecting proxy, trust your corp CA in the engine"
+	@echo "▸ pulling Postgres image…"; $(CE) pull $(PG_IMAGE) >/dev/null 2>&1 \
 	  && echo "✓ postgres image ready" \
-	  || echo "! could not pull postgres — if behind a TLS-inspecting proxy:  make setup CORP_CA=~/certs/your-root-ca.cer"
+	  || echo "! could not pull postgres — if behind a TLS-inspecting proxy, trust your corp CA in the engine"
 	@echo "✓ setup complete — run 'make start'"
 
 build:
@@ -117,23 +152,21 @@ untrust-cert:
 	     echo "  Get-ChildItem Cert:\\LocalMachine\\Root | ? { \$$_.Subject -match 'drop.localhost' } | Remove-Item" ;; \
 	esac
 
-floci:
-	@podman machine start >/dev/null 2>&1 || true
-	@podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' || podman run -d --rm --name drop-floci -p $(FLOCI_PORT):4566 -e FLOCI_STORAGE_MODE=hybrid -v $(FLOCI_VOLUME):/app/data docker.io/floci/floci:latest >/dev/null
+floci: engine
+	@$(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' || $(CE) run -d --rm --name drop-floci -p $(FLOCI_PORT):4566 -e FLOCI_STORAGE_MODE=hybrid -v $(FLOCI_VOLUME):/app/data docker.io/floci/floci:latest >/dev/null
 	@for i in $$(seq 1 40); do curl -s -o /dev/null http://localhost:$(FLOCI_PORT)/ 2>/dev/null && break; sleep 1; done
-	@echo "✓ floci  :$(FLOCI_PORT)  (persistent volume: $(FLOCI_VOLUME))"
+	@echo "✓ floci  :$(FLOCI_PORT)  (persistent volume: $(FLOCI_VOLUME), engine: $(CE))"
 
-postgres:
-	@podman machine start >/dev/null 2>&1 || true
-	@podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' || podman run -d --rm --name drop-postgres -p $(PG_PORT):5432 -e POSTGRES_USER=drop -e POSTGRES_PASSWORD=drop -e POSTGRES_DB=drop -v $(PG_VOLUME):/var/lib/postgresql $(PG_IMAGE) >/dev/null
-	@for i in $$(seq 1 40); do podman exec drop-postgres pg_isready -U drop -d drop >/dev/null 2>&1 && break; sleep 1; done
-	@echo "✓ postgres  :$(PG_PORT)  (persistent volume: $(PG_VOLUME))"
+postgres: engine
+	@$(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' || $(CE) run -d --rm --name drop-postgres -p $(PG_PORT):5432 -e POSTGRES_USER=drop -e POSTGRES_PASSWORD=drop -e POSTGRES_DB=drop -v $(PG_VOLUME):/var/lib/postgresql $(PG_IMAGE) >/dev/null
+	@for i in $$(seq 1 40); do $(CE) exec drop-postgres pg_isready -U drop -d drop >/dev/null 2>&1 && break; sleep 1; done
+	@echo "✓ postgres  :$(PG_PORT)  (persistent volume: $(PG_VOLUME), engine: $(CE))"
 
 # Wipe the persistent volumes (all published sites + all metadata). Stops both first.
 reset:
-	@-podman stop drop-floci drop-postgres >/dev/null 2>&1 || true
-	@-podman volume rm $(FLOCI_VOLUME) >/dev/null 2>&1 && echo "✓ wiped $(FLOCI_VOLUME)" || echo "(no floci volume to wipe)"
-	@-podman volume rm $(PG_VOLUME) >/dev/null 2>&1 && echo "✓ wiped $(PG_VOLUME)" || echo "(no postgres volume to wipe)"
+	@-$(CE) stop drop-floci drop-postgres >/dev/null 2>&1 || true
+	@-$(CE) volume rm $(FLOCI_VOLUME) >/dev/null 2>&1 && echo "✓ wiped $(FLOCI_VOLUME)" || echo "(no floci volume to wipe)"
+	@-$(CE) volume rm $(PG_VOLUME) >/dev/null 2>&1 && echo "✓ wiped $(PG_VOLUME)" || echo "(no postgres volume to wipe)"
 
 start: floci postgres
 	@mkdir -p $(RUN)
@@ -150,20 +183,21 @@ stop:
 	@-if [ -f $(RUN)/edge.pid ]; then kill `cat $(RUN)/edge.pid` 2>/dev/null; rm -f $(RUN)/edge.pid; fi
 	@-pkill -f 'dist/api.js'  2>/dev/null || true
 	@-pkill -f 'dist/edge.js' 2>/dev/null || true
-	@-podman stop drop-floci drop-postgres >/dev/null 2>&1 || true
-	@echo "✓ stopped api + edge + floci + postgres  (podman machine still up; 'make stop-all' to stop it)"
+	@-$(CE) stop drop-floci drop-postgres >/dev/null 2>&1 || true
+	@echo "✓ stopped api + edge + floci + postgres  ('make stop-all' also stops the podman VM)"
 
 stop-all: stop
-	@-podman machine stop >/dev/null 2>&1 || true
-	@echo "✓ podman machine stopped"
+	@if [ "$(CE)" = "podman" ]; then podman machine stop >/dev/null 2>&1 && echo "✓ podman machine stopped" || true; \
+	else echo "(engine '$(CE)' is daemon-managed — stop Docker/Rancher Desktop yourself)"; fi
 
 restart: stop start
 
 status:
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && echo "api:   up    (:$(API_PORT))" || echo "api:   down"
 	@curl -s -o /dev/null http://localhost:$(EDGE_PORT)/ 2>/dev/null && echo "edge:  up    (:$(EDGE_PORT))" || echo "edge:  down"
-	@(podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' && echo "floci: up    (:$(FLOCI_PORT))") || echo "floci: down"
-	@(podman ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' && echo "pg:    up    (:$(PG_PORT))") || echo "pg:    down"
+	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' && echo "floci: up    (:$(FLOCI_PORT))") || echo "floci: down"
+	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' && echo "pg:    up    (:$(PG_PORT))") || echo "pg:    down"
+	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-k3s$$' && echo "k3s:   up    (:6443, engine: $(CE))") || echo "k3s:   down"
 
 logs:
 	@mkdir -p $(RUN); touch $(RUN)/api.log $(RUN)/edge.log; tail -f $(RUN)/api.log $(RUN)/edge.log
