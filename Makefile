@@ -22,6 +22,12 @@ ifeq ($(strip $(CE)),)
 CE := $(shell command -v podman >/dev/null 2>&1 && echo podman || (command -v docker >/dev/null 2>&1 && echo docker))
 endif
 
+# podman VM sizing. The compute plane (k3s + KEDA + scale-to-zero pods) needs headroom
+# or pods stay Pending (Insufficient memory). Used when `make setup` inits a NEW VM.
+VM_CPUS   ?= 6
+VM_MEMORY ?= 8192
+VM_DISK   ?= 100
+
 NODE_VERSION := $(shell cat .nvmrc 2>/dev/null)
 NODE_BIN     := $(HOME)/.nvm/versions/node/v$(NODE_VERSION)/bin
 NODE         := $(NODE_BIN)/node
@@ -96,7 +102,8 @@ setup:
 	@echo "✓ node $$($(NODE) -v)"
 	@echo "▸ installing dependencies…"; $(NPM) install >/dev/null 2>&1 && echo "✓ deps installed"
 	@if [ "$(CE)" = "podman" ]; then \
-	  podman machine inspect >/dev/null 2>&1 || { echo "▸ initializing podman VM (downloads an image, ~1-3 min)…"; podman machine init; }; \
+	  podman machine inspect >/dev/null 2>&1 || { echo "▸ initializing rootful podman VM ($(VM_CPUS) CPU / $(VM_MEMORY) MiB / $(VM_DISK) GiB; downloads an image, ~1-3 min)…"; podman machine init --rootful --cpus $(VM_CPUS) --memory $(VM_MEMORY) --disk-size $(VM_DISK); }; \
+	  if [ "$$(podman machine inspect --format '{{.Rootful}}' 2>/dev/null)" != "true" ]; then echo "▸ switching podman VM to rootful (required for the k3s compute plane)…"; podman machine stop >/dev/null 2>&1 || true; podman machine set --rootful >/dev/null 2>&1 || true; fi; \
 	  podman machine start >/dev/null 2>&1 || true; \
 	  if [ -n "$(CORP_CA)" ]; then \
 	    echo "▸ injecting corp CA $(CORP_CA) into the podman VM…"; \
@@ -197,7 +204,7 @@ status:
 	@curl -s -o /dev/null http://localhost:$(EDGE_PORT)/ 2>/dev/null && echo "edge:  up    (:$(EDGE_PORT))" || echo "edge:  down"
 	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' && echo "floci: up    (:$(FLOCI_PORT))") || echo "floci: down"
 	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' && echo "pg:    up    (:$(PG_PORT))") || echo "pg:    down"
-	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-k3s$$' && echo "k3s:   up    (:6443, engine: $(CE))") || echo "k3s:   down"
+	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^k3s$$' && echo "k3s:   up    (:6443, engine: $(CE))") || echo "k3s:   down"
 
 logs:
 	@mkdir -p $(RUN); touch $(RUN)/api.log $(RUN)/edge.log; tail -f $(RUN)/api.log $(RUN)/edge.log

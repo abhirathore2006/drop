@@ -6,7 +6,7 @@
 # left in place; it just stops resolving once the container is gone.
 set -uo pipefail
 
-K3S_NAME="${DROP_K3S_NAME:-drop-k3s}"
+K3S_NAME="${DROP_K3S_NAME:-k3s}"
 
 CE="${DROP_CONTAINER_ENGINE:-}"
 if [ -z "$CE" ]; then

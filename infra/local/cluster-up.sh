@@ -35,7 +35,9 @@ CNPG_VERSION="${DROP_CNPG_VERSION:-0.28.3}"
 ESO_VERSION="${DROP_ESO_VERSION:-2.6.0}"
 BARMAN_VERSION="${DROP_BARMAN_VERSION:-v0.13.0}"
 
-K3S_NAME="${DROP_K3S_NAME:-drop-k3s}"
+# Container name = the API's default DROP_K3S_CONTAINER ("k3s") so the local containerd image
+# backend (podman exec <name> ctr images import) finds it with no extra env.
+K3S_NAME="${DROP_K3S_NAME:-k3s}"
 KUBECONFIG_PATH="${DROP_KUBECONFIG:-$HOME/.kube/drop-k3s.yaml}"
 FLOCI_PORT="${FLOCI_PORT:-4566}"
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
@@ -58,6 +60,15 @@ command -v "$CE" >/dev/null 2>&1 || { echo "✗ DROP_CONTAINER_ENGINE='$CE' not 
 say "Container engine: $CE"
 if [ "$CE" = "podman" ]; then
   podman machine start >/dev/null 2>&1 || true
+  # k3s must run ROOTFUL. A rootless (userns) podman machine can't give kubelet /dev/kmsg or the
+  # cpuset cgroup, so k3s dies ("operation not permitted" / "failed to find cpuset cgroup"). Flip
+  # the machine to rootful if it isn't already (idempotent; needs a stop/start).
+  if [ "$(podman machine inspect --format '{{.Rootful}}' 2>/dev/null)" != "true" ]; then
+    echo "  switching the podman machine to rootful (required for k3s)…"
+    podman machine stop      >/dev/null 2>&1 || true
+    podman machine set --rootful >/dev/null 2>&1 || true
+    podman machine start     >/dev/null 2>&1 || true
+  fi
 else
   if ! "$CE" info >/dev/null 2>&1; then
     echo "✗ the '$CE' daemon is not reachable. Start Docker Desktop / Rancher Desktop (dockerd engine) / colima."
