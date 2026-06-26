@@ -30,6 +30,7 @@ import type { ImageStore } from "../images/types.ts";
 import { fingerprint, validateSecretKey } from "../secrets/secrets.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { dashboardHtml } from "./dashboard.ts";
+import type { AuditStore, AuditEntry } from "../audit/store.ts";
 
 export interface Deps {
   cfg: Config;
@@ -42,6 +43,7 @@ export interface Deps {
   secrets: SecretStore; // app-secrets backend (kube locally, AWS Secrets Manager / etc. in prod)
   images: ImageStore; // image-push backend (containerd-import locally, registry/ECR in prod)
   orgs: OrgStore; // organisations (resource grouping + org-level permissions)
+  audit: AuditStore; // append-only trail of mutating/admin actions
   now?: () => Date;
 }
 
@@ -150,6 +152,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return { org };
   };
   const isPlatformAdmin = async (email: string) => (await d.users.getUser(email))?.role === "admin";
+  // Append an audit event WITHOUT ever failing the action it records: a broken audit write must
+  // not 500 a delete/transfer/etc. Awaited (not fire-and-forget) so the trail is ordered + the
+  // record is durable before we respond — the only swallowed outcome is the write itself failing.
+  const audit = (e: AuditEntry) => d.audit.record(e).catch((err) => console.error(`audit ${e.action} (${e.target ?? "-"}):`, (err as Error).message));
   // Resolve a resource's owning org to a display shape ({slug,name,kind}) for the console/CLI, or null.
   const orgOf = async (orgId: string | null) => {
     if (!orgId) return null;
@@ -179,6 +185,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await ensureUser(email);
     if (await d.orgs.getOrgBySlug(body.slug!)) return c.json({ error: `org slug "${body.slug}" is taken` }, 409);
     const org = await d.orgs.createOrg(body.slug!, body.name ?? body.slug!, email);
+    await audit({ actor: email, action: "org.create", target: org.slug, targetType: "org", orgId: org.id, detail: { name: org.name } });
     return c.json({ slug: org.slug, name: org.name, kind: org.kind, role: "owner" });
   });
 
@@ -211,6 +218,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!body.email) return c.json({ error: "email required" }, 400);
     await ensureUser(body.email.toLowerCase());
     await d.orgs.addMember(r.org.id, body.email, role);
+    await audit({ actor: email, action: "org.member.add", target: r.org.slug, targetType: "org", orgId: r.org.id, detail: { member: body.email.toLowerCase(), role } });
     return c.json({ slug: r.org.slug, email: body.email.toLowerCase(), role });
   });
 
@@ -222,6 +230,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const target = decodeURIComponent(c.req.param("email")).toLowerCase();
     if (target === r.org.createdBy) return c.json({ error: "can't remove the org's founding owner" }, 409);
     await d.orgs.removeMember(r.org.id, target);
+    await audit({ actor: email, action: "org.member.remove", target: r.org.slug, targetType: "org", orgId: r.org.id, detail: { member: target } });
     return c.json({ removed: target });
   });
 
@@ -657,6 +666,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     } finally {
       rotatingPasswords.delete(name);
     }
+    // Rotation succeeded (the error/partial paths returned above). Never log the password itself.
+    await audit({ actor: email, action: "db.password.rotate", target: name, targetType: "database", orgId: site.orgId, detail: secretTarget ? { setSecret: { app: secretTarget.site.name, key: secretTarget.key } } : {} });
 
     // Store the new password directly as the app's secret (never printed unless --show).
     if (secretTarget) {
@@ -809,6 +820,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (vis === "password" && !body.password) return c.json({ error: "password required for password visibility" }, 400);
     const hash = vis === "password" ? hashPassword(body.password!) : null;
     await d.meta.setVisibility(name, vis, hash);
+    await audit({ actor: email, action: "site.visibility.set", target: name, targetType: site.type, orgId: site.orgId, detail: { visibility: vis } });
     return c.json({ name, visibility: vis });
   });
 
@@ -836,6 +848,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     } else if (site.type === "database" && d.kube) await d.kube.deleteDatabase(site.namespace, name);
     await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);
+    await audit({ actor: email, action: "site.delete", target: name, targetType: site.type, orgId: site.orgId, detail: { owner: site.owner } });
     return c.json({ deleted: name });
   });
 
@@ -906,6 +919,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     const ok = await d.users.setStatus(target, body.status);
     if (!ok) return c.json({ error: "no such user" }, 404);
+    await audit({ actor, action: "user.status.set", target, targetType: "user", detail: { status: body.status } });
     return c.json({ email: target, status: body.status });
   });
 
@@ -928,7 +942,20 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (target === actor) return c.json({ error: "cannot change your own role" }, 400); // no self-lockout
     if (!(await d.users.getUser(target))) return c.json({ error: "no such user" }, 404);
     await d.users.setRole(target, body.role);
+    await audit({ actor, action: "user.role.set", target, targetType: "user", detail: { role: body.role } });
     return c.json({ email: target, role: body.role });
+  });
+
+  // ---- admin: read the audit trail (keyset-paginated; platform admins only) ----
+  app.get("/v1/admin/audit", async (c) => {
+    const email = c.get("identity").email;
+    if (!(await isPlatformAdmin(email))) return c.json({ error: "admin only" }, 403);
+    const cursor = c.req.query("cursor") || undefined;
+    const limit = Math.min(Number(c.req.query("limit") ?? "100") || 100, 1000);
+    const actorQ = c.req.query("actor")?.toLowerCase() || undefined;
+    const target = c.req.query("target") || undefined;
+    const action = c.req.query("action") || undefined;
+    return c.json(await d.audit.list({ cursor, limit, actor: actorQ, target, action }));
   });
 
   // ---- collaborators ----
@@ -944,6 +971,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const role = body.role === "viewer" ? "viewer" : "editor";
     await ensureUser(target); // FK
     await d.meta.addMember(name, target, role);
+    await audit({ actor: email, action: "site.collaborator.add", target: name, targetType: site.type, orgId: site.orgId, detail: { member: target, role } });
     return c.json({ added: target, role });
   });
 
@@ -955,6 +983,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!can(await actorFor(email, site), "share")) return c.json({ error: "owner only" }, 403);
     await d.meta.removeMember(name, target);
+    await audit({ actor: email, action: "site.collaborator.remove", target: name, targetType: site.type, orgId: site.orgId, detail: { member: target } });
     return c.json({ removed: target });
   });
 
@@ -995,6 +1024,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         await d.meta.clearSecretKeys(name);
         secretsDropped = true;
       }
+      await audit({ actor: email, action: "site.transfer.org", target: name, targetType: site.type, orgId: org.id, detail: { fromOrg: site.orgId, toOrg: org.slug } });
       return c.json({
         name,
         org: org.slug,
@@ -1025,6 +1055,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       await d.secrets.destroy({ owner: oldOwner, app: name, namespace: site.namespace }).catch((e) => console.error(`transfer ${name}: secrets.destroy failed (orphaned secret material in ${oldOwner}'s namespace): ${(e as Error).message}`));
       await d.meta.clearSecretKeys(name); // the new owner re-sets secrets under their namespace
     }
+    await audit({ actor: email, action: "site.transfer.owner", target: name, targetType: site.type, orgId: newOwnerOrg.id, detail: { fromOwner: oldOwner, toOwner: newOwner } });
     return c.json({ owner: newOwner, secretsDropped: site.type === "app" });
   });
 

@@ -225,6 +225,19 @@ export function buildMcp(): McpServer {
     { description: "Grant/revoke the platform-admin role (role: admin|member). Platform admins only; you can't change your own role.", inputSchema: { email: z.string(), role: z.enum(["admin", "member"]) } },
     async ({ email, role }) => run(() => getClient().then((c) => c.adminSetRole(email, role))),
   );
+  server.registerTool(
+    "admin_audit",
+    {
+      description: "Read the append-only audit trail of mutating/admin actions (newest first). Platform admins only.",
+      inputSchema: {
+        actor: z.string().optional().describe("filter by who performed the action"),
+        target: z.string().optional().describe("filter by the resource/user acted upon"),
+        action: z.string().optional().describe("filter by action verb, e.g. site.delete"),
+        limit: z.number().optional(),
+      },
+    },
+    async ({ actor, target, action, limit }) => run(() => getClient().then((c) => c.adminAudit({ actor, target, action, limit }))),
+  );
 
   return server;
 }

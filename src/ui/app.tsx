@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { api, type AdminUser, type Detail, type ListItem, type Me, type WorkloadType } from "./api.ts";
+import { api, type AdminUser, type AuditRecord, type Detail, type ListItem, type Me, type WorkloadType } from "./api.ts";
 
 const TYPE_LABEL: Record<WorkloadType, string> = { site: "SITE", app: "APP", database: "DB" };
 
@@ -584,8 +584,82 @@ function AdminUsers({ me }: { me: Me }) {
   );
 }
 
+// Admin: read the append-only audit trail (newest first) with actor/action filters + paging.
+function AdminAudit() {
+  const [entries, setEntries] = useState<AuditRecord[]>([]);
+  const [next, setNext] = useState<string | undefined>(undefined);
+  const [actor, setActor] = useState("");
+  const [action, setAction] = useState("");
+  const [err, setErr] = useState("");
+  const load = useCallback(
+    async (cursor?: string) => {
+      setErr("");
+      const qs = new URLSearchParams();
+      if (actor) qs.set("actor", actor);
+      if (action) qs.set("action", action);
+      if (cursor) qs.set("cursor", cursor);
+      try {
+        const r = await api.adminAudit(qs.toString());
+        setEntries((prev) => (cursor ? [...prev, ...r.entries] : r.entries));
+        setNext(r.nextCursor);
+      } catch (e) {
+        setErr((e as Error).message);
+      }
+    },
+    [actor, action],
+  );
+  useEffect(() => {
+    void load();
+  }, [load]);
+  return (
+    <>
+      <div className="adminbar">
+        <input placeholder="actor email…" value={actor} onChange={(e) => setActor(e.target.value)} />
+        <input placeholder="action, e.g. site.delete" value={action} onChange={(e) => setAction(e.target.value)} />
+      </div>
+      {err && <div className="err">{err}</div>}
+      <table className="tbl">
+        <thead>
+          <tr>
+            <th>when</th>
+            <th>actor</th>
+            <th>action</th>
+            <th>target</th>
+            <th>detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((e) => (
+            <tr key={e.id}>
+              <td className="muted">{new Date(e.at).toISOString().replace("T", " ").slice(0, 19)}</td>
+              <td>{e.actor}</td>
+              <td>
+                <code>{e.action}</code>
+              </td>
+              <td>{e.target ?? "—"}</td>
+              <td className="muted">{e.detail ? JSON.stringify(e.detail) : "—"}</td>
+            </tr>
+          ))}
+          {!entries.length && (
+            <tr>
+              <td colSpan={5} className="muted">
+                no audit events
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+      {next && (
+        <button className="btn sm" onClick={() => load(next)}>
+          load more
+        </button>
+      )}
+    </>
+  );
+}
+
 function Admin({ me }: { me: Me }) {
-  const [view, setView] = useState<"tenants" | "users">("tenants");
+  const [view, setView] = useState<"tenants" | "users" | "audit">("tenants");
   const [items, setItems] = useState<ListItem[]>([]);
   const [type, setType] = useState("");
   const [owner, setOwner] = useState("");
@@ -623,9 +697,14 @@ function Admin({ me }: { me: Me }) {
         <button className={view === "users" ? "navlink on" : "navlink"} onClick={() => setView("users")}>
           users
         </button>
+        <button className={view === "audit" ? "navlink on" : "navlink"} onClick={() => setView("audit")}>
+          audit
+        </button>
       </div>
       {view === "users" ? (
         <AdminUsers me={me} />
+      ) : view === "audit" ? (
+        <AdminAudit />
       ) : (
       <>
       <div className="adminbar">

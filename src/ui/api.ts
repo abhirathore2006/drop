@@ -14,6 +14,17 @@ export interface AdminUser {
   status: "active" | "suspended";
 }
 
+export interface AuditRecord {
+  id: string;
+  at: string;
+  actor: string;
+  action: string;
+  target: string | null;
+  targetType: string | null;
+  orgId: string | null;
+  detail: Record<string, unknown> | null;
+}
+
 export interface Org {
   slug: string;
   name: string;
@@ -101,6 +112,7 @@ export const api = {
   adminUsers: () => req<{ users: AdminUser[] }>("GET", "/v1/admin/users"),
   setUserRole: (email: string, role: "admin" | "member") =>
     req("POST", `/v1/admin/users/${encodeURIComponent(email)}/role`, { role }),
+  adminAudit: (qs: string) => req<{ entries: AuditRecord[]; nextCursor?: string }>("GET", "/v1/admin/audit" + (qs ? `?${qs}` : "")),
   // app secrets (write-only) + lifecycle
   listSecrets: (name: string) => req<{ secrets: { key: string; fingerprint: string; updatedBy: string; updatedAt: string }[] }>("GET", `/v1/apps/${name}/secrets`),
   setSecret: (name: string, key: string, value: string) => req("PUT", `/v1/apps/${name}/secrets/${encodeURIComponent(key)}`, { value }),

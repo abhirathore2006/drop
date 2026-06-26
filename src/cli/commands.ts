@@ -331,6 +331,17 @@ export function buildProgram(): Command {
     .command("reactivate <email>")
     .description("Reactivate a suspended user")
     .action(async (email: string) => show(await (await client()).adminSetStatus(email, "active")));
+  admin
+    .command("audit")
+    .description("Read the append-only audit trail of mutating/admin actions (newest first)")
+    .option("--actor <email>", "filter by who performed the action")
+    .option("--target <name>", "filter by the resource/user acted upon")
+    .option("--action <verb>", "filter by action, e.g. site.delete")
+    .option("--limit <n>", "max rows (default 100)", (v) => Number(v))
+    .option("--cursor <id>", "keyset cursor from a previous page's nextCursor")
+    .action(async (opts: { actor?: string; target?: string; action?: string; limit?: number; cursor?: string }) =>
+      show(await (await client()).adminAudit(opts)),
+    );
 
   return program;
 }

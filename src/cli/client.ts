@@ -146,4 +146,10 @@ export class Client {
   adminSetStatus(email: string, status: string) {
     return this.req("POST", `/v1/admin/users/${encodeURIComponent(email)}/status`, { contentType: "application/json", body: JSON.stringify({ status }) });
   }
+  adminAudit(opts: { actor?: string; target?: string; action?: string; limit?: number; cursor?: string } = {}) {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(opts)) if (v != null && v !== "") q.set(k, String(v));
+    const qs = q.toString();
+    return this.req("GET", `/v1/admin/audit${qs ? `?${qs}` : ""}`);
+  }
 }

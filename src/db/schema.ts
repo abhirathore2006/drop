@@ -93,8 +93,22 @@ export interface AuthHandlesTable {
   created_at: Generated<Ts>;
 }
 
+/** Append-only audit trail of mutating/admin actions. id is a bigserial (returned as a
+ *  string by the pg driver) — monotonic, so it doubles as the keyset-pagination cursor. */
+export interface AuditLogTable {
+  id: Generated<string>;
+  at: Generated<Ts>;
+  actor: string; // who performed the action (lowercased email)
+  action: string; // e.g. "site.delete", "user.role.set", "db.password.rotate"
+  target: string | null; // the resource/user acted upon
+  target_type: string | null; // "site" | "app" | "database" | "user" | "org"
+  org_id: string | null; // owning org of the target resource, when applicable
+  detail: ColumnType<Record<string, unknown> | null, string | null, string | null>; // extra context (jsonb)
+}
+
 export interface Database {
   users: UsersTable;
+  audit_log: AuditLogTable;
   sites: SitesTable;
   site_members: SiteMembersTable;
   versions: VersionsTable;

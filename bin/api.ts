@@ -6,6 +6,7 @@ import { runMigrations } from "../src/db/migrate.ts";
 import { MetaStore } from "../src/metastore/store.ts";
 import { UserStore } from "../src/users/store.ts";
 import { OrgStore } from "../src/orgs/store.ts";
+import { AuditStore } from "../src/audit/store.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
 import { createApp } from "../src/api/server.ts";
@@ -81,7 +82,8 @@ const secrets = makeSecretStore(cfg, kubeApi);
 const images = makeImageStore(cfg, kube);
 if (kube) console.log(`drop-api secrets backend: ${cfg.secretBackend} · image backend: ${cfg.imageBackend}`);
 const orgs = new OrgStore(db);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs });
+const audit = new AuditStore(db);
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });

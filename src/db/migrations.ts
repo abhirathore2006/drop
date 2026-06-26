@@ -164,6 +164,30 @@ const m0004_organisations: Migration = {
   },
 };
 
+// Append-only audit trail for mutating/admin actions (delete/transfer/suspend/role/visibility/
+// db-password/share). bigserial id is monotonic → it's also the keyset-pagination cursor.
+const m0005_audit_log: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("audit_log")
+      .addColumn("id", "bigserial", (c) => c.primaryKey())
+      .addColumn("at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addColumn("actor", "text", (c) => c.notNull())
+      .addColumn("action", "text", (c) => c.notNull())
+      .addColumn("target", "text")
+      .addColumn("target_type", "text")
+      .addColumn("org_id", "text")
+      .addColumn("detail", "jsonb")
+      .execute();
+    // Common admin-console filters: by actor, by target. id DESC is the default browse order (PK index covers it).
+    await db.schema.createIndex("audit_log_actor_idx").on("audit_log").column("actor").execute();
+    await db.schema.createIndex("audit_log_target_idx").on("audit_log").column("target").execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -172,6 +196,7 @@ export class InlineMigrations implements MigrationProvider {
       "0002_workload_type": m0002_workload_type,
       "0003_app_secrets": m0003_app_secrets,
       "0004_organisations": m0004_organisations,
+      "0005_audit_log": m0005_audit_log,
     };
   }
 }
