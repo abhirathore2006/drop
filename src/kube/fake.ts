@@ -1,4 +1,4 @@
-import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus, type TenantUsage } from "./types.ts";
+import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus, type TenantUsage, type BackupInfo } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 
@@ -68,7 +68,27 @@ export class FakeKube implements KubeClient {
   async getDatabaseStatus(namespace: string, name: string): Promise<DatabaseStatus | null> {
     const k = this.key(namespace, name);
     if (this.statusOverride.has(k)) return this.statusOverride.get(k) as DatabaseStatus;
-    return this.dbs.has(k) ? { phase: "Cluster in healthy state", ready: 1, instances: 1 } : null;
+    return this.dbs.has(k) ? { phase: "Cluster in healthy state", ready: 1, instances: 1, hibernated: this.hibernated.has(k) } : null;
+  }
+
+  // CNPG backups + declarative hibernation doubles.
+  readonly backupsByDb = new Map<string, BackupInfo[]>(); // tests can preset a backup history
+  readonly backupTriggers: { namespace: string; name: string; backupName: string }[] = [];
+  readonly hibernated = new Set<string>();
+  async listDatabaseBackups(namespace: string, name: string): Promise<BackupInfo[]> {
+    return this.backupsByDb.get(this.key(namespace, name)) ?? [];
+  }
+  async triggerDatabaseBackup(namespace: string, name: string, backupName: string): Promise<void> {
+    if (!this.dbs.has(this.key(namespace, name))) throw new Error(`no such database: ${name}`);
+    this.backupTriggers.push({ namespace, name, backupName });
+  }
+  async hibernateDatabase(namespace: string, name: string): Promise<void> {
+    if (!this.dbs.has(this.key(namespace, name))) throw new Error(`no such database: ${name}`);
+    this.hibernated.add(this.key(namespace, name));
+  }
+  async wakeDatabase(namespace: string, name: string): Promise<void> {
+    if (!this.dbs.has(this.key(namespace, name))) throw new Error(`no such database: ${name}`);
+    this.hibernated.delete(this.key(namespace, name));
   }
 
   readonly logsByName = new Map<string, string>();

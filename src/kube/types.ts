@@ -36,6 +36,23 @@ export interface KubeClient {
   /** The tenant ResourceQuota's hard limits + current usage (drop-quota), or null if the namespace
    *  / quota isn't provisioned yet (e.g. a tenant with only static sites — no compute namespace). */
   getTenantUsage(namespace: string): Promise<TenantUsage | null>;
+  /** CNPG Backup objects for a managed database (newest first). Empty if none / cluster absent. */
+  listDatabaseBackups(namespace: string, name: string): Promise<BackupInfo[]>;
+  /** Trigger an on-demand CNPG Backup (creates a Backup object via the Barman Cloud Plugin). */
+  triggerDatabaseBackup(namespace: string, name: string, backupName: string): Promise<void>;
+  /** Declarative hibernation: scale the CNPG cluster to zero (cnpg.io/hibernation=on). */
+  hibernateDatabase(namespace: string, name: string): Promise<void>;
+  /** Wake a hibernated CNPG cluster (cnpg.io/hibernation=off). */
+  wakeDatabase(namespace: string, name: string): Promise<void>;
+}
+
+export interface BackupInfo {
+  name: string;
+  phase: string; // CNPG .status.phase: "completed" | "running" | "failed" | "started" | ...
+  method: string | null; // "plugin" | "barmanObjectStore" | ...
+  startedAt: string | null;
+  stoppedAt: string | null;
+  error: string | null;
 }
 
 export interface TenantUsage {
@@ -60,4 +77,5 @@ export interface DatabaseStatus {
   phase: string; // CNPG .status.phase, e.g. "Cluster in healthy state"
   ready: number; // ready instances
   instances: number; // desired instances
+  hibernated: boolean; // cnpg.io/hibernation=on (manually hibernated → scaled to zero)
 }

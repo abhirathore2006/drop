@@ -118,6 +118,27 @@ export function buildMcp(): McpServer {
   );
 
   server.registerTool(
+    "db_backups",
+    { description: "List a managed database's backups + the last successful one.", inputSchema: { name: z.string() } },
+    async ({ name }) => run(() => getClient().then((c) => c.dbBackups(name))),
+  );
+  server.registerTool(
+    "db_backup",
+    { description: "Trigger an on-demand backup of a managed database now (editor+).", inputSchema: { name: z.string() } },
+    async ({ name }) => run(() => getClient().then((c) => c.dbBackup(name))),
+  );
+  server.registerTool(
+    "db_hibernate",
+    { description: "Hibernate a managed database (scale to zero; editor+).", inputSchema: { name: z.string() } },
+    async ({ name }) => run(() => getClient().then((c) => c.dbHibernate(name))),
+  );
+  server.registerTool(
+    "db_wake",
+    { description: "Wake a hibernated managed database.", inputSchema: { name: z.string() } },
+    async ({ name }) => run(() => getClient().then((c) => c.dbWake(name))),
+  );
+
+  server.registerTool(
     "list_sites",
     { description: "List sites you own or collaborate on.", inputSchema: {} },
     async () => run(() => getClient().then((c) => c.list())),

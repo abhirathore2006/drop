@@ -1106,3 +1106,47 @@ test("cap: DROP_MAX_WORKLOADS_PER_ORG blocks claiming beyond the limit (429); re
   expect((await call(app, "POST", "/v1/apps/a1", "alice", { image: "x:2" })).status).toBe(200);
   await db.destroy();
 });
+
+// ---- Feature 3: backups + hibernate/wake ----
+test("db backups: trigger creates a Backup; list surfaces last success; audited", async () => {
+  const { app, kube, db } = await mk({ admins: ["alice@example.com"] });
+  await call(app, "POST", "/v1/databases/pg1", "alice", {});
+  const ns = kube.dbApplies[0]!.namespace;
+  // preset a completed backup so list reports lastSuccessAt
+  kube.backupsByDb.set(`${ns}/pg1`, [{ name: "pg1-daily-1", phase: "completed", method: "plugin", startedAt: "2026-06-01T02:00:00Z", stoppedAt: "2026-06-01T02:01:00Z", error: null }]);
+  const list = await (await call(app, "GET", "/v1/databases/pg1/backups", "alice")).json();
+  expect(list.backups.length).toBe(1);
+  expect(list.lastSuccessAt).toBe("2026-06-01T02:01:00Z");
+  // trigger on-demand
+  const t = await (await call(app, "POST", "/v1/databases/pg1/backups", "alice")).json();
+  expect(t.started).toBe(true);
+  expect(kube.backupTriggers[0]!.name).toBe("pg1");
+  expect(kube.backupTriggers[0]!.backupName).toMatch(/^pg1-ob-[a-z0-9]+$/); // DNS-safe
+  // audited
+  const trail = await (await call(app, "GET", "/v1/admin/audit?action=db.backup.trigger", "alice")).json();
+  expect(trail.entries.length).toBe(1);
+  await db.destroy();
+});
+
+test("db hibernate/wake toggles cluster state + is gated at editor+", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/databases/pg1", "alice", {});
+  const ns = kube.dbApplies[0]!.namespace;
+  expect((await call(app, "POST", "/v1/databases/pg1/hibernate", "alice")).status).toBe(200);
+  expect(kube.hibernated.has(`${ns}/pg1`)).toBe(true);
+  // a viewer collaborator cannot hibernate
+  await call(app, "POST", "/v1/sites/pg1/collaborators", "alice", { email: "bob@example.com", role: "viewer" });
+  expect((await call(app, "POST", "/v1/databases/pg1/wake", "bob")).status).toBe(403);
+  // owner wakes
+  expect((await call(app, "POST", "/v1/databases/pg1/wake", "alice")).status).toBe(200);
+  expect(kube.hibernated.has(`${ns}/pg1`)).toBe(false);
+  await db.destroy();
+});
+
+test("db backups: not-a-database is 409, unknown is 404", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/anapp", "alice", { image: "x:1" });
+  expect((await call(app, "GET", "/v1/databases/anapp/backups", "alice")).status).toBe(409);
+  expect((await call(app, "GET", "/v1/databases/ghost/backups", "alice")).status).toBe(404);
+  await db.destroy();
+});

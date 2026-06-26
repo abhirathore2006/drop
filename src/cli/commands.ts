@@ -234,6 +234,32 @@ export function buildProgram(): Command {
       if (res.warning) console.error(`  ⚠ ${res.warning}`);
     });
 
+  db
+    .command("backups <name>")
+    .description("List a managed database's backups + the last successful one")
+    .action(async (name: string) => show(await (await client()).dbBackups(name)));
+  db
+    .command("backup <name>")
+    .description("Trigger an on-demand backup now (editor+)")
+    .action(async (name: string) => {
+      const res = await (await client()).dbBackup(name);
+      console.log(`  ✓ backup ${res.backup} started for ${res.name}`);
+    });
+  db
+    .command("hibernate <name>")
+    .description("Hibernate a managed database (scale to zero; editor+)")
+    .action(async (name: string) => {
+      await (await client()).dbHibernate(name);
+      console.log(`  ✓ ${name} hibernated — wake it with: drop db wake ${name}`);
+    });
+  db
+    .command("wake <name>")
+    .description("Wake a hibernated database")
+    .action(async (name: string) => {
+      await (await client()).dbWake(name);
+      console.log(`  ✓ ${name} waking`);
+    });
+
   const org = program.command("org").description("Manage organisations (group resources + org-level permissions)");
   org
     .command("create <slug> [name]")

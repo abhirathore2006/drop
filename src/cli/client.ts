@@ -88,6 +88,19 @@ export class Client {
       body: JSON.stringify({ ...(password ? { password } : {}), ...(setSecret ? { setSecret } : {}), ...(show ? { show: true } : {}) }),
     });
   }
+  // managed-database backups + hibernation
+  dbBackups(name: string) {
+    return this.req("GET", `/v1/databases/${name}/backups`);
+  }
+  dbBackup(name: string) {
+    return this.req("POST", `/v1/databases/${name}/backups`);
+  }
+  dbHibernate(name: string) {
+    return this.req("POST", `/v1/databases/${name}/hibernate`);
+  }
+  dbWake(name: string) {
+    return this.req("POST", `/v1/databases/${name}/wake`);
+  }
   setSecret(app: string, key: string, value: string) {
     return this.req("PUT", `/v1/apps/${app}/secrets/${encodeURIComponent(key)}`, {
       contentType: "application/json",

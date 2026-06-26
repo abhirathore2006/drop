@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { api, type AdminUser, type AuditRecord, type Detail, type ListItem, type Me, type OrgUsage, type WorkloadType } from "./api.ts";
+import { api, type AdminUser, type AuditRecord, type BackupInfo, type Detail, type ListItem, type Me, type OrgUsage, type WorkloadType } from "./api.ts";
 
 const TYPE_LABEL: Record<WorkloadType, string> = { site: "SITE", app: "APP", database: "DB" };
 
@@ -179,6 +179,62 @@ function Secrets({ name, canManage, onChanged }: { name: string; canManage: bool
   );
 }
 
+// Managed-database backups: last-success + history, plus an on-demand "back up now" (editor+).
+function DbBackups({ name, canManage }: { name: string; canManage: boolean }) {
+  const [data, setData] = useState<{ backups: BackupInfo[]; lastSuccessAt: string | null } | null>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    try {
+      setData(await api.dbBackups(name));
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, [name]);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const fmt = (s: string | null) => (s ? new Date(s).toISOString().replace("T", " ").slice(0, 19) : "—");
+  const trigger = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await api.triggerDbBackup(name);
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="sec">
+      <div className="sec-h">
+        <h3>backups ({data?.backups.length ?? 0})</h3>
+        {canManage && (
+          <button className="btn sm" disabled={busy} onClick={trigger}>
+            {busy ? "…" : "back up now"}
+          </button>
+        )}
+      </div>
+      {err && <div className="err">{err}</div>}
+      <Field label="last success">{fmt(data?.lastSuccessAt ?? null)}</Field>
+      {data?.backups.map((b) => (
+        <div className="item" key={b.name}>
+          <div className="meta">
+            <b>{b.name}</b>
+            <div className="sub">
+              <StatusPill reason={b.phase} /> {fmt(b.startedAt)}
+              {b.error ? ` · ${b.error}` : ""}
+            </div>
+          </div>
+        </div>
+      ))}
+      {data && !data.backups.length && <p className="muted">no backups yet — runs daily + on-demand</p>}
+    </div>
+  );
+}
+
 function WorkloadPage({ name, me }: { name: string; me: Me }) {
   const onClose = () => navigate("/"); // delete/transfer → back to the list
   const onChanged = () => {}; // full-page: the list refetches on return; sections self-refresh
@@ -311,12 +367,26 @@ function WorkloadPage({ name, me }: { name: string; me: Me }) {
                 <Field label="status">
                   {d.database.status ? (
                     <>
-                      <StatusPill reason={d.database.status.phase} /> &nbsp;{d.database.status.ready}/{d.database.status.instances}
+                      <StatusPill reason={d.database.status.hibernated ? "hibernated" : d.database.status.phase} /> &nbsp;
+                      {d.database.status.ready}/{d.database.status.instances}
                     </>
                   ) : (
                     "—"
                   )}
                 </Field>
+                {canDeploy && (
+                  <Field label="lifecycle">
+                    {d.database.status?.hibernated ? (
+                      <button className="btn sm" disabled={busy} onClick={() => act(() => api.wakeDb(d.name))}>
+                        wake
+                      </button>
+                    ) : (
+                      <button className="btn sm danger" disabled={busy} onClick={() => act(() => api.hibernateDb(d.name))}>
+                        hibernate
+                      </button>
+                    )}
+                  </Field>
+                )}
                 <Field label="host">
                   <code>
                     {d.database.host}:{d.database.port}
@@ -346,6 +416,7 @@ function WorkloadPage({ name, me }: { name: string; me: Me }) {
                 )}
               </div>
             )}
+            {d.type === "database" && d.database && <DbBackups name={d.name} canManage={canDeploy} />}
 
             {/* SITE: versions + rollback */}
             {d.type === "site" && (

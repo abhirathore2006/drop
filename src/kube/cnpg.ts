@@ -190,6 +190,26 @@ export function databaseManifests(db: DatabaseConfig, ctx: DatabaseManifestConte
   return out;
 }
 
+/** An on-demand CNPG Backup object, run through the Barman Cloud Plugin (NOT the deprecated
+ *  in-tree barmanObjectStore — method:plugin is required, matching the ScheduledBackup). The
+ *  caller mints a unique, DNS-safe `name`. `storeName` is the cluster's ObjectStore (`<cluster>-store`). */
+export function databaseBackupManifest(ctx: { name: string; cluster: string; namespace: string; storeName: string }): Record<string, unknown> {
+  return {
+    apiVersion: "postgresql.cnpg.io/v1",
+    kind: "Backup",
+    metadata: {
+      name: ctx.name,
+      namespace: ctx.namespace,
+      labels: { "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.cluster, "cnpg.io/cluster": ctx.cluster },
+    },
+    spec: {
+      cluster: { name: ctx.cluster },
+      method: "plugin", // MUST be explicit — the default is the deprecated barmanObjectStore path
+      pluginConfiguration: { name: PLUGIN_NAME, parameters: { barmanObjectName: ctx.storeName } },
+    },
+  };
+}
+
 export interface PasswordJobContext {
   name: string; // the CNPG Cluster name (rw service = `<name>-rw`, creds Secret = `<name>-app`)
   namespace: string;

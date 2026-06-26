@@ -59,6 +59,15 @@ export interface DatabaseStatus {
   phase: string;
   ready: number;
   instances: number;
+  hibernated: boolean;
+}
+export interface BackupInfo {
+  name: string;
+  phase: string;
+  method: string | null;
+  startedAt: string | null;
+  stoppedAt: string | null;
+  error: string | null;
 }
 export interface Version {
   id: string;
@@ -109,6 +118,10 @@ export const api = {
   setVisibility: (name: string, visibility: string, password?: string) =>
     req("POST", `/v1/sites/${name}/visibility`, { visibility, password }),
   setDbPassword: (name: string) => req<{ name: string; user: string; password: string; warning?: string }>("POST", `/v1/databases/${name}/password`, {}),
+  dbBackups: (name: string) => req<{ backups: BackupInfo[]; lastSuccessAt: string | null }>("GET", `/v1/databases/${name}/backups`),
+  triggerDbBackup: (name: string) => req<{ backup: string }>("POST", `/v1/databases/${name}/backups`, {}),
+  hibernateDb: (name: string) => req("POST", `/v1/databases/${name}/hibernate`, {}),
+  wakeDb: (name: string) => req("POST", `/v1/databases/${name}/wake`, {}),
   addCollaborator: (name: string, email: string) => req("POST", `/v1/sites/${name}/collaborators`, { email }),
   removeCollaborator: (name: string, email: string) =>
     req("DELETE", `/v1/sites/${name}/collaborators/${encodeURIComponent(email)}`),

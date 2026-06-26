@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Readable, Transform } from "node:stream";
+import { randomBytes } from "node:crypto";
 import * as streamConsumers from "node:stream/consumers";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -726,6 +727,64 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     return c.json({ name, user: "app", password }); // returned ONCE — store it now
   });
+
+  // ---- managed-database backups + hibernation (Future.md #3; restore deferred to db:migrate) ----
+  // Resolve a database workload + authorize the caller for `action` (compute must be enabled).
+  const resolveDb = async (c: any, action: Action): Promise<{ site: Site; email: string } | { err: Response }> => {
+    if (!d.kube) return { err: c.json({ error: "compute is not enabled on this instance" }, 501) };
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return { err: c.json({ error: "no such database" }, 404) };
+    if (site.type !== "database") return { err: c.json({ error: `name "${name}" is a ${site.type}, not a database` }, 409) };
+    if (!can(await actorFor(email, site), action)) return { err: c.json({ error: "not permitted" }, 403) };
+    return { site, email };
+  };
+
+  // List backups + the last successful one (read access — backup metadata carries no data).
+  app.get("/v1/databases/:name/backups", async (c) => {
+    const r = await resolveDb(c, "read");
+    if ("err" in r) return r.err;
+    let backups: Awaited<ReturnType<KubeClient["listDatabaseBackups"]>> = [];
+    try {
+      backups = await d.kube!.listDatabaseBackups(r.site.namespace, r.site.name);
+    } catch {
+      /* best-effort — never fail the call on a transient cluster error */
+    }
+    const lastSuccess = backups.find((b) => b.phase === "completed");
+    return c.json({ backups, lastSuccessAt: lastSuccess?.stoppedAt ?? lastSuccess?.startedAt ?? null });
+  });
+
+  // Trigger an on-demand backup (editor+; operational, like deploy). Returns the Backup object name.
+  app.post("/v1/databases/:name/backups", async (c) => {
+    const r = await resolveDb(c, "db:create");
+    if ("err" in r) return r.err;
+    // DNS-1123-safe unique name: <db>-ob-<base36 ms><4 hex>. base36(time) + hex random are both lowercase alnum.
+    const backupName = `${r.site.name}-ob-${now().getTime().toString(36)}${randomBytes(2).toString("hex")}`;
+    try {
+      await d.kube!.triggerDatabaseBackup(r.site.namespace, r.site.name, backupName);
+    } catch (e) {
+      return c.json({ error: `backup failed to start: ${(e as Error).message}` }, 502);
+    }
+    await audit({ actor: r.email, action: "db.backup.trigger", target: r.site.name, targetType: "database", orgId: r.site.orgId, detail: { backup: backupName } });
+    return c.json({ name: r.site.name, backup: backupName, started: true });
+  });
+
+  // Hibernate / wake (editor+; the DB analog of app stop/start — scales the cluster to/from zero).
+  const dbHibernation = (action: "hibernate" | "wake") => async (c: any) => {
+    const r = await resolveDb(c, "db:create");
+    if ("err" in r) return r.err;
+    try {
+      if (action === "hibernate") await d.kube!.hibernateDatabase(r.site.namespace, r.site.name);
+      else await d.kube!.wakeDatabase(r.site.namespace, r.site.name);
+    } catch (e) {
+      return c.json({ error: `${action} failed: ${(e as Error).message}` }, 502);
+    }
+    await audit({ actor: r.email, action: `db.${action}`, target: r.site.name, targetType: "database", orgId: r.site.orgId });
+    return c.json({ name: r.site.name, hibernated: action === "hibernate" });
+  };
+  app.post("/v1/databases/:name/hibernate", dbHibernation("hibernate"));
+  app.post("/v1/databases/:name/wake", dbHibernation("wake"));
 
   // ---- rollback ----
   app.post("/v1/sites/:name/rollback", async (c) => {

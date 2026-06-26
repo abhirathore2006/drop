@@ -6,9 +6,9 @@
 import { request } from "node:https";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus, type TenantUsage } from "./types.ts";
+import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus, type TenantUsage, type BackupInfo } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
-import { databasePasswordJob, DEFAULT_OPERAND_IMAGE, PWSET_SECRET, type DatabaseManifests } from "./cnpg.ts";
+import { databaseBackupManifest, databasePasswordJob, DEFAULT_OPERAND_IMAGE, PWSET_SECRET, type DatabaseManifests } from "./cnpg.ts";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -115,6 +115,7 @@ export class KubeApiClient implements KubeClient {
   private objectStorePath = (ns: string, n: string) => `/apis/barmancloud.cnpg.io/v1/namespaces/${ns}/objectstores/${n}`;
   private clusterPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/clusters/${n}`;
   private scheduledBackupPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/scheduledbackups/${n}`;
+  private backupPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/backups/${n}`;
   private jobPath = (ns: string, n: string) => `/apis/batch/v1/namespaces/${ns}/jobs/${n}`;
   private scaledObjectPath = (ns: string, n: string) => `/apis/keda.sh/v1alpha1/namespaces/${ns}/scaledobjects/${n}`;
   private objName = (o: Record<string, unknown>) => (o.metadata as { name: string }).name;
@@ -440,8 +441,51 @@ export class KubeApiClient implements KubeClient {
     const r = await this.call("GET", this.clusterPath(namespace, name));
     if (r.status === 404) return null;
     if (r.status >= 300) throw new Error(`getDatabaseStatus ${name} -> ${r.status}`);
-    const o = JSON.parse(r.body) as { status?: { phase?: string; readyInstances?: number }; spec?: { instances?: number } };
-    return { phase: o.status?.phase ?? "unknown", ready: o.status?.readyInstances ?? 0, instances: o.spec?.instances ?? 0 };
+    const o = JSON.parse(r.body) as { metadata?: { annotations?: Record<string, string> }; status?: { phase?: string; readyInstances?: number }; spec?: { instances?: number } };
+    const hibernated = o.metadata?.annotations?.["cnpg.io/hibernation"] === "on";
+    return { phase: o.status?.phase ?? "unknown", ready: o.status?.readyInstances ?? 0, instances: o.spec?.instances ?? 0, hibernated };
+  }
+
+  async listDatabaseBackups(namespace: string, name: string): Promise<BackupInfo[]> {
+    const sel = encodeURIComponent(`cnpg.io/cluster=${name}`);
+    const r = await this.call("GET", `/apis/postgresql.cnpg.io/v1/namespaces/${namespace}/backups?labelSelector=${sel}`);
+    if (r.status === 404) return [];
+    if (r.status >= 300) throw new Error(`listDatabaseBackups ${name} -> ${r.status}`);
+    const items = (JSON.parse(r.body).items ?? []) as any[];
+    return items
+      .map((b) => ({
+        name: b.metadata?.name as string,
+        phase: (b.status?.phase as string) ?? "unknown",
+        method: (b.spec?.method as string) ?? null,
+        startedAt: (b.status?.startedAt as string) ?? null,
+        stoppedAt: (b.status?.stoppedAt as string) ?? null,
+        error: (b.status?.error as string) ?? null,
+        _ord: (b.status?.startedAt as string) ?? (b.metadata?.creationTimestamp as string) ?? "",
+      }))
+      .sort((a, b) => (a._ord < b._ord ? 1 : -1)) // newest first
+      .map(({ _ord, ...rest }) => rest);
+  }
+
+  async triggerDatabaseBackup(namespace: string, name: string, backupName: string): Promise<void> {
+    const cr = await this.call("GET", this.clusterPath(namespace, name));
+    if (cr.status === 404) throw new Error(`no such database: ${name}`);
+    if (cr.status >= 300) throw new Error(`triggerDatabaseBackup ${name}: cluster read -> ${cr.status}`);
+    await this.apply(this.backupPath(namespace, backupName), databaseBackupManifest({ name: backupName, cluster: name, namespace, storeName: `${name}-store` }));
+  }
+
+  async hibernateDatabase(namespace: string, name: string): Promise<void> {
+    await this.setHibernation(namespace, name, "on");
+  }
+  async wakeDatabase(namespace: string, name: string): Promise<void> {
+    await this.setHibernation(namespace, name, "off");
+  }
+  private async setHibernation(namespace: string, name: string, value: "on" | "off"): Promise<void> {
+    const r = await this.call("PATCH", this.clusterPath(namespace, name), {
+      body: JSON.stringify({ metadata: { annotations: { "cnpg.io/hibernation": value } } }),
+      contentType: "application/merge-patch+json",
+    });
+    if (r.status === 404) throw new Error(`no such database: ${name}`);
+    if (r.status >= 300) throw new Error(`hibernation ${value} ${name} -> ${r.status}: ${r.body.slice(0, 200)}`);
   }
 
   async getApp(namespace: string, name: string): Promise<AppManifests | null> {
