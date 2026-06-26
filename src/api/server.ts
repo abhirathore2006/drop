@@ -909,6 +909,28 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return c.json({ email: target, status: body.status });
   });
 
+  // ---- admin: list users (platform role + status; platform admins only) ----
+  app.get("/v1/admin/users", async (c) => {
+    const email = c.get("identity").email;
+    if (!(await isPlatformAdmin(email))) return c.json({ error: "admin only" }, 403);
+    return c.json({ users: await d.users.listUsers() });
+  });
+
+  // ---- admin: grant/revoke the platform-admin role (platform admins only) ----
+  // Replaces editing DROP_ADMINS + rebooting. You can't change your OWN role (no self-lockout) —
+  // and because of that, demoting others can never remove the last admin (the acting admin remains).
+  app.post("/v1/admin/users/:email/role", async (c) => {
+    const actor = c.get("identity").email;
+    if (!(await isPlatformAdmin(actor))) return c.json({ error: "admin only" }, 403);
+    const target = decodeURIComponent(c.req.param("email")).toLowerCase();
+    const body = (await c.req.json().catch(() => ({}))) as { role?: string };
+    if (body.role !== "admin" && body.role !== "member") return c.json({ error: "role must be admin|member" }, 400);
+    if (target === actor) return c.json({ error: "cannot change your own role" }, 400); // no self-lockout
+    if (!(await d.users.getUser(target))) return c.json({ error: "no such user" }, 404);
+    await d.users.setRole(target, body.role);
+    return c.json({ email: target, role: body.role });
+  });
+
   // ---- collaborators ----
   app.post("/v1/sites/:name/collaborators", async (c) => {
     const email = c.get("identity").email;

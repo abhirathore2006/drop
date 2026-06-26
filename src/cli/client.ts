@@ -136,4 +136,14 @@ export class Client {
       body: JSON.stringify(target),
     });
   }
+  // platform admin: users + roles + status
+  adminListUsers() {
+    return this.req("GET", `/v1/admin/users`);
+  }
+  adminSetRole(email: string, role: string) {
+    return this.req("POST", `/v1/admin/users/${encodeURIComponent(email)}/role`, { contentType: "application/json", body: JSON.stringify({ role }) });
+  }
+  adminSetStatus(email: string, status: string) {
+    return this.req("POST", `/v1/admin/users/${encodeURIComponent(email)}/status`, { contentType: "application/json", body: JSON.stringify({ status }) });
+  }
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { api, type Detail, type ListItem, type Me, type WorkloadType } from "./api.ts";
+import { api, type AdminUser, type Detail, type ListItem, type Me, type WorkloadType } from "./api.ts";
 
 const TYPE_LABEL: Record<WorkloadType, string> = { site: "SITE", app: "APP", database: "DB" };
 
@@ -498,7 +498,94 @@ function WorkloadGrid({ items }: { items: ListItem[] }) {
   );
 }
 
+// Admin: manage every platform user — toggle the platform-admin role + suspend/reactivate.
+// Self-actions are hidden (no self-lockout / no self-demotion, enforced server-side too).
+function AdminUsers({ me }: { me: Me }) {
+  const [users, setUsers] = useState<AdminUser[] | null>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    setErr("");
+    try {
+      setUsers((await api.adminUsers()).users);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setErr("");
+    try {
+      await fn();
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      {err && <div className="err">{err}</div>}
+      <table className="tbl">
+        <thead>
+          <tr>
+            <th>email</th>
+            <th>role</th>
+            <th>status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {users?.map((u) => (
+            <tr key={u.email}>
+              <td>{u.email}</td>
+              <td>{u.role === "admin" ? <span className="pill pill-ok">admin</span> : <span className="muted">member</span>}</td>
+              <td>{u.status === "suspended" ? <span className="pill pill-danger">suspended</span> : <span className="muted">active</span>}</td>
+              <td className="right">
+                {u.email !== me.email && (
+                  <>
+                    {u.role === "admin" ? (
+                      <button className="btn sm" disabled={busy} onClick={() => act(() => api.setUserRole(u.email, "member"))}>
+                        revoke admin
+                      </button>
+                    ) : (
+                      <button className="btn sm" disabled={busy} onClick={() => act(() => api.setUserRole(u.email, "admin"))}>
+                        make admin
+                      </button>
+                    )}{" "}
+                    {u.status === "suspended" ? (
+                      <button className="btn sm" disabled={busy} onClick={() => act(() => api.setUserStatus(u.email, "active"))}>
+                        reactivate
+                      </button>
+                    ) : (
+                      <button className="btn sm danger" disabled={busy} onClick={() => act(() => api.setUserStatus(u.email, "suspended"))}>
+                        suspend
+                      </button>
+                    )}
+                  </>
+                )}
+              </td>
+            </tr>
+          ))}
+          {users && !users.length && (
+            <tr>
+              <td colSpan={4} className="muted">
+                no users
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
 function Admin({ me }: { me: Me }) {
+  const [view, setView] = useState<"tenants" | "users">("tenants");
   const [items, setItems] = useState<ListItem[]>([]);
   const [type, setType] = useState("");
   const [owner, setOwner] = useState("");
@@ -529,6 +616,18 @@ function Admin({ me }: { me: Me }) {
 
   return (
     <section>
+      <div className="adminbar">
+        <button className={view === "tenants" ? "navlink on" : "navlink"} onClick={() => setView("tenants")}>
+          tenants
+        </button>
+        <button className={view === "users" ? "navlink on" : "navlink"} onClick={() => setView("users")}>
+          users
+        </button>
+      </div>
+      {view === "users" ? (
+        <AdminUsers me={me} />
+      ) : (
+      <>
       <div className="adminbar">
         <h2>All tenants</h2>
         <select value={type} onChange={(e) => setType(e.target.value)}>
@@ -584,6 +683,8 @@ function Admin({ me }: { me: Me }) {
           )}
         </tbody>
       </table>
+      </>
+      )}
     </section>
   );
 }

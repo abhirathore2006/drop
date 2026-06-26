@@ -311,5 +311,26 @@ export function buildProgram(): Command {
       show(await (await client()).transfer(name, email ? { email } : { toOrg: opts.org }));
     });
 
+  const admin = program.command("admin").description("Platform-admin operations (admins only): manage users + roles");
+  admin
+    .command("users")
+    .description("List all users with their platform role + status")
+    .action(async () => show(await (await client()).adminListUsers()));
+  admin
+    .command("set-role <email> <role>")
+    .description("Grant/revoke the platform-admin role (role: admin|member) — no reboot, replaces editing DROP_ADMINS")
+    .action(async (email: string, role: string) => {
+      if (role !== "admin" && role !== "member") throw new Error("role must be admin|member");
+      show(await (await client()).adminSetRole(email, role));
+    });
+  admin
+    .command("suspend <email>")
+    .description("Suspend a user (denies all access)")
+    .action(async (email: string) => show(await (await client()).adminSetStatus(email, "suspended")));
+  admin
+    .command("reactivate <email>")
+    .description("Reactivate a suspended user")
+    .action(async (email: string) => show(await (await client()).adminSetStatus(email, "active")));
+
   return program;
 }

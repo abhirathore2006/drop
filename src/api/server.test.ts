@@ -836,7 +836,7 @@ test("/version is public and reports the served CLI version", async () => {
   const { app, db } = await mk();
   const res = await app.request("/version"); // no auth header — public, so `drop update` can read it
   expect(res.status).toBe(200);
-  expect((await res.json()).version).toBe("dev"); // unbundled (test) build → "dev"
+  expect(((await res.json()) as { version: string }).version).toBe("dev"); // unbundled (test) build → "dev"
   await db.destroy();
 });
 
@@ -972,5 +972,40 @@ test("deploy: tenant egress except is sourced from config (DROP_BLOCKED_EGRESS_C
   const np = kube.tenantApplies[0]!.manifests.networkPolicy as any;
   const https = np.spec.egress.find((e: any) => (e.ports ?? []).some((p: any) => p.port === 443));
   expect(https.to[0].ipBlock.except).toEqual(["169.254.169.254/32", "100.64.0.0/10", "172.16.0.0/12"]);
+  await db.destroy();
+});
+
+// ---- Feature 6: runtime user/role management ----
+test("admin: list users + grant/revoke platform-admin role", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  // bob registers (first /v1 touch provisions the user)
+  await call(app, "GET", "/v1/me", "bob");
+  // non-admin can't list users
+  expect((await call(app, "GET", "/v1/admin/users", "bob")).status).toBe(403);
+  // admin lists users → alice (admin) + bob (member) present
+  const list = await (await call(app, "GET", "/v1/admin/users", "alice")).json();
+  const roles = Object.fromEntries(list.users.map((u: any) => [u.email, u.role]));
+  expect(roles["alice@example.com"]).toBe("admin");
+  expect(roles["bob@example.com"]).toBe("member");
+  // alice promotes bob → admin; now bob can list users
+  expect((await call(app, "POST", "/v1/admin/users/bob@example.com/role", "alice", { role: "admin" })).status).toBe(200);
+  expect((await call(app, "GET", "/v1/admin/users", "bob")).status).toBe(200);
+  // alice demotes bob → member; bob loses admin
+  expect((await call(app, "POST", "/v1/admin/users/bob@example.com/role", "alice", { role: "member" })).status).toBe(200);
+  expect((await call(app, "GET", "/v1/admin/users", "bob")).status).toBe(403);
+  await db.destroy();
+});
+
+test("admin role: guards (own role, bad role, unknown user, non-admin)", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await call(app, "GET", "/v1/me", "bob");
+  // can't change your own role (no self-lockout)
+  expect((await call(app, "POST", "/v1/admin/users/alice@example.com/role", "alice", { role: "member" })).status).toBe(400);
+  // bad role value
+  expect((await call(app, "POST", "/v1/admin/users/bob@example.com/role", "alice", { role: "superuser" })).status).toBe(400);
+  // unknown user
+  expect((await call(app, "POST", "/v1/admin/users/nobody@example.com/role", "alice", { role: "admin" })).status).toBe(404);
+  // non-admin can't set roles
+  expect((await call(app, "POST", "/v1/admin/users/alice@example.com/role", "bob", { role: "member" })).status).toBe(403);
   await db.destroy();
 });

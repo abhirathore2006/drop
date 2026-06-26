@@ -159,7 +159,7 @@ export function buildMcp(): McpServer {
   server.registerTool(
     "transfer_site",
     { description: "Transfer ownership to another user (owner only).", inputSchema: { name: z.string(), email: z.string() } },
-    async ({ name, email }) => run(() => getClient().then((c) => c.transfer(name, email))),
+    async ({ name, email }) => run(() => getClient().then((c) => c.transfer(name, { email }))),
   );
 
   // ---- app secrets (write-only) + lifecycle ----
@@ -212,6 +212,18 @@ export function buildMcp(): McpServer {
     "org_add_member",
     { description: "Add/update an org member (role: owner|admin|member|viewer; default member). Owner/admin only.", inputSchema: { slug: z.string(), email: z.string(), role: z.string().optional() } },
     async ({ slug, email, role }) => run(() => getClient().then((c) => c.addOrgMember(slug, email, role))),
+  );
+
+  // ---- platform admin: users + roles ----
+  server.registerTool(
+    "admin_list_users",
+    { description: "List all platform users with their role (admin|member) + status. Platform admins only.", inputSchema: {} },
+    async () => run(() => getClient().then((c) => c.adminListUsers())),
+  );
+  server.registerTool(
+    "admin_set_role",
+    { description: "Grant/revoke the platform-admin role (role: admin|member). Platform admins only; you can't change your own role.", inputSchema: { email: z.string(), role: z.enum(["admin", "member"]) } },
+    async ({ email, role }) => run(() => getClient().then((c) => c.adminSetRole(email, role))),
   );
 
   return server;

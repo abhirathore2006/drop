@@ -7,6 +7,13 @@ export interface Me {
   admin: boolean;
 }
 
+export interface AdminUser {
+  email: string;
+  name: string | null;
+  role: "admin" | "member";
+  status: "active" | "suspended";
+}
+
 export interface Org {
   slug: string;
   name: string;
@@ -91,6 +98,9 @@ export const api = {
   remove: (name: string) => req("DELETE", `/v1/sites/${name}`),
   setUserStatus: (email: string, status: "active" | "suspended") =>
     req("POST", `/v1/admin/users/${encodeURIComponent(email)}/status`, { status }),
+  adminUsers: () => req<{ users: AdminUser[] }>("GET", "/v1/admin/users"),
+  setUserRole: (email: string, role: "admin" | "member") =>
+    req("POST", `/v1/admin/users/${encodeURIComponent(email)}/role`, { role }),
   // app secrets (write-only) + lifecycle
   listSecrets: (name: string) => req<{ secrets: { key: string; fingerprint: string; updatedBy: string; updatedAt: string }[] }>("GET", `/v1/apps/${name}/secrets`),
   setSecret: (name: string, key: string, value: string) => req("PUT", `/v1/apps/${name}/secrets/${encodeURIComponent(key)}`, { value }),

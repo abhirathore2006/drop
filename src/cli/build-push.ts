@@ -57,9 +57,9 @@ export async function buildAndPushImage(
   });
 
   try {
-    const res = await client.pushImage(name, saver.stdout!, tag, opts.org); // consumes the save stream
+    const res = (await client.pushImage(name, saver.stdout!, tag, opts.org)) as { image: string }; // consumes the save stream
     await saved; // surface a non-zero `save` even if the upload succeeded on a truncated stream
-    return { image: res.image as string, tag };
+    return { image: res.image, tag };
   } catch (e) {
     saver.kill(); // upload failed first → don't leave a zombie `save`
     saved.catch(() => {}); // and don't let its close-rejection surface as unhandled
