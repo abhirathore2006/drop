@@ -50,11 +50,22 @@ only. Security-sensitive (TCP-over-authenticated-channel); its own slice.
 
 ## 3. Backup list / restore UI + on-demand DB hibernate/wake
 
+> **Status (2026-06-26):** SHIPPED except restore. Added `GET/POST /v1/databases/:name/backups`
+> (list + last-success + on-demand trigger via the Barman Cloud Plugin), `POST .../hibernate` and
+> `.../wake` (declarative `cnpg.io/hibernation`), surfaced in the console DB page + `drop db
+> backups|backup|hibernate|wake` + MCP. **Remaining: restore** — deferred to item 9 (`db migrate`),
+> which is designed around CNPG `bootstrap.recovery` from a Barman backup.
+
 Backups are provisioned (CNPG + Barman Cloud Plugin) but there's no surface to list backups,
 verify last-success, trigger an on-demand backup, or restore. Likewise hibernation is only
 scheduled (CronJob) — no on-demand hibernate/wake control. Both need new API routes + console UI.
 
 ## 4. Usage / quota metering + per-tenant caps
+
+> **Status (2026-06-26):** SHIPPED. `GET /v1/orgs/:slug/usage` reports workload counts + the cap +
+> live ResourceQuota consumption (`KubeClient.getTenantUsage`); a per-org workload cap
+> (`DROP_MAX_WORKLOADS_PER_ORG`, 0 = unlimited) is enforced at claim time (429). Surfaced on the
+> console "my workloads" page + `drop org usage` + MCP `org_usage`.
 
 ResourceQuota/LimitRange are set per tenant but never read back, and `claimSite` has no cap, so a
 tenant can claim unlimited names. Add per-tenant usage reporting (quota consumption, workload
@@ -62,11 +73,23 @@ counts) and a name/workload cap.
 
 ## 5. Audit log
 
+> **Status (2026-06-26):** SHIPPED. Migration 0005 + `audit_log` (bigserial id = keyset cursor),
+> `AuditStore.record/list`; writes wired on delete/visibility/collaborators/transfer/db-password/
+> user-status/user-role/org create+members (best-effort — a failed audit write never fails the
+> action; the password is never logged). `GET /v1/admin/audit` (filters + paging) + an admin-console
+> "audit" tab + `drop admin audit` + MCP `admin_audit`. (Routine publish/deploy stay in the
+> `versions` table, not duplicated here.)
+
 No audit trail for mutating/admin actions (delete/transfer/suspend reach any tenant via the
 platform-admin `can()` override). Add an append-only audit table + writes on mutating routes,
 surfaced in the admin console.
 
 ## 6. Runtime user/role management
+
+> **Status (2026-06-26):** SHIPPED. `GET /v1/admin/users` + `POST /v1/admin/users/:email/role`
+> (admin only; can't change your own role → no self-lockout, so demoting others can't remove the
+> last admin). Admin-console "users" tab (role toggle + suspend/reactivate) + `drop admin
+> users|set-role|suspend|reactivate` + MCP `admin_list_users`/`admin_set_role`.
 
 `UserStore.setRole`/`listUsers` exist but aren't wired to routes; granting/revoking admin requires
 editing `DROP_ADMINS` and rebooting. Add admin routes + console UI (suspension already shipped).
