@@ -13,6 +13,12 @@ BASE_DOMAIN  ?= drop.localhost
 BUCKET       ?= drop
 RUN          := .run
 CERT         := infra/nginx/certs/drop.localhost.pem
+# Local HTTPS: an nginx container terminates TLS and reverse-proxies to the host api/edge
+# (api.<domain> → api, *.<domain> → edge). Set HTTPS_PORT=8443 if the host can't bind 443.
+HTTPS_PORT   ?= 443
+NGINX_IMAGE  ?= docker.io/library/nginx:1.27-alpine
+HOST_GW      ?= host.containers.internal
+HTTPS_SFX    := $(if $(filter 443,$(HTTPS_PORT)),,:$(HTTPS_PORT))
 
 # Container engine — works with podman (default if present), Docker Desktop,
 # Rancher Desktop (dockerd/moby engine), or colima. Override with
@@ -54,8 +60,9 @@ help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
 	@echo "  make doctor                     validate all tools + deps + VM/cluster needed to run"
 	@echo "  make setup                      one-time: node $(NODE_VERSION) + deps + podman VM + floci image"
-	@echo "  make start                      start Floci + api(:$(API_PORT)) + edge(:$(EDGE_PORT))"
-	@echo "  make stop                       stop api + edge + Floci"
+	@echo "  make start                      start Floci + api(:$(API_PORT)) + edge(:$(EDGE_PORT)) + https(nginx :$(HTTPS_PORT))"
+	@echo "  make stop                       stop api + edge + nginx + Floci"
+	@echo "  make tls                        (re)start just the nginx HTTPS proxy (HTTPS_PORT=8443 to avoid 443)"
 	@echo "  make restart                    stop, then start"
 	@echo "  make status                     show what's running"
 	@echo "  make logs                       tail api + edge logs"
@@ -189,6 +196,28 @@ postgres: engine
 	@for i in $$(seq 1 40); do $(CE) exec drop-postgres pg_isready -U drop -d drop >/dev/null 2>&1 && break; sleep 1; done
 	@echo "✓ postgres  :$(PG_PORT)  (persistent volume: $(PG_VOLUME), engine: $(CE))"
 
+# Local trusted HTTPS: nginx (in a container) terminates TLS on :$(HTTPS_PORT) and reverse-proxies
+# to the HOST api/edge node processes via $(HOST_GW) — api.<domain> → api, *.<domain> → edge. The
+# config is derived from infra/nginx/drop.conf (single source of truth) with the upstreams rewritten
+# to the host ports. Idempotent: regenerates the cert if missing, recreates the container each call.
+tls: engine
+	@test -f $(CERT) || ./infra/nginx/gen-certs.sh
+	@mkdir -p $(RUN)
+	@sed -e 's#proxy_pass http://api:8080;#proxy_pass http://$(HOST_GW):$(API_PORT);#' \
+	     -e 's#proxy_pass http://edge:8080;#proxy_pass http://$(HOST_GW):$(EDGE_PORT);#' \
+	     infra/nginx/drop.conf > $(RUN)/nginx.conf
+	@$(CE) rm -f drop-nginx >/dev/null 2>&1 || true
+	@$(CE) run -d --rm --name drop-nginx --add-host $(HOST_GW):host-gateway -p $(HTTPS_PORT):443 \
+	  -v $(CURDIR)/$(RUN)/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
+	  -v $(CURDIR)/infra/nginx/certs:/etc/nginx/certs:ro \
+	  $(NGINX_IMAGE) >/dev/null 2>&1 || true
+	@sleep 1
+	@if $(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-nginx$$'; then \
+	  echo "✓ https  https://api.$(BASE_DOMAIN)$(HTTPS_SFX)/  ·  https://<name>.$(BASE_DOMAIN)$(HTTPS_SFX)/   (make trust-cert to silence warnings)"; \
+	else \
+	  echo "✗ nginx didn't start — port $(HTTPS_PORT) busy? try 'make tls HTTPS_PORT=8443'.  logs:"; $(CE) logs drop-nginx 2>&1 | tail -5; \
+	fi
+
 # Wipe the persistent volumes (all published sites + all metadata). Stops both first.
 reset:
 	@-$(CE) stop drop-floci drop-postgres >/dev/null 2>&1 || true
@@ -209,6 +238,7 @@ start: floci postgres
 	@echo "✓ edge   http://localhost:$(EDGE_PORT)  (routes by  Host: <name>.$(BASE_DOMAIN))"
 	@if [ -n "$(COMPUTE_ENV)" ]; then echo "✓ compute mode — API wired to k3s; interceptor → :$(INTERCEPTOR_PORT)  (drop deploy works)"; \
 	 else echo "· static-only — run 'make up' (or 'make cluster-up') for container apps / databases"; fi
+	@$(MAKE) --no-print-directory CE=$(CE) tls
 	@echo "next:  make publish DIR=./yourdist NAME=myapp"
 
 stop:
@@ -218,8 +248,8 @@ stop:
 	@-pkill -f 'dist/api.js'  2>/dev/null || true
 	@-pkill -f 'dist/edge.js' 2>/dev/null || true
 	@-pkill -f 'port-forward.*interceptor' 2>/dev/null || true
-	@-$(CE) stop drop-floci drop-postgres >/dev/null 2>&1 || true
-	@echo "✓ stopped api + edge + floci + postgres  ('make stop-all' also stops the podman VM)"
+	@-$(CE) stop drop-nginx drop-floci drop-postgres >/dev/null 2>&1 || true
+	@echo "✓ stopped api + edge + nginx + floci + postgres  ('make stop-all' also stops the podman VM)"
 
 # Full platform UP: compute cluster (k3s + KEDA) + Floci/Postgres + api/edge wired to the cluster.
 # Behind a TLS-inspecting proxy:  DROP_CORP_CA=~/certs/ca-bundle.pem make up
@@ -247,6 +277,7 @@ status:
 	@if [ "$(CE)" = "podman" ]; then echo "engine: podman (rootful=$$(podman machine inspect --format '{{.Rootful}}' 2>/dev/null || echo '?'), $$(podman machine inspect --format '{{.State}}' 2>/dev/null || echo 'no machine'))"; else echo "engine: $(CE)"; fi
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && echo "api:   up    (:$(API_PORT))" || echo "api:   down"
 	@curl -s -o /dev/null http://localhost:$(EDGE_PORT)/ 2>/dev/null && echo "edge:  up    (:$(EDGE_PORT))" || echo "edge:  down"
+	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-nginx$$' && echo "https: up    (:$(HTTPS_PORT), nginx → api/edge)") || echo "https: down"
 	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' && echo "floci: up    (:$(FLOCI_PORT))") || echo "floci: down"
 	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' && echo "pg:    up    (:$(PG_PORT))") || echo "pg:    down"
 	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^k3s$$' && echo "k3s:   up    (:6443, engine: $(CE))") || echo "k3s:   down"

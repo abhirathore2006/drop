@@ -311,9 +311,10 @@ Uses Node (version in `.nvmrc`): `nvm use` (or `nvm install`) first.
 make doctor       # validate the toolchain + VM/cluster (run first if anything's off)
 make setup        # one-time: node (via nvm) + deps + a rootful, sized podman VM + images
                   # behind a TLS-inspecting proxy:  make setup CORP_CA=~/certs/<bundle>.pem  (recorded; reused automatically)
-make start        # static stack: Floci (S3) + Postgres + api(:8473) + edge(:8474)
+make start        # static stack: Floci (S3) + Postgres + api(:8473) + edge(:8474) + HTTPS (nginx :443)
 make publish DIR=./your/dist NAME=myapp
-curl -H "Host: myapp.drop.localhost" http://localhost:8474/
+open https://myapp.drop.localhost/                      # trusted HTTPS via nginx (make trust-cert first)
+curl -H "Host: myapp.drop.localhost" http://localhost:8474/   # …or plain HTTP on the edge port
 ```
 
 **Container engine — Docker / Rancher Desktop / podman all work.** The engine is
@@ -325,9 +326,10 @@ Desktop are daemon-managed (start/stop the app yourself).
 Other targets: `make doctor`, `make status`, `make logs`, `make restart`, `make stop`
 (`make stop-all` also stops the podman VM), `make reset` (wipe the Floci + Postgres
 volumes). For the whole compute platform in one command, see `make up` / `make down` below.
-Published sites + metadata persist across restarts in named volumes. The edge routes by `Host` header, so
-either curl with `-H "Host: <name>.drop.localhost"` or add
-`127.0.0.1 <name>.drop.localhost` to `/etc/hosts` to view in a browser.
+Published sites + metadata persist across restarts in named volumes. For a browser, use the
+built-in HTTPS — `https://<name>.drop.localhost/` (see [Trusted local HTTPS](#trusted-local-https-built-into-make-up--make-start));
+`*.localhost` resolves to loopback automatically. Or hit the edge's plain HTTP port directly with
+`curl -H "Host: <name>.drop.localhost" http://localhost:8474/`.
 
 ### Compute plane (local)
 
@@ -363,32 +365,40 @@ Behind a TLS-inspecting proxy, record your CA once with `make setup CORP_CA=~/ce
 [`examples/DATABASE_APPS.md`](examples/DATABASE_APPS.md) for the end-to-end flow (build an image,
 import it into k3s, create a DB, set a secret, deploy).
 
-### Trusted local HTTPS (optional, via nginx in containers)
+### Trusted local HTTPS (built into `make up` / `make start`)
 
-The `make` flow above serves over plain `http://…:<port>`. For **trusted HTTPS with
-stable names** — and a setup that mirrors production — run the whole stack in
-containers behind **nginx** (works on macOS, Linux, and Windows via Docker/Podman
-Desktop or WSL2):
+`make start` (and `make up`) bring up an **nginx container that terminates TLS on `:443`**
+and reverse-proxies to the host api/edge processes — so you get browser-grade HTTPS with
+stable names, no extra step:
+
+- `https://api.drop.localhost/` → control plane + dashboard (and `/docs/`)
+- `https://<name>.drop.localhost/` → any published site or app (edge, wildcard)
+
+nginx routes by hostname — `api.drop.localhost` → api, `*.drop.localhost` → edge — setting
+`X-Forwarded-Host` (which the edge honors), so the site name survives the proxy. This is the
+same shape as the production ingress (ALB/Ingress), just local. The cert is generated on
+first run by [`infra/nginx/gen-certs.sh`](infra/nginx/gen-certs.sh): [mkcert](https://github.com/FiloSottile/mkcert)
+(browser-trusted) if installed, else self-signed — in which case run **`make trust-cert`** to
+add it to your OS trust store (macOS/Linux/Windows, OS-detected; `make untrust-cert` reverses it).
+
+```bash
+make up                          # …ends with: ✓ https  https://api.drop.localhost/  ·  https://<name>.drop.localhost/
+make tls                         # (re)start just the nginx proxy
+make tls HTTPS_PORT=8443         # if the host can't bind 443 (rootless) or it's taken → https://…:8443/
+make trust-cert                  # clear the self-signed-cert browser warning
+```
+
+> Plain HTTP is still there too: the api/edge listen directly on `:8473`/`:8474`
+> (`curl -H "Host: <name>.drop.localhost" http://localhost:8474/`).
+
+**Fully-containerized alternative.** To run the *whole* stack (api + edge + nginx) in
+containers instead of as host processes — closer to a prod image build — use the compose file:
 
 ```bash
 make stop                                              # free the shared host ports first
 node build.mjs                                         # build the self-contained bundles
-./infra/nginx/gen-certs.sh                             # local TLS cert for *.drop.localhost
 docker compose -f infra/docker-compose.yml up --build  # postgres + floci + api + edge + nginx
 ```
-
-You then get, behind nginx on `:443`:
-
-- `https://api.drop.localhost/` → control plane + dashboard (and `/docs/`)
-- `https://<name>.drop.localhost/` → any published site (edge, wildcard)
-
-nginx terminates TLS on `:443` and routes by hostname — `api.drop.localhost` → api,
-`*.drop.localhost` → edge — setting `X-Forwarded-Host` (which the edge honors), so the
-site name survives the proxy. This is the same shape as the production ingress
-(ALB/Ingress), just local. `gen-certs.sh` uses [mkcert](https://github.com/FiloSottile/mkcert)
-for a browser-trusted cert if installed, else a self-signed one — in which case run
-**`make trust-cert`** to add it to your OS trust store (macOS/Linux/Windows, OS-detected;
-`make untrust-cert` reverses it) and clear the browser warning.
 
 The images **copy the prebuilt esbuild bundles** (hence `node build.mjs` first) — there's
 no in-image `npm install`, so they build offline / behind a TLS-inspecting proxy.
