@@ -66,3 +66,19 @@ test("validateOrgSlug: dns-safe, reserved words rejected", () => {
   expect(validateOrgSlug("org")).not.toBeNull();
   expect(validateOrgSlug(123)).not.toBeNull();
 });
+
+test("listAllOrgs: every org, team first then personal, alphabetical by name", async () => {
+  const { db, orgs } = await fix();
+  await orgs.ensurePersonalOrg("alice@x.com");
+  await orgs.ensurePersonalOrg("bob@paytm.com");
+  await orgs.createOrg("zeta", "Zeta", "alice@x.com");
+  await orgs.createOrg("acme", "Acme", "bob@paytm.com");
+  const all = await orgs.listAllOrgs();
+  // team orgs come first (kind desc), alphabetical by name within a kind
+  expect(all.slice(0, 2).map((o) => o.name)).toEqual(["Acme", "Zeta"]);
+  expect(all.slice(0, 2).every((o) => o.kind === "team")).toBe(true);
+  // both personal orgs are present after the team ones
+  expect(all.filter((o) => o.kind === "personal").length).toBe(2);
+  expect(all.length).toBe(4);
+  await db.destroy();
+});

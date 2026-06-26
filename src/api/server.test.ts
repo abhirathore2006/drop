@@ -1150,3 +1150,29 @@ test("db backups: not-a-database is 409, unknown is 404", async () => {
   expect((await call(app, "GET", "/v1/databases/ghost/backups", "alice")).status).toBe(404);
   await db.destroy();
 });
+
+// ---- admin: org picker + per-org resource browse ----
+test("admin: list all orgs + filter admin/sites by org", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] }); // alice = platform admin
+  // alice creates a team org and deploys into it (+ one in her personal org); bob has only a site
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" });
+  await call(app, "POST", "/v1/apps/acme-api", "alice", { image: "x:1" }); // alice personal org
+  await call(app, "POST", "/v1/apps/acme-web?org=acme", "alice", { image: "x:1" }); // acme org
+  await call(app, "POST", "/v1/databases/acme-db?org=acme", "alice", {}); // acme org
+  await pub(app, "bob", "bobsite", await tgz({ "index.html": "x" }));
+  // non-admin (bob) can't list all orgs
+  expect((await call(app, "GET", "/v1/admin/orgs", "bob")).status).toBe(403);
+  // admin sees every org (personal + team), team first
+  const orgs = (await (await call(app, "GET", "/v1/admin/orgs", "alice")).json()).orgs;
+  const slugs = orgs.map((o: any) => o.slug);
+  expect(slugs).toContain("acme");
+  expect(orgs.find((o: any) => o.slug === "acme").kind).toBe("team");
+  expect(orgs.some((o: any) => o.kind === "personal")).toBe(true);
+  // filter admin/sites by org=acme → only the two acme resources (grouped client-side into the grid)
+  const acme = (await (await call(app, "GET", "/v1/admin/sites?org=acme", "alice")).json()).sites;
+  expect(acme.map((s: any) => s.name).sort()).toEqual(["acme-db", "acme-web"]);
+  expect(acme.every((s: any) => s.org.slug === "acme")).toBe(true);
+  // unknown org slug → empty page
+  expect((await (await call(app, "GET", "/v1/admin/sites?org=nope", "alice")).json()).sites).toEqual([]);
+  await db.destroy();
+});

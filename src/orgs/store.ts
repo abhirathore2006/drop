@@ -123,6 +123,16 @@ export class OrgStore {
       .execute();
     return rows.map((r) => ({ ...this.toOrg(r as Record<string, unknown>), role: (r as { role: OrgRole }).role }));
   }
+  /** Every org (platform-admin browse). Team orgs first, then personal, each alphabetical by name. */
+  async listAllOrgs(): Promise<Org[]> {
+    const rows = await this.db
+      .selectFrom("organisations")
+      .selectAll()
+      .orderBy("kind", "desc") // 'team' > 'personal' → team first
+      .orderBy("name")
+      .execute();
+    return rows.map((r) => this.toOrg(r as Record<string, unknown>));
+  }
   async members(orgId: string): Promise<OrgMember[]> {
     const rows = await this.db.selectFrom("org_members").select(["email", "role"]).where("org_id", "=", orgId).execute();
     return rows.map((r) => ({ email: r.email, role: r.role }));

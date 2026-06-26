@@ -979,7 +979,15 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const owner = c.req.query("owner")?.toLowerCase() || undefined;
     const typeQ = c.req.query("type");
     const type = typeQ === "site" || typeQ === "app" || typeQ === "database" ? typeQ : undefined;
-    const { names, nextCursor } = await d.meta.listSitesPage({ cursor, limit, prefix, owner, type });
+    // Optional ?org=<slug> filter — scope the browse to one org (an unknown slug → empty page).
+    const orgSlug = c.req.query("org");
+    let orgId: string | undefined;
+    if (orgSlug) {
+      const org = await d.orgs.getOrgBySlug(orgSlug);
+      if (!org) return c.json({ sites: [] });
+      orgId = org.id;
+    }
+    const { names, nextCursor } = await d.meta.listSitesPage({ cursor, limit, prefix, owner, type, orgId });
     const out: unknown[] = [];
     for (const name of names) {
       const s = await d.meta.getSitePlain(name);
@@ -996,6 +1004,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         });
     }
     return c.json({ sites: out, nextCursor });
+  });
+
+  // ---- admin: list ALL orgs (platform admins only) — drives the org picker in the console ----
+  app.get("/v1/admin/orgs", async (c) => {
+    const email = c.get("identity").email;
+    if (!(await isPlatformAdmin(email))) return c.json({ error: "admin only" }, 403);
+    const orgs = await d.orgs.listAllOrgs();
+    return c.json({ orgs: orgs.map((o) => ({ slug: o.slug, name: o.name, kind: o.kind, owner: o.createdBy })) });
   });
 
   // ---- admin: suspend / reactivate a user (platform admins only) ----

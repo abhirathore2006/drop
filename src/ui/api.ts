@@ -14,6 +14,13 @@ export interface AdminUser {
   status: "active" | "suspended";
 }
 
+export interface AdminOrg {
+  slug: string;
+  name: string;
+  kind: string; // "personal" | "team"
+  owner: string;
+}
+
 export interface OrgUsage {
   org: { slug: string; name: string; kind: string };
   workloads: { site: number; app: number; database: number; total: number };
@@ -132,6 +139,7 @@ export const api = {
   adminUsers: () => req<{ users: AdminUser[] }>("GET", "/v1/admin/users"),
   setUserRole: (email: string, role: "admin" | "member") =>
     req("POST", `/v1/admin/users/${encodeURIComponent(email)}/role`, { role }),
+  adminOrgs: () => req<{ orgs: AdminOrg[] }>("GET", "/v1/admin/orgs"),
   adminAudit: (qs: string) => req<{ entries: AuditRecord[]; nextCursor?: string }>("GET", "/v1/admin/audit" + (qs ? `?${qs}` : "")),
   orgUsage: (slug: string) => req<OrgUsage>("GET", `/v1/orgs/${encodeURIComponent(slug)}/usage`),
   // app secrets (write-only) + lifecycle

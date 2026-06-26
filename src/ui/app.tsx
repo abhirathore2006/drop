@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { api, type AdminUser, type AuditRecord, type BackupInfo, type Detail, type ListItem, type Me, type OrgUsage, type WorkloadType } from "./api.ts";
+import { api, type AdminOrg, type AdminUser, type AuditRecord, type BackupInfo, type Detail, type ListItem, type Me, type OrgUsage, type WorkloadType } from "./api.ts";
 
 const TYPE_LABEL: Record<WorkloadType, string> = { site: "SITE", app: "APP", database: "DB" };
 
@@ -734,18 +734,28 @@ function Admin({ me }: { me: Me }) {
   const [items, setItems] = useState<ListItem[]>([]);
   const [type, setType] = useState("");
   const [owner, setOwner] = useState("");
+  const [org, setOrg] = useState(""); // "" = all (flat table); a slug = that org's resources, grouped like "my workloads"
+  const [orgs, setOrgs] = useState<AdminOrg[]>([]);
   const [err, setErr] = useState("");
+
+  useEffect(() => {
+    api.adminOrgs().then((r) => setOrgs(r.orgs)).catch(() => {});
+  }, []);
+
   const load = useCallback(async () => {
     setErr("");
     const qs = new URLSearchParams();
-    if (type) qs.set("type", type);
-    if (owner) qs.set("owner", owner);
+    if (org) qs.set("org", org); // org view ignores the type/owner filters — it's the whole org
+    else {
+      if (type) qs.set("type", type);
+      if (owner) qs.set("owner", owner);
+    }
     try {
       setItems((await api.adminList(qs.toString())).sites);
     } catch (e) {
       setErr((e as Error).message);
     }
-  }, [type, owner]);
+  }, [type, owner, org]);
   useEffect(() => {
     void load();
   }, [load]);
@@ -758,6 +768,9 @@ function Admin({ me }: { me: Me }) {
       alert((e as Error).message);
     }
   };
+
+  const orgOpt = (o: AdminOrg) => (o.kind === "personal" ? `👤 ${o.owner}` : `🏢 ${o.name}`) + ` (${o.slug})`;
+  const selected = orgs.find((o) => o.slug === org);
 
   return (
     <section>
@@ -777,63 +790,100 @@ function Admin({ me }: { me: Me }) {
       ) : view === "audit" ? (
         <AdminAudit />
       ) : (
-      <>
-      <div className="adminbar">
-        <h2>All tenants</h2>
-        <select value={type} onChange={(e) => setType(e.target.value)}>
-          <option value="">all types</option>
-          <option value="app">apps</option>
-          <option value="database">databases</option>
-          <option value="site">sites</option>
-        </select>
-        <input placeholder="owner email…" value={owner} onChange={(e) => setOwner(e.target.value)} />
-      </div>
-      {err && <div className="err">{err}</div>}
-      <table className="tbl">
-        <thead>
-          <tr>
-            <th>name</th>
-            <th>type</th>
-            <th>owner</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((w) => (
-            <tr key={w.name}>
-              <td>
-                <button className="link" onClick={() => navigate(pathFor(w))}>
-                  {w.name}
-                </button>
-              </td>
-              <td>
-                <TypeBadge t={w.type} />
-              </td>
-              <td className="muted">{w.owner}</td>
-              <td className="right">
-                {w.owner !== me.email && (
-                  <>
-                    <button className="btn sm danger" onClick={() => suspend(w.owner, "suspended")}>
-                      suspend owner
-                    </button>{" "}
-                    <button className="btn sm" onClick={() => suspend(w.owner, "active")}>
-                      reactivate
-                    </button>
-                  </>
+        <>
+          <div className="adminbar">
+            <h2>{selected ? (selected.kind === "personal" ? selected.owner : selected.name) : "All tenants"}</h2>
+            {/* Pick an org → see all its resources grouped (apps/dbs/sites), like "my workloads". */}
+            <select value={org} onChange={(e) => setOrg(e.target.value)}>
+              <option value="">all orgs (flat list)</option>
+              {orgs.map((o) => (
+                <option key={o.slug} value={o.slug}>
+                  {orgOpt(o)}
+                </option>
+              ))}
+            </select>
+            {!org && (
+              <>
+                <select value={type} onChange={(e) => setType(e.target.value)}>
+                  <option value="">all types</option>
+                  <option value="app">apps</option>
+                  <option value="database">databases</option>
+                  <option value="site">sites</option>
+                </select>
+                <input placeholder="owner email…" value={owner} onChange={(e) => setOwner(e.target.value)} />
+              </>
+            )}
+          </div>
+          {err && <div className="err">{err}</div>}
+          {org ? (
+            // Grouped, card-based view of one org — mirrors the "my workloads" layout (usage + grid).
+            items.length ? (
+              <>
+                <UsageSummary items={items} />
+                <WorkloadGrid items={items} />
+              </>
+            ) : (
+              <div className="empty">
+                <p className="muted">no resources in this org yet</p>
+              </div>
+            )
+          ) : (
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th>name</th>
+                  <th>type</th>
+                  <th>owner</th>
+                  <th>org</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((w) => (
+                  <tr key={w.name}>
+                    <td>
+                      <button className="link" onClick={() => navigate(pathFor(w))}>
+                        {w.name}
+                      </button>
+                    </td>
+                    <td>
+                      <TypeBadge t={w.type} />
+                    </td>
+                    <td className="muted">{w.owner}</td>
+                    <td className="muted">
+                      {w.org ? (
+                        <button className="link" onClick={() => setOrg(w.org!.slug)} title="view this org">
+                          {orgLabel(w.org)}
+                        </button>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="right">
+                      {w.owner !== me.email && (
+                        <>
+                          <button className="btn sm danger" onClick={() => suspend(w.owner, "suspended")}>
+                            suspend owner
+                          </button>{" "}
+                          <button className="btn sm" onClick={() => suspend(w.owner, "active")}>
+                            reactivate
+                          </button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {!items.length && (
+                  <tr>
+                    <td colSpan={5} className="muted">
+                      no workloads
+                    </td>
+                  </tr>
                 )}
-              </td>
-            </tr>
-          ))}
-          {!items.length && (
-            <tr>
-              <td colSpan={4} className="muted">
-                no workloads
-              </td>
-            </tr>
+              </tbody>
+            </table>
           )}
-        </tbody>
-      </table>
-      </>
+        </>
       )}
     </section>
   );

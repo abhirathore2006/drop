@@ -204,15 +204,16 @@ export class MetaStore {
     return rows.map((r) => r.name);
   }
 
-  /** Keyset page over all sites (admin browse), optional name prefix / owner / type filters. */
+  /** Keyset page over all sites (admin browse), optional name prefix / owner / type / org filters. */
   async listSitesPage(
-    opts: { cursor?: string; limit?: number; prefix?: string; owner?: string; type?: WorkloadType } = {},
+    opts: { cursor?: string; limit?: number; prefix?: string; owner?: string; type?: WorkloadType; orgId?: string } = {},
   ): Promise<{ names: string[]; nextCursor?: string }> {
     const limit = opts.limit ?? 100;
     let q = this.db.selectFrom("sites").select("name").orderBy("name").limit(limit + 1);
     if (opts.cursor) q = q.where("name", ">", opts.cursor);
     if (opts.prefix) q = q.where("name", "like", opts.prefix.replace(/[%_\\]/g, "\\$&") + "%");
     if (opts.type) q = q.where("type", "=", opts.type);
+    if (opts.orgId) q = q.where("org_id", "=", opts.orgId);
     // owner = the site's role='owner' membership row.
     if (opts.owner) {
       const owner = opts.owner;
