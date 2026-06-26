@@ -214,6 +214,12 @@ export function buildMcp(): McpServer {
     async ({ slug, email, role }) => run(() => getClient().then((c) => c.addOrgMember(slug, email, role))),
   );
 
+  server.registerTool(
+    "org_usage",
+    { description: "Show an org's workload counts (vs the per-org cap) and live cluster ResourceQuota consumption.", inputSchema: { slug: z.string() } },
+    async ({ slug }) => run(() => getClient().then((c) => c.orgUsage(slug))),
+  );
+
   // ---- platform admin: users + roles ----
   server.registerTool(
     "admin_list_users",

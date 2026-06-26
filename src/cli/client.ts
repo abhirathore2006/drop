@@ -73,6 +73,9 @@ export class Client {
   orgInfo(slug: string) {
     return this.req("GET", `/v1/orgs/${slug}`);
   }
+  orgUsage(slug: string) {
+    return this.req("GET", `/v1/orgs/${slug}/usage`);
+  }
   addOrgMember(slug: string, email: string, role?: string) {
     return this.req("POST", `/v1/orgs/${slug}/members`, { contentType: "application/json", body: JSON.stringify({ email, role }) });
   }

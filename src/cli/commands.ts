@@ -242,6 +242,10 @@ export function buildProgram(): Command {
   org.command("ls").description("List your organisations + your role in each").action(async () => show(await (await client()).listOrgs()));
   org.command("members <slug>").description("Show an org's members").action(async (slug: string) => show(await (await client()).orgInfo(slug)));
   org
+    .command("usage <slug>")
+    .description("Show an org's workload counts (vs the cap) + live cluster quota consumption")
+    .action(async (slug: string) => show(await (await client()).orgUsage(slug)));
+  org
     .command("add <slug> <email> [role]")
     .description("Add/update a member (owner|admin|member|viewer; default member)")
     .action(async (slug: string, email: string, role?: string) => show(await (await client()).addOrgMember(slug, email, role)));

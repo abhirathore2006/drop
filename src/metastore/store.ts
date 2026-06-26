@@ -299,4 +299,31 @@ export class MetaStore {
   async setSiteOrg(name: string, orgId: string): Promise<void> {
     await this.db.updateTable("sites").set({ org_id: orgId, updated_at: sql`now()` }).where("name", "=", name).execute();
   }
+
+  /** Total workloads (sites + apps + databases) owned by an org — the per-org cap is checked against this. */
+  async countSitesInOrg(orgId: string): Promise<number> {
+    const row = await this.db
+      .selectFrom("sites")
+      .select((eb) => eb.fn.countAll().as("n"))
+      .where("org_id", "=", orgId)
+      .executeTakeFirst();
+    return Number(row?.n ?? 0);
+  }
+
+  /** Workload counts by type for an org (usage reporting). */
+  async orgWorkloadCounts(orgId: string): Promise<{ site: number; app: number; database: number; total: number }> {
+    const rows = await this.db
+      .selectFrom("sites")
+      .select(["type", (eb) => eb.fn.countAll().as("n")])
+      .where("org_id", "=", orgId)
+      .groupBy("type")
+      .execute();
+    const out = { site: 0, app: 0, database: 0, total: 0 };
+    for (const r of rows) {
+      const n = Number(r.n);
+      out[(r.type as WorkloadType) ?? "site"] += n;
+      out.total += n;
+    }
+    return out;
+  }
 }

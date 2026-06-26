@@ -18,6 +18,7 @@ export interface Config {
   maxUploadBytes: number;
   maxFiles: number;
   keepVersions: number;
+  maxWorkloadsPerOrg: number; // cap on sites+apps+databases an org may claim (0 = unlimited)
   blockedEgressCidrs: string[]; // in-cluster/control-plane CIDRs excluded from the tenant HTTPS egress allowlist (MUST cover the live pod+service CIDRs)
   dbBackupRoleArn?: string; // prod: IRSA role for CNPG database backups to S3 (omit locally — Floci uses static creds)
   dbBackupEndpoint?: string; // in-cluster S3 endpoint for CNPG backups (e.g. local Floci on the pod network). Distinct from s3Endpoint, which is the API's host-side view. Unset in prod → real AWS S3.
@@ -81,6 +82,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxUploadBytes: Number(env.DROP_MAX_UPLOAD_BYTES ?? String(100 * 1024 * 1024)),
     maxFiles: Number(env.DROP_MAX_FILES ?? "5000"),
     keepVersions: Number(env.DROP_KEEP_VERSIONS ?? "10"),
+    maxWorkloadsPerOrg: Number(env.DROP_MAX_WORKLOADS_PER_ORG ?? "0") || 0,
     // Local k3s pod/service CIDRs live in 10/8; PROD EKS must set the real ones.
     blockedEgressCidrs: (env.DROP_BLOCKED_EGRESS_CIDRS ?? "10.0.0.0/8")
       .split(",")

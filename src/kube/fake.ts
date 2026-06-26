@@ -1,4 +1,4 @@
-import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus } from "./types.ts";
+import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus, type TenantUsage } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 
@@ -86,5 +86,15 @@ export class FakeKube implements KubeClient {
   }
   async startApp(namespace: string, name: string): Promise<void> {
     this.stopped.delete(this.key(namespace, name));
+  }
+
+  // Tests can preset a usage report per namespace; otherwise a namespace that has had a tenant
+  // applied reports the default quota with zero usage, and an unknown namespace reports null.
+  readonly usageByNs = new Map<string, TenantUsage>();
+  async getTenantUsage(namespace: string): Promise<TenantUsage | null> {
+    if (this.usageByNs.has(namespace)) return this.usageByNs.get(namespace)!;
+    if (this.tenantApplies.some((t) => t.namespace === namespace))
+      return { hard: { "limits.cpu": "4", "limits.memory": "8Gi", "count/pods": "20" }, used: { "limits.cpu": "0", "limits.memory": "0", "count/pods": "0" } };
+    return null;
   }
 }

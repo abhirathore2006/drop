@@ -33,6 +33,14 @@ export interface KubeClient {
   stopApp(namespace: string, name: string): Promise<void>;
   /** Resume: un-pause KEDA so it scales per the HTTPScaledObject again. */
   startApp(namespace: string, name: string): Promise<void>;
+  /** The tenant ResourceQuota's hard limits + current usage (drop-quota), or null if the namespace
+   *  / quota isn't provisioned yet (e.g. a tenant with only static sites — no compute namespace). */
+  getTenantUsage(namespace: string): Promise<TenantUsage | null>;
+}
+
+export interface TenantUsage {
+  hard: Record<string, string>; // configured caps, e.g. { "limits.cpu": "4", "count/pods": "20" }
+  used: Record<string, string>; // current consumption against those caps
 }
 
 /** Thrown by setDatabasePassword when the role password WAS successfully changed but persisting

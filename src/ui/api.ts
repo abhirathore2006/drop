@@ -14,6 +14,13 @@ export interface AdminUser {
   status: "active" | "suspended";
 }
 
+export interface OrgUsage {
+  org: { slug: string; name: string; kind: string };
+  workloads: { site: number; app: number; database: number; total: number };
+  cap: number; // 0 = unlimited
+  quota: { hard: Record<string, string>; used: Record<string, string> } | null;
+}
+
 export interface AuditRecord {
   id: string;
   at: string;
@@ -113,6 +120,7 @@ export const api = {
   setUserRole: (email: string, role: "admin" | "member") =>
     req("POST", `/v1/admin/users/${encodeURIComponent(email)}/role`, { role }),
   adminAudit: (qs: string) => req<{ entries: AuditRecord[]; nextCursor?: string }>("GET", "/v1/admin/audit" + (qs ? `?${qs}` : "")),
+  orgUsage: (slug: string) => req<OrgUsage>("GET", `/v1/orgs/${encodeURIComponent(slug)}/usage`),
   // app secrets (write-only) + lifecycle
   listSecrets: (name: string) => req<{ secrets: { key: string; fingerprint: string; updatedBy: string; updatedAt: string }[] }>("GET", `/v1/apps/${name}/secrets`),
   setSecret: (name: string, key: string, value: string) => req("PUT", `/v1/apps/${name}/secrets/${encodeURIComponent(key)}`, { value }),

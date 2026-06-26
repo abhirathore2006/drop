@@ -6,7 +6,7 @@
 import { request } from "node:https";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus } from "./types.ts";
+import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus, type TenantUsage } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import { databasePasswordJob, DEFAULT_OPERAND_IMAGE, PWSET_SECRET, type DatabaseManifests } from "./cnpg.ts";
 
@@ -426,6 +426,14 @@ export class KubeApiClient implements KubeClient {
     });
     if (so.status === 404) throw new Error(`no such app: ${name}`);
     if (so.status >= 300) throw new Error(`startApp ${name}: unpause -> ${so.status}`);
+  }
+
+  async getTenantUsage(namespace: string): Promise<TenantUsage | null> {
+    const r = await this.call("GET", this.quotaPath(namespace, "drop-quota"));
+    if (r.status === 404) return null; // namespace/quota not provisioned (static-only tenant)
+    if (r.status >= 300) throw new Error(`getTenantUsage ${namespace} -> ${r.status}`);
+    const s = (JSON.parse(r.body).status ?? {}) as { hard?: Record<string, string>; used?: Record<string, string> };
+    return { hard: s.hard ?? {}, used: s.used ?? {} };
   }
 
   async getDatabaseStatus(namespace: string, name: string): Promise<DatabaseStatus | null> {

@@ -133,3 +133,19 @@ test("deleteSite cascades members + versions", async () => {
   expect(await meta.listVersions("app")).toEqual([]);
   await db.destroy();
 });
+
+test("countSitesInOrg + orgWorkloadCounts by type", async () => {
+  const { db, meta, orgs } = await fix();
+  const o = await orgs.ensurePersonalOrg("alice@x.com");
+  await claim({ meta, orgs }, "s1", "alice@x.com", "site");
+  await claim({ meta, orgs }, "a1", "alice@x.com", "app");
+  await claim({ meta, orgs }, "a2", "alice@x.com", "app");
+  await claim({ meta, orgs }, "d1", "alice@x.com", "database");
+  expect(await meta.countSitesInOrg(o.id)).toBe(4);
+  expect(await meta.orgWorkloadCounts(o.id)).toEqual({ site: 1, app: 2, database: 1, total: 4 });
+  // a different org with nothing in it
+  const empty = await orgs.ensurePersonalOrg("bob@x.com");
+  expect(await meta.countSitesInOrg(empty.id)).toBe(0);
+  expect(await meta.orgWorkloadCounts(empty.id)).toEqual({ site: 0, app: 0, database: 0, total: 0 });
+  await db.destroy();
+});

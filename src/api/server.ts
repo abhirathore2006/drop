@@ -143,12 +143,23 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // authorize it. Uses ONLY the query param — never reads the body (publish streams a tarball).
   const resolveCreateOrg = async (c: any, email: string): Promise<{ org: Org } | { err: Response }> => {
     const orgSlug = c.req.query("org");
-    if (!orgSlug) return { org: await d.orgs.ensurePersonalOrg(email) };
-    const org = await d.orgs.getOrgBySlug(String(orgSlug));
-    if (!org) return { err: c.json({ error: `no such org: ${orgSlug}` }, 404) };
-    const role = await d.orgs.roleOf(org.id, email);
-    const platformRole = (await d.users.getUser(email))?.role ?? "member";
-    if (!canCreateInOrg(role, platformRole)) return { err: c.json({ error: `not a member of org ${orgSlug} with create rights` }, 403) };
+    let org: Org;
+    if (!orgSlug) {
+      org = await d.orgs.ensurePersonalOrg(email);
+    } else {
+      const found = await d.orgs.getOrgBySlug(String(orgSlug));
+      if (!found) return { err: c.json({ error: `no such org: ${orgSlug}` }, 404) };
+      const role = await d.orgs.roleOf(found.id, email);
+      const platformRole = (await d.users.getUser(email))?.role ?? "member";
+      if (!canCreateInOrg(role, platformRole)) return { err: c.json({ error: `not a member of org ${orgSlug} with create rights` }, 403) };
+      org = found;
+    }
+    // Per-org workload cap (DROP_MAX_WORKLOADS_PER_ORG; 0 = unlimited). Only the CREATE path passes
+    // through here — re-deploys of an existing workload don't claim a new name, so they're never capped.
+    const cap = d.cfg.maxWorkloadsPerOrg;
+    if (cap > 0 && (await d.meta.countSitesInOrg(org.id)) >= cap) {
+      return { err: c.json({ error: `workload cap reached for this org (${cap}) — delete one or ask an admin to raise the limit` }, 429) };
+    }
     return { org };
   };
   const isPlatformAdmin = async (email: string) => (await d.users.getUser(email))?.role === "admin";
@@ -205,6 +216,30 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const r = await resolveOrg(c, email);
     if ("err" in r) return r.err;
     return c.json({ slug: r.org.slug, name: r.org.name, kind: r.org.kind, members: await d.orgs.members(r.org.id) });
+  });
+
+  // ---- org usage: workload counts (+ the cap) and the live cluster ResourceQuota consumption ----
+  app.get("/v1/orgs/:slug/usage", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email); // member or platform admin
+    if ("err" in r) return r.err;
+    const workloads = await d.meta.orgWorkloadCounts(r.org.id);
+    // Cluster quota is best-effort: a static-only tenant has no compute namespace, and a cluster
+    // read failure must never fail the usage call — so it degrades to null.
+    let quota = null;
+    if (d.kube) {
+      try {
+        quota = await d.kube.getTenantUsage(r.org.namespace);
+      } catch {
+        /* leave quota null */
+      }
+    }
+    return c.json({
+      org: { slug: r.org.slug, name: r.org.name, kind: r.org.kind },
+      workloads,
+      cap: d.cfg.maxWorkloadsPerOrg, // 0 = unlimited
+      quota, // { hard, used } | null
+    });
   });
 
   app.post("/v1/orgs/:slug/members", async (c) => {

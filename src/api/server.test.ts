@@ -1055,3 +1055,54 @@ test("audit: db password rotation is recorded without the password", async () =>
   expect(JSON.stringify(trail.entries[0])).not.toContain("password\":\"");
   await db.destroy();
 });
+
+// ---- Feature 4: usage metering + per-tenant cap ----
+const personalSlug = async (app: any, tok: string): Promise<string> => {
+  const r = await (await call(app, "GET", "/v1/orgs", tok)).json();
+  return r.orgs.find((o: any) => o.kind === "personal").slug;
+};
+
+test("usage: workload counts + cap + cluster quota for an org", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "blog", await tgz({ "index.html": "x" })); // site
+  await call(app, "POST", "/v1/apps/api1", "alice", { image: "x:1" }); // app (applies tenant → quota)
+  await call(app, "POST", "/v1/databases/pg1", "alice", {}); // database
+  const slug = await personalSlug(app, "alice");
+  const u = await (await call(app, "GET", `/v1/orgs/${slug}/usage`, "alice")).json();
+  expect(u.workloads).toEqual({ site: 1, app: 1, database: 1, total: 3 });
+  expect(u.cap).toBe(0); // unlimited by default
+  expect(u.quota.hard["count/pods"]).toBe("20"); // FakeKube default quota
+  await db.destroy();
+});
+
+test("usage: non-member is forbidden", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/api1", "alice", { image: "x:1" });
+  const slug = await personalSlug(app, "alice");
+  expect((await call(app, "GET", `/v1/orgs/${slug}/usage`, "bob")).status).toBe(403);
+  await db.destroy();
+});
+
+test("cap: DROP_MAX_WORKLOADS_PER_ORG blocks claiming beyond the limit (429); re-deploy is exempt", async () => {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  const meta = new MetaStore(db);
+  const kube = new FakeKube();
+  const cfg = loadConfig({
+    DROP_S3_BUCKET: "b",
+    DROP_DATABASE_URL: "postgres://x/y",
+    DROP_BASE_DOMAIN: "drop.example.com",
+    DROP_S3_ENDPOINT: "http://localhost:4566",
+    DROP_MAX_WORKLOADS_PER_ORG: "2",
+  });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, kube, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(db), audit: new AuditStore(db) });
+  expect((await call(app, "POST", "/v1/apps/a1", "alice", { image: "x:1" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/a2", "alice", { image: "x:1" })).status).toBe(200);
+  // third NEW name is over the cap
+  const over = await call(app, "POST", "/v1/apps/a3", "alice", { image: "x:1" });
+  expect(over.status).toBe(429);
+  // re-deploying an EXISTING workload is never capped
+  expect((await call(app, "POST", "/v1/apps/a1", "alice", { image: "x:2" })).status).toBe(200);
+  await db.destroy();
+});

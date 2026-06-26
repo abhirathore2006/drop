@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { api, type AdminUser, type AuditRecord, type Detail, type ListItem, type Me, type WorkloadType } from "./api.ts";
+import { api, type AdminUser, type AuditRecord, type Detail, type ListItem, type Me, type OrgUsage, type WorkloadType } from "./api.ts";
 
 const TYPE_LABEL: Record<WorkloadType, string> = { site: "SITE", app: "APP", database: "DB" };
 
@@ -768,6 +768,51 @@ function Admin({ me }: { me: Me }) {
   );
 }
 
+// Per-org usage: workloads claimed (vs the cap) + live cluster quota. Derives the org set from
+// the workload list, so it needs no separate org-listing call.
+function UsageSummary({ items }: { items: ListItem[] }) {
+  const slugs = [...new Set(items.map((w) => w.org?.slug).filter((s): s is string => !!s))];
+  const key = slugs.join(",");
+  const [usages, setUsages] = useState<OrgUsage[]>([]);
+  useEffect(() => {
+    if (!slugs.length) return;
+    void Promise.all(slugs.map((s) => api.orgUsage(s).catch(() => null))).then((rs) => setUsages(rs.filter((u): u is OrgUsage => !!u)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  if (!usages.length) return null;
+  return (
+    <section>
+      <h2>Usage</h2>
+      <div className="grid">
+        {usages.map((u) => (
+          <div className="card" key={u.org.slug}>
+            <div className="card-top">
+              <span className="card-name">{u.org.kind === "personal" ? "personal" : u.org.name}</span>
+            </div>
+            <div className="card-owner">
+              <b>{u.workloads.total}</b>
+              {u.cap > 0 ? ` / ${u.cap}` : ""} workloads
+            </div>
+            <div className="card-foot">
+              <span className="sub">
+                {u.workloads.app} apps · {u.workloads.database} dbs · {u.workloads.site} sites
+              </span>
+            </div>
+            {u.quota && (
+              <div className="card-foot">
+                <span className="sub">
+                  cpu {u.quota.used["limits.cpu"] ?? "0"}/{u.quota.hard["limits.cpu"] ?? "—"} · pods{" "}
+                  {u.quota.used["count/pods"] ?? "0"}/{u.quota.hard["count/pods"] ?? "—"}
+                </span>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function MyWorkloads() {
   const [items, setItems] = useState<ListItem[] | null>(null);
   useEffect(() => {
@@ -784,7 +829,12 @@ function MyWorkloads() {
         </p>
       </div>
     );
-  return <WorkloadGrid items={items} />;
+  return (
+    <>
+      <UsageSummary items={items} />
+      <WorkloadGrid items={items} />
+    </>
+  );
 }
 
 export function App() {
