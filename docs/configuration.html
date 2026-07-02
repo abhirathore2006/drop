@@ -35,17 +35,17 @@
   <main class="content"><article>
 <p class="crumbs">Guides</p>
 <h1>Configuration — <code>drop.yaml</code></h1>
-<p class="lead">A single optional <code>drop.yaml</code> at your build root controls routing, headers, CORS, and password protection for the published site.</p>
+<p class="lead">A single optional <code>drop.yaml</code> at your build root configures a deploy. It has three independent sections: <code>site:</code> (static-site routing/headers/CORS/auth), <code>app:</code> (a container app), and <code>database:</code> (a managed Postgres). A bundle uses whichever section fits what it deploys.</p>
 
 <h2>How it works</h2>
-<p>Put a <code>drop.yaml</code> at the root of your build folder (the same directory you publish — e.g. <code>./dist</code>), with your static config under a <code>site:</code> section. At publish time the API parses and sanitizes it; it is <strong>not</strong> served as a file, so visitors can never fetch it back. The edge then applies the parsed config on every request — resolving clean URLs, running redirects, merging headers, answering CORS, and challenging for basic auth.</p>
+<p>Put a <code>drop.yaml</code> at the root of your build/app folder (the same directory you publish or deploy — e.g. <code>./dist</code>). The static <code>site:</code> config is applied by the <strong>edge</strong> on every request; the <code>app:</code> and <code>database:</code> sections drive the <strong>compute plane</strong> (see <a href="#compute-config">App &amp; database config</a> below). At publish/deploy time the API parses and sanitizes it; it is <strong>not</strong> served as a file, so visitors can never fetch it back. The edge then applies the parsed <code>site:</code> config on every request — resolving clean URLs, running redirects, merging headers, answering CORS, and challenging for basic auth.</p>
 <p>The config is <strong>versioned with the deploy</strong>. Each publish can ship a different <code>drop.yaml</code>, and a rollback restores the exact config that shipped with that version — routing rules and all.</p>
 
 <div class="note"><span class="lbl">Note</span><p>Parsing is lenient: invalid JSON is rejected outright, but unknown fields and malformed entries are silently ignored rather than failing the publish. List fields are capped at 500 entries.</p></div>
 
 <h2>A complete example</h2>
 <p>Every key is optional. This annotated example uses all of them at once.</p>
-<pre><code><span class="tok-k">site</span>:                                  <span class="tok-c"># static-site config (the only section today)</span>
+<pre><code><span class="tok-k">site</span>:                                  <span class="tok-c"># static-site config (app: / database: are documented below)</span>
   <span class="tok-k">name</span>: <span class="tok-s">my-site</span>                        <span class="tok-c"># target site — lets `drop publish ./dist` skip the name arg</span>
   <span class="tok-k">spaFallback</span>: <span class="tok-s">index.html</span>              <span class="tok-c"># doc served on navigation misses; false to disable</span>
   <span class="tok-k">cleanUrls</span>: true                        <span class="tok-c"># /about → try /about.html</span>
@@ -144,8 +144,57 @@
 }</code></pre>
 <div class="note warn"><span class="lbl">Note</span><p>Publishing a <code>drop.yaml</code> with <code>basicAuth</code> — like setting <code>visibility=password</code> — makes the edge require an <code>Authorization: Basic</code> header before serving anything. See <a href="roles-visibility.html">Roles &amp; Visibility</a> for how this interacts with org-level visibility modes.</p></div>
 
+<h2 id="compute-config">App &amp; database config</h2>
+<p class="lead">Alongside <code>site:</code>, a <code>drop.yaml</code> can declare an <code>app:</code> section (a container app) or a <code>database:</code> section (a managed Postgres). These drive the <strong>compute plane</strong>, so they only take effect when it is enabled (<code>DROP_KUBECONFIG</code> set — see below); against a static-only instance the app/database routes return <code>501</code>. The three sections are independent — a bundle uses whichever fits what it ships.</p>
+<div class="note"><span class="lbl">Note</span><p>Runnable end-to-end walkthroughs (build an image, create a DB, wire a secret, deploy) live in the repo's <code>examples/</code> — start with <code>examples/DATABASE_APPS.md</code> and the per-example <code>drop.yaml</code> files. See also <a href="getting-started.html">Getting started</a> §Compute.</p></div>
+
+<h3>app:</h3>
+<p>Declared under <code>app:</code>, parsed at <code>drop deploy</code>. The API translates it into a Deployment + Service + KEDA <code>HTTPScaledObject</code> + a default-deny NetworkPolicy in your tenant namespace. Every key but <code>image</code> is optional.</p>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">name</span>: <span class="tok-s">myapi</span>                          <span class="tok-c"># optional; `drop deploy ./dir myapi` overrides it</span>
+  <span class="tok-k">image</span>: <span class="tok-s">myapi:1</span>                        <span class="tok-c"># required — OR run `drop deploy --build` to build ./Dockerfile and push it through Drop</span>
+  <span class="tok-k">services</span>:
+    - { <span class="tok-k">internal_port</span>: 8080 }              <span class="tok-c"># the port your app listens on (v1: exactly one HTTP service)</span>
+  <span class="tok-k">scale</span>: { <span class="tok-k">min</span>: 0, <span class="tok-k">max</span>: 3 }              <span class="tok-c"># KEDA replicas; min 0 = scale-to-zero when idle</span>
+  <span class="tok-k">resources</span>: { <span class="tok-k">cpu</span>: <span class="tok-s">"250m"</span>, <span class="tok-k">memory</span>: <span class="tok-s">"256Mi"</span> }
+  <span class="tok-k">env</span>:                                  <span class="tok-c"># NON-secret config only (secrets: `drop secrets set`, never in drop.yaml)</span>
+    <span class="tok-k">PGHOST</span>: <span class="tok-s">mydb-rw</span>
+    <span class="tok-k">PGSSLMODE</span>: <span class="tok-s">require</span>
+  <span class="tok-k">trusted</span>: true                          <span class="tok-c"># default true; false → run under the gVisor sandbox</span></code></pre>
+<table class="tbl">
+<thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>image</code></td><td>string</td><td><strong>Required.</strong> Container image reference. Skip a prebuilt image and pass <code>drop deploy --build</code> to build the folder's <code>Dockerfile</code> and stream it through Drop (no registry creds).</td></tr>
+<tr><td><code>name</code></td><td>string</td><td>Self-identifying app name (≤ 63 chars). A name argument to <code>drop deploy</code> overrides it; a contradicting name is rejected.</td></tr>
+<tr><td><code>services</code></td><td>array</td><td><code>{ internal_port, protocol? }</code>. <strong>v1: exactly one</strong> <code>http</code> service. Default <code>[{ internal_port: 8080, protocol: http }]</code>; <code>protocol: tcp</code> / multi-port is not yet supported.</td></tr>
+<tr><td><code>scale</code></td><td>object</td><td><code>{ min, max }</code> KEDA replica bounds (<code>min ≥ 0</code>, <code>max ≥ 1</code>, <code>max ≥ min</code>). <code>min: 0</code> = scale-to-zero. Default <code>{ min: 0, max: 3 }</code>.</td></tr>
+<tr><td><code>resources</code></td><td>object</td><td><code>{ cpu, memory }</code> container limits (k8s quantities, e.g. <code>"500m"</code>, <code>"512Mi"</code>). Default <code>{ cpu: "0.5", memory: "512Mi" }</code> — never unbounded.</td></tr>
+<tr><td><code>env</code></td><td>object</td><td>String→string environment variables. <strong>Non-secret only</strong> — put credentials in write-only secrets (<code>drop secrets set</code>), which are injected as env at runtime.</td></tr>
+<tr><td><code>trusted</code></td><td>boolean</td><td>Default <code>true</code>. Set <code>false</code> to run the pod under the gVisor <code>RuntimeClass</code> (stronger isolation for untrusted images).</td></tr>
+</tbody>
+</table>
+<div class="note tip"><span class="lbl">Tip</span><p>An app with <code>scale.min: 1</code> boots a pod the instant it deploys — so if it needs a secret (e.g. a DB password) to start, deploy with <code>--no-start</code>, set the secret, then <code>drop start</code>. See <a href="getting-started.html">Getting started</a>.</p></div>
+
+<h3>database:</h3>
+<p>Declared under <code>database:</code>, parsed at <code>drop db create</code>. The API translates it into a CloudNativePG <code>Cluster</code> (plus scheduled backups via the Barman Cloud Plugin) in your tenant namespace. A database has no required key — an empty section yields a default Postgres.</p>
+<pre><code><span class="tok-k">database</span>:
+  <span class="tok-k">name</span>: <span class="tok-s">mydb</span>                           <span class="tok-c"># optional; `drop db create mydb` sets it</span>
+  <span class="tok-k">engine</span>: <span class="tok-s">postgres-18</span>                  <span class="tok-c"># v1 pins to Postgres 18 (other values are ignored, not errors)</span>
+  <span class="tok-k">storage</span>: <span class="tok-s">10Gi</span>                        <span class="tok-c"># PVC size (Mi / Gi / Ti); default 10Gi</span>
+  <span class="tok-k">hibernation</span>: <span class="tok-s">none</span>                    <span class="tok-c"># or "scheduled" → an idle-shutdown CronJob (cost intent)</span></code></pre>
+<table class="tbl">
+<thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>name</code></td><td>string</td><td>Self-identifying database name (≤ 63 chars); the <code>drop db create &lt;name&gt;</code> argument sets it.</td></tr>
+<tr><td><code>engine</code></td><td>string</td><td>Pinned to <code>postgres-18</code> in v1. Unknown values are pinned to the supported engine rather than rejected (future engines are additive).</td></tr>
+<tr><td><code>storage</code></td><td>string</td><td>PVC size as a binary-SI quantity (<code>Mi</code>/<code>Gi</code>/<code>Ti</code>, e.g. <code>20Gi</code>). Default <code>10Gi</code>.</td></tr>
+<tr><td><code>hibernation</code></td><td>string</td><td><code>none</code> (default) or <code>scheduled</code> — the latter opts the cluster into the idle-shutdown CronJob.</td></tr>
+</tbody>
+</table>
+<div class="note warn"><span class="lbl">Note</span><p>The database password never appears in <code>drop.yaml</code>. Drop generates it at create; read it once, or rotate it straight into an app's write-only secret with <code>drop db password &lt;db&gt; --set-secret &lt;app&gt;:&lt;KEY&gt;</code>. Connect via the <code>&lt;name&gt;-rw</code> Service and the <code>&lt;name&gt;-app</code> credentials Secret in your namespace.</p></div>
+
 <h2>Compute environment variables</h2>
-<p class="lead">The <code>drop.yaml</code> keys above are per-bundle <em>client</em> config. The compute plane (container apps, managed databases, write-only secrets) is configured on the <strong>API server</strong> through environment variables — these are operator settings, not part of any bundle.</p>
+<p class="lead">The <code>drop.yaml</code> sections above are per-bundle <em>client</em> config. The compute plane itself (enabling it, backups, the secrets and image backends) is configured on the <strong>API server</strong> through environment variables — these are operator settings, not part of any bundle.</p>
 <div class="note"><span class="lbl">Note</span><p>Compute is <strong>opt-in</strong>: the API enables apps and databases only when <code>DROP_KUBECONFIG</code> is set. Without it Drop is static-only and <code>/v1/apps</code> / <code>/v1/databases</code> return <code>501</code>. See <a href="architecture.html">Architecture</a> §7 for how these map to the cluster.</p></div>
 
 <h3>Enabling compute</h3>
