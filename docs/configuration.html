@@ -249,6 +249,66 @@
 </table>
 <div class="note"><span class="lbl">Note</span><p>The <strong>CLI builder</strong> is a client-side setting, not a server one: <code>DROP_BUILDER</code> selects the local container CLI used to build the image (default <code>docker</code>; set to <code>podman</code> to use Podman). Image push is CLI-only today — there is no MCP tool for it yet.</p></div>
 
+<h2 id="examples">Examples</h2>
+<p>Four complete <code>drop.yaml</code> variations, from a plain static site to a container app with a managed database. Each is the whole file — mix the keys from the reference above as needed.</p>
+
+<h3>1 · Static site</h3>
+<p>A built folder with clean URLs and a custom 404. Ship it: <code>drop publish ./dist</code>.</p>
+<pre><code><span class="tok-k">site</span>:
+  <span class="tok-k">name</span>: <span class="tok-s">marketing</span>
+  <span class="tok-k">cleanUrls</span>: true                     <span class="tok-c"># /about → /about.html</span>
+  <span class="tok-k">notFound</span>: <span class="tok-s">404.html</span>
+  <span class="tok-k">headers</span>:
+    - { <span class="tok-k">source</span>: <span class="tok-s">"/assets/*"</span>, <span class="tok-k">headers</span>: { <span class="tok-k">cache-control</span>: <span class="tok-s">"public, max-age=31536000, immutable"</span> } }</code></pre>
+
+<h3>2 · Static site, password-protected</h3>
+<p>Same, gated behind HTTP Basic auth — the edge requires credentials before serving anything. Passwords are <code>"plain"</code> or <code>"sha256:&lt;hex&gt;"</code>. Ship it: <code>drop publish ./dist</code>.</p>
+<pre><code><span class="tok-k">site</span>:
+  <span class="tok-k">name</span>: <span class="tok-s">staging</span>
+  <span class="tok-k">spaFallback</span>: <span class="tok-s">index.html</span>              <span class="tok-c"># SPA: serve index.html on navigation misses</span>
+  <span class="tok-k">basicAuth</span>:
+    <span class="tok-k">realm</span>: <span class="tok-s">Staging</span>
+    <span class="tok-k">users</span>:
+      <span class="tok-k">team</span>: <span class="tok-s">"sha256:2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"</span>
+      <span class="tok-k">guest</span>: <span class="tok-s">plain</span>                     <span class="tok-c"># stored as plaintext; use sha256:&lt;hex&gt; to hash</span></code></pre>
+
+<h3>3 · Container app</h3>
+<p>A stateless HTTP app (no database). Build the folder's <code>Dockerfile</code> and deploy in one step: <code>drop deploy ./app --build</code>.</p>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">name</span>: <span class="tok-s">myapi</span>
+  <span class="tok-k">image</span>: <span class="tok-s">myapi:1</span>                        <span class="tok-c"># or omit a prebuilt ref and use `drop deploy --build`</span>
+  <span class="tok-k">services</span>:
+    - { <span class="tok-k">internal_port</span>: 8080 }              <span class="tok-c"># the port your app listens on (v1: one HTTP service)</span>
+  <span class="tok-k">scale</span>: { <span class="tok-k">min</span>: 0, <span class="tok-k">max</span>: 3 }              <span class="tok-c"># min 0 = scale-to-zero when idle</span>
+  <span class="tok-k">resources</span>: { <span class="tok-k">cpu</span>: <span class="tok-s">"250m"</span>, <span class="tok-k">memory</span>: <span class="tok-s">"256Mi"</span> }
+  <span class="tok-k">env</span>:
+    <span class="tok-k">LOG_LEVEL</span>: <span class="tok-s">info</span>                       <span class="tok-c"># non-secret config only (secrets: `drop secrets set`)</span></code></pre>
+
+<h3>4 · Container app + managed database</h3>
+<p>One <code>drop.yaml</code> with both sections. They're deployed by <strong>two commands</strong> — create the DB first, wire its password into the app's write-only secret, then deploy:</p>
+<pre><code><span class="tok-c"># drop db create guestbook-db ./app</span>
+<span class="tok-c"># drop deploy ./app --build --no-start</span>
+<span class="tok-c"># drop db password guestbook-db --set-secret guestbook:PGPASSWORD   # rotates + injects; never printed</span>
+<span class="tok-c"># drop start guestbook</span></code></pre>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">name</span>: <span class="tok-s">guestbook</span>
+  <span class="tok-k">image</span>: <span class="tok-s">guestbook:1</span>
+  <span class="tok-k">services</span>:
+    - { <span class="tok-k">internal_port</span>: 8080 }
+  <span class="tok-k">scale</span>: { <span class="tok-k">min</span>: 1, <span class="tok-k">max</span>: 2 }              <span class="tok-c"># min 1 so it stays connected to the DB</span>
+  <span class="tok-k">env</span>:                                  <span class="tok-c"># non-secret DB connection config (safe to commit)</span>
+    <span class="tok-k">PGHOST</span>: <span class="tok-s">guestbook-db-rw</span>              <span class="tok-c"># the DB's read-write Service (same namespace → short name resolves)</span>
+    <span class="tok-k">PGPORT</span>: <span class="tok-s">"5432"</span>
+    <span class="tok-k">PGUSER</span>: <span class="tok-s">app</span>
+    <span class="tok-k">PGDATABASE</span>: <span class="tok-s">app</span>
+    <span class="tok-k">PGSSLMODE</span>: <span class="tok-s">require</span>
+    <span class="tok-c"># PGPASSWORD is a SECRET — never here; injected via `drop db password … --set-secret`</span>
+
+<span class="tok-k">database</span>:
+  <span class="tok-k">name</span>: <span class="tok-s">guestbook-db</span>                   <span class="tok-c"># must match the PGHOST above (&lt;name&gt;-rw)</span>
+  <span class="tok-k">storage</span>: <span class="tok-s">1Gi</span>                         <span class="tok-c"># default + current hard cap</span></code></pre>
+<div class="note tip"><span class="lbl">Tip</span><p>An app that needs a secret to boot (like <code>PGPASSWORD</code>) should deploy with <code>--no-start</code>, get its secret set, then <code>drop start</code> — otherwise a <code>scale.min: 1</code> pod crash-loops before the secret exists. See <a href="getting-started.html">Getting started</a> §Compute.</p></div>
+
 <div class="next">
   <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
   <a href="roles-visibility.html"><div class="d">Next →</div><div class="t">Roles &amp; Visibility</div></a>
