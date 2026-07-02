@@ -109,9 +109,12 @@
     <ul>
       <li><strong>NetworkPolicy</strong> — default-deny; the egress allowlist excludes the cluster pod/service
       CIDRs (<code>DROP_BLOCKED_EGRESS_CIDRS</code>) so tenants can't reach each other or the platform DB.</li>
-      <li><strong>ResourceQuota</strong> + <strong>LimitRange</strong> (no unbounded pods),
+      <li><strong>ResourceQuota</strong> + <strong>LimitRange</strong> (no unbounded pods; cpu/memory capped),
       <strong>PodSecurity</strong> (baseline) labels, and the <strong>gVisor</strong> RuntimeClass for untrusted
       images in prod.</li>
+      <li><strong>Storage</strong> — a managed database's PVC is capped at <strong>1Gi per database</strong>
+      today (requests over it are rejected at create with a <code>400</code>). A fuller per-app +
+      per-tenant, admin-adjustable storage quota is planned (see <code>Future.md</code> §10).</li>
     </ul>
     <div class="mermaid" id="m7"></div>
 
