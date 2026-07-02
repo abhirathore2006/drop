@@ -180,14 +180,14 @@
 <pre><code><span class="tok-k">database</span>:
   <span class="tok-k">name</span>: <span class="tok-s">mydb</span>                           <span class="tok-c"># optional; `drop db create mydb` sets it</span>
   <span class="tok-k">engine</span>: <span class="tok-s">postgres-18</span>                  <span class="tok-c"># v1 pins to Postgres 18 (other values are ignored, not errors)</span>
-  <span class="tok-k">storage</span>: <span class="tok-s">10Gi</span>                        <span class="tok-c"># PVC size (Mi / Gi / Ti); default 10Gi</span>
+  <span class="tok-k">storage</span>: <span class="tok-s">1Gi</span>                         <span class="tok-c"># PVC size (Mi / Gi / Ti); default 1Gi, hard cap 1Gi (rejected if larger)</span>
   <span class="tok-k">hibernation</span>: <span class="tok-s">none</span>                    <span class="tok-c"># or "scheduled" → an idle-shutdown CronJob (cost intent)</span></code></pre>
 <table class="tbl">
 <thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
 <tbody>
 <tr><td><code>name</code></td><td>string</td><td>Self-identifying database name (≤ 63 chars); the <code>drop db create &lt;name&gt;</code> argument sets it.</td></tr>
 <tr><td><code>engine</code></td><td>string</td><td>Pinned to <code>postgres-18</code> in v1. Unknown values are pinned to the supported engine rather than rejected (future engines are additive).</td></tr>
-<tr><td><code>storage</code></td><td>string</td><td>PVC size as a binary-SI quantity (<code>Mi</code>/<code>Gi</code>/<code>Ti</code>, e.g. <code>20Gi</code>). Default <code>10Gi</code>.</td></tr>
+<tr><td><code>storage</code></td><td>string</td><td>PVC size as a binary-SI quantity (<code>Mi</code>/<code>Gi</code>/<code>Ti</code>, e.g. <code>512Mi</code>). Default <code>1Gi</code>; a <strong>hard cap of <code>1Gi</code></strong> applies today — a larger request is rejected at create with a <code>400</code> (a fuller per-app + per-tenant quota system is planned). </td></tr>
 <tr><td><code>hibernation</code></td><td>string</td><td><code>none</code> (default) or <code>scheduled</code> — the latter opts the cluster into the idle-shutdown CronJob.</td></tr>
 </tbody>
 </table>

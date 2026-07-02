@@ -64,10 +64,13 @@ export async function loadAppDeploy(
  * (server applies defaults) when there's no drop.yaml or no database: section.
  */
 export async function loadDatabaseCreate(dir: string): Promise<DatabaseConfig | Record<string, never>> {
+  let text: string;
   try {
-    const text = await readFile(join(dir, CONFIG_FILE_YAML), "utf8");
-    return parseDatabaseConfig(text) ?? {};
+    text = await readFile(join(dir, CONFIG_FILE_YAML), "utf8");
   } catch {
-    return {}; // no drop.yaml → server defaults (postgres-18, 10Gi, no hibernation)
+    return {}; // no drop.yaml → server defaults (postgres-18, 1Gi, no hibernation)
   }
+  // A parse / validation error (e.g. storage over the per-database cap) must PROPAGATE — not be
+  // swallowed like a missing file — so the CLI/MCP reject it up front with a clear message.
+  return parseDatabaseConfig(text) ?? {};
 }

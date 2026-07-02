@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { sanitizeDatabaseConfig, parseDatabaseConfig, validateDbPassword, generateDbPassword } from "./db-config.ts";
+import { sanitizeDatabaseConfig, parseDatabaseConfig, validateDbPassword, generateDbPassword, validateDbStorage } from "./db-config.ts";
 
 test("validateDbPassword: accepts strong printable passwords, rejects short/whitespace/quotes/non-strings", () => {
   expect(validateDbPassword("a-valid-password-123")).toBeNull();
@@ -27,7 +27,7 @@ test("generateDbPassword: returns a strong password that always passes validatio
 test("sanitizeDatabaseConfig: empty object → engine + storage + hibernation defaults", () => {
   const c = sanitizeDatabaseConfig({})!;
   expect(c.engine).toBe("postgres-18");
-  expect(c.storage).toBe("10Gi");
+  expect(c.storage).toBe("1Gi"); // default sits at the cap
   expect(c.hibernation).toBe("none");
   expect(c.name).toBeUndefined();
 });
@@ -35,20 +35,32 @@ test("sanitizeDatabaseConfig: empty object → engine + storage + hibernation de
 test("sanitizeDatabaseConfig: a bare/null database section still yields a default DB", () => {
   const c = sanitizeDatabaseConfig(null)!;
   expect(c.engine).toBe("postgres-18");
-  expect(c.storage).toBe("10Gi");
+  expect(c.storage).toBe("1Gi");
 });
 
 test("sanitizeDatabaseConfig: accepts a valid storage quantity + scheduled hibernation + name", () => {
-  const c = sanitizeDatabaseConfig({ name: "billing-db", storage: "20Gi", hibernation: "scheduled" })!;
+  const c = sanitizeDatabaseConfig({ name: "billing-db", storage: "512Mi", hibernation: "scheduled" })!;
   expect(c.name).toBe("billing-db");
-  expect(c.storage).toBe("20Gi");
+  expect(c.storage).toBe("512Mi");
   expect(c.hibernation).toBe("scheduled");
 });
 
-test("sanitizeDatabaseConfig: rejects a bad storage quantity (falls back to default)", () => {
-  expect(sanitizeDatabaseConfig({ storage: "10 gigs" })!.storage).toBe("10Gi");
-  expect(sanitizeDatabaseConfig({ storage: "500Mi" })!.storage).toBe("500Mi");
-  expect(sanitizeDatabaseConfig({ storage: "1Ti" })!.storage).toBe("1Ti");
+test("sanitizeDatabaseConfig: bad or over-cap storage falls back to the default (clamp)", () => {
+  expect(sanitizeDatabaseConfig({ storage: "10 gigs" })!.storage).toBe("1Gi"); // malformed → default
+  expect(sanitizeDatabaseConfig({ storage: "500Mi" })!.storage).toBe("500Mi"); // within cap → kept
+  expect(sanitizeDatabaseConfig({ storage: "1Gi" })!.storage).toBe("1Gi"); // exactly the cap → kept
+  expect(sanitizeDatabaseConfig({ storage: "20Gi" })!.storage).toBe("1Gi"); // over cap → clamped to default
+  expect(sanitizeDatabaseConfig({ storage: "1Ti" })!.storage).toBe("1Gi"); // over cap → clamped to default
+});
+
+test("validateDbStorage: caps requests at 1Gi with a clear error; absent/within-cap → null", () => {
+  expect(validateDbStorage({})).toBeNull(); // no storage requested → default applies
+  expect(validateDbStorage({ storage: "1Gi" })).toBeNull(); // at the cap
+  expect(validateDbStorage({ storage: "512Mi" })).toBeNull(); // under the cap
+  expect(validateDbStorage({ storage: "2Gi" })).toMatch(/exceeds the 1Gi/); // over the cap
+  expect(validateDbStorage({ storage: "1Ti" })).toMatch(/exceeds the 1Gi/);
+  expect(validateDbStorage({ storage: "10 gigs" })).toMatch(/invalid storage/); // malformed
+  expect(validateDbStorage({ storage: 5 })).toMatch(/invalid storage/); // non-string
 });
 
 test("sanitizeDatabaseConfig: pins engine to postgres-18 (v1 only supports it)", () => {
@@ -66,17 +78,21 @@ test("sanitizeDatabaseConfig: a non-object scalar input → undefined", () => {
 });
 
 test("parseDatabaseConfig: extracts the database: section of drop.yaml", () => {
-  const text = `database:\n  name: billing-db\n  storage: 20Gi\n  hibernation: scheduled\n`;
+  const text = `database:\n  name: billing-db\n  storage: 512Mi\n  hibernation: scheduled\n`;
   const c = parseDatabaseConfig(text)!;
   expect(c.name).toBe("billing-db");
-  expect(c.storage).toBe("20Gi");
+  expect(c.storage).toBe("512Mi");
   expect(c.hibernation).toBe("scheduled");
+});
+
+test("parseDatabaseConfig: rejects an over-cap storage request up front (throws)", () => {
+  expect(() => parseDatabaseConfig(`database:\n  storage: 20Gi\n`)).toThrow(/exceeds the 1Gi/);
 });
 
 test("parseDatabaseConfig: a bare `database:` key (null) still makes a default DB", () => {
   const c = parseDatabaseConfig("database:\n")!;
   expect(c.engine).toBe("postgres-18");
-  expect(c.storage).toBe("10Gi");
+  expect(c.storage).toBe("1Gi");
 });
 
 test("parseDatabaseConfig: no database: section → undefined", () => {

@@ -605,7 +605,7 @@ test("app secrets: validation + type/existence guards", async () => {
 
 test("db:create claims type=database, applies CNPG manifests, returns a connection ref (no password)", async () => {
   const { app, meta, kube, db } = await mk();
-  const res = await call(app, "POST", "/v1/databases/billing", "alice", { storage: "20Gi", hibernation: "scheduled" });
+  const res = await call(app, "POST", "/v1/databases/billing", "alice", { storage: "512Mi", hibernation: "scheduled" });
   expect(res.status).toBe(200);
   const j = await res.json();
   expect(j.host).toBe(`billing-rw.${kube.dbApplies[0]!.namespace}.svc.cluster.local`);
@@ -621,7 +621,7 @@ test("db:create claims type=database, applies CNPG manifests, returns a connecti
   expect(kube.dbApplies).toHaveLength(1);
   const m = kube.dbApplies[0]!.manifests;
   expect((m.cluster as any).spec.plugins[0].name).toBe("barman-cloud.cloudnative-pg.io");
-  expect((m.cluster as any).spec.storage.size).toBe("20Gi");
+  expect((m.cluster as any).spec.storage.size).toBe("512Mi");
   expect((m.cluster as any).metadata.labels["drop.dev/hibernation"]).toBe("scheduled");
   expect((m.objectStore as any).apiVersion).toBe("barmancloud.cnpg.io/v1");
   await db.destroy();
@@ -637,8 +637,19 @@ test("db:create emits a platform-owned basic-auth app Secret (bootstrap source) 
   expect(m.appSecret.stringData.username).toBe("app");
   expect(m.appSecret.stringData.password.length).toBeGreaterThanOrEqual(12);
   // re-apply (update) must NOT re-emit the Secret (never silently rotate the password)
-  await call(app, "POST", "/v1/databases/billing", "alice", { storage: "20Gi" });
+  await call(app, "POST", "/v1/databases/billing", "alice", { storage: "512Mi" });
   expect((kube.dbApplies[1]!.manifests as any).appSecret).toBeUndefined();
+  await db.destroy();
+});
+
+test("db:create rejects a storage request over the 1Gi cap with a 400 (control-plane enforcement)", async () => {
+  const { app, kube, db } = await mk();
+  const res = await call(app, "POST", "/v1/databases/toobig", "alice", { storage: "5Gi" });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error).toMatch(/exceeds the 1Gi/);
+  expect(kube.dbApplies).toHaveLength(0); // nothing provisioned
+  // at/under the cap is accepted
+  expect((await call(app, "POST", "/v1/databases/okdb", "alice", { storage: "1Gi" })).status).toBe(200);
   await db.destroy();
 });
 

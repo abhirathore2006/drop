@@ -17,8 +17,31 @@ export interface DatabaseConfig {
 }
 
 const ENGINE: DatabaseEngine = "postgres-18";
-const DEFAULT_STORAGE = "10Gi";
+// Per-database storage cap (interim, until the full app+tenant quota system — see Future.md).
+// A hard ceiling on the PVC a database may request; the default sits at the cap.
+export const MAX_DB_STORAGE = "1Gi";
+const MAX_DB_STORAGE_BYTES = 1 * 2 ** 30; // 1Gi
+const DEFAULT_STORAGE = MAX_DB_STORAGE;
 const STORAGE_RE = /^\d+(\.\d+)?(Mi|Gi|Ti)$/; // a sane PVC quantity (binary SI)
+const STORAGE_UNIT: Record<string, number> = { Mi: 2 ** 20, Gi: 2 ** 30, Ti: 2 ** 40 };
+
+/** Parse a k8s binary-SI storage quantity (e.g. "512Mi", "1Gi") to bytes, or null if malformed. */
+export function storageToBytes(s: string): number | null {
+  const m = /^(\d+(?:\.\d+)?)(Mi|Gi|Ti)$/.exec(s);
+  return m ? parseFloat(m[1]!) * STORAGE_UNIT[m[2]!]! : null;
+}
+
+/** Validate an explicitly-requested database storage size against the per-database cap. Returns an
+ *  error string, or null when acceptable (including when no storage is requested → default applies). */
+export function validateDbStorage(input: unknown): string | null {
+  if (input == null || typeof input !== "object") return null;
+  const s = (input as Record<string, unknown>).storage;
+  if (s == null) return null; // not requested → server default (within the cap)
+  if (typeof s !== "string" || !STORAGE_RE.test(s)) return `invalid storage ${JSON.stringify(s)} — use a k8s quantity like 512Mi or 1Gi`;
+  const bytes = storageToBytes(s);
+  if (bytes != null && bytes > MAX_DB_STORAGE_BYTES) return `database storage ${s} exceeds the ${MAX_DB_STORAGE} per-database limit`;
+  return null;
+}
 
 function str(v: unknown, max = 2048): string | undefined {
   return typeof v === "string" && v.length > 0 && v.length <= max ? v : undefined;
@@ -39,8 +62,14 @@ export function sanitizeDatabaseConfig(input: unknown): DatabaseConfig | undefin
   const name = str(raw.name, 63);
   if (name && validateName(name) === null) cfg.name = name;
 
+  // Accept the requested size only if well-formed AND within the cap; otherwise keep the default.
+  // (The loud rejection with a clear error is validateDbStorage, run at the CLI + control-plane
+  // boundaries; this is the belt-and-suspenders that guarantees no over-cap PVC is ever emitted.)
   const storage = str(raw.storage, 32);
-  if (storage && STORAGE_RE.test(storage)) cfg.storage = storage;
+  if (storage && STORAGE_RE.test(storage)) {
+    const b = storageToBytes(storage);
+    if (b != null && b <= MAX_DB_STORAGE_BYTES) cfg.storage = storage;
+  }
 
   if (raw.hibernation === "scheduled") cfg.hibernation = "scheduled";
 
@@ -69,9 +98,14 @@ export function generateDbPassword(): string {
   return randomBytes(18).toString("base64url");
 }
 
-/** Parse a `drop.yaml` body and return its `database:` section, or undefined if absent. */
+/** Parse a `drop.yaml` body and return its `database:` section, or undefined if absent.
+ *  Throws a clear error if the section requests more than the per-database storage cap, so the CLI
+ *  (and MCP) reject it up front rather than silently coercing it to the default. */
 export function parseDatabaseConfig(text: string): DatabaseConfig | undefined {
   const doc = parseYaml(text) as Record<string, unknown> | null;
   if (!doc || typeof doc !== "object" || !("database" in doc)) return undefined;
-  return sanitizeDatabaseConfig((doc as Record<string, unknown>).database);
+  const raw = (doc as Record<string, unknown>).database;
+  const err = validateDbStorage(raw);
+  if (err) throw new Error(err);
+  return sanitizeDatabaseConfig(raw);
 }

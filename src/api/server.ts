@@ -22,7 +22,7 @@ import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
 import { sanitizeAppConfig, assertHttpOnly } from "../app-config.ts";
-import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword } from "../db-config.ts";
+import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword, validateDbStorage } from "../db-config.ts";
 import { appManifests, tenantManifests } from "../kube/manifests.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
 import { PasswordSyncError, type KubeClient } from "../kube/types.ts";
@@ -573,6 +573,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     } catch {
       return c.json({ error: "invalid JSON body" }, 400);
     }
+    // Enforce the per-database storage cap on the control plane (rejects raw API/MCP callers with a
+    // clear error; the CLI already rejects up front). sanitize would otherwise silently clamp it.
+    const storageErr = validateDbStorage(body);
+    if (storageErr) return c.json({ error: storageErr }, 400);
     const dbCfg = sanitizeDatabaseConfig(body);
     if (!dbCfg) return c.json({ error: "invalid database config" }, 400);
     if (dbCfg.name && dbCfg.name !== name) {

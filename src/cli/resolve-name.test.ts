@@ -57,11 +57,16 @@ test("loadAppDeploy throws when no app: section / no drop.yaml", async () => {
 import { loadDatabaseCreate } from "./resolve-name.ts";
 
 test("loadDatabaseCreate reads the database: section (storage + hibernation)", async () => {
-  const d = dirWith({ "drop.yaml": "database:\n  storage: 20Gi\n  hibernation: scheduled\n" });
+  const d = dirWith({ "drop.yaml": "database:\n  storage: 512Mi\n  hibernation: scheduled\n" });
   const c = (await loadDatabaseCreate(d)) as any;
-  expect(c.storage).toBe("20Gi");
+  expect(c.storage).toBe("512Mi");
   expect(c.hibernation).toBe("scheduled");
   expect(c.engine).toBe("postgres-18");
+});
+
+test("loadDatabaseCreate rejects an over-cap storage request (does not swallow it as a missing file)", async () => {
+  const d = dirWith({ "drop.yaml": "database:\n  storage: 20Gi\n" });
+  await expect(loadDatabaseCreate(d)).rejects.toThrow(/exceeds the 1Gi/);
 });
 
 test("loadDatabaseCreate returns {} (server defaults) when there's no drop.yaml or no database: section", async () => {
