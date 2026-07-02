@@ -996,6 +996,9 @@ export function App() {
               all tenants
             </button>
           )}
+          <a className="navlink" href="/docs/" target="_blank" rel="noreferrer">
+            docs ↗
+          </a>
           <span className="who">{me.email}</span>
           <a className="navlink" href="/logout">
             logout
