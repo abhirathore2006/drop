@@ -426,7 +426,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs })); // namespace + NetworkPolicy + quota + LimitRange
     const sandbox = !appCfg.trusted;
     const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
-    const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret });
+    // versionId (H1): stamps `drop.dev/version` on the pod template so THIS deploy always rolls
+    // pods, even when the image tag is unchanged from the previous version.
+    const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId });
     // A stopped deploy (--no-start / already-stopped) rolls out nothing yet, so it also SKIPS the
     // release phase — the point of --no-start is to configure secrets first, and the release command
     // (which needs those secrets/the DB) would otherwise fail against an unconfigured app.
@@ -463,7 +465,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         }
         if (stopped) await kube.stopApp(ns, name);
 
-        await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
+        // (H1) Persist the full sanitized AppConfig — including the resolved image ref — on the
+        // version row. This is what makes rollback possible: a later rollback re-applies exactly
+        // this stored config via appManifests, rather than needing to reconstruct it.
+        await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0, config: appCfg });
         await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
         return { halt: false as const, stopped };
       });
@@ -851,16 +856,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.post("/v1/databases/:name/wake", dbHibernation("wake"));
 
   // ---- rollback ----
+  // Static sites flip the version pointer (bytes for every version already exist in blob storage).
+  // Apps (H1) re-apply the target version's STORED config as a fresh manifest set — see below.
+  // Databases have no analogous stored-config/version-bytes path; "rolling back" would desync
+  // metadata from the running CNPG cluster — restore-from-backup is the equivalent there.
   app.post("/v1/sites/:name/rollback", async (c) => {
     const email = c.get("identity").email;
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
     if (!can(await actorFor(email, site), "rollback")) return c.json({ error: "not permitted" }, 403);
-    // Rollback restores a previous published-version pointer — meaningful only for static sites.
-    // Apps/databases have no version bytes to flip; "rolling back" would desync metadata from the
-    // running workload. Re-deploy (apps) or restore-from-backup (DBs) is the equivalent.
-    if (site.type !== "site") return c.json({ error: `rollback is for static sites; re-deploy a ${site.type} instead` }, 409);
+    if (site.type === "database") return c.json({ error: "rollback is for static sites/apps; restore-from-backup a database instead" }, 409);
 
     const body = (await c.req.json().catch(() => ({}))) as { to?: string };
     let target = body.to ?? "";
@@ -871,8 +877,43 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     } else if (!versions.some((v) => v.id === target)) {
       return c.json({ error: "unknown version" }, 400);
     }
-    const targetConfig = versions.find((v) => v.id === target)?.config;
-    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: target, config: targetConfig }));
+
+    if (site.type === "site") {
+      const targetConfig = versions.find((v) => v.id === target)?.config as SiteConfig | undefined;
+      await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: target, config: targetConfig }));
+      return c.json({ url: siteUrl(name), version: target });
+    }
+
+    // ---- app rollback (H1) ----
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const appCfg = versions.find((v) => v.id === target)?.config as AppConfig | undefined;
+    // A version deployed before H1 shipped never recorded its config — nothing to re-apply.
+    if (!appCfg) return c.json({ error: `version ${target} predates rollback support (no stored config) — re-deploy instead` }, 409);
+    const ns = site.namespace;
+    const kube = d.kube;
+    const theSite = site;
+    try {
+      await locks.withLock(`deploy:${name}`, DEPLOY_LOCK_TTL_MS, async () => {
+        const sandbox = !appCfg.trusted;
+        const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
+        // Same context construction as deploy (sandbox/imagePullSecret/host); versionId stamps the
+        // pod-template annotation so a rollback to a version with the SAME image tag as what's
+        // currently running still rolls the pods.
+        const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: target });
+        // Rollback re-applies a KNOWN-good, previously-deployed version — the release phase is
+        // intentionally SKIPPED here (unlike a fresh deploy): re-running a migration command against
+        // a database that has already moved past it (or moved differently since) would be wrong, not
+        // merely redundant.
+        await kube.applyApp(ns, name, manifests);
+        const secretKeys = (await d.meta.listSecretKeys(name)).map((k) => k.key);
+        await d.secrets.ensureBinding({ owner: theSite.owner, app: name, namespace: ns }, secretKeys);
+        if (theSite.runtimeState === "stopped") await kube.stopApp(ns, name); // stay down across rollback, mirroring deploy
+        await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: target }));
+      });
+    } catch (e) {
+      if (e instanceof LockHeldError) return c.json({ error: `a deploy is already in progress for ${name}` }, 409);
+      throw e;
+    }
     return c.json({ url: siteUrl(name), version: target });
   });
 
@@ -941,6 +982,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   });
 
   // ---- recent workload logs (crash diagnostics; apps + databases) ----
+  // G1: `?follow=1` streams the workload's logs live as chunked text/plain instead of a one-shot
+  // tail. Multi-pod apps: v1 follows the FIRST READY pod only — no multiplexing across replicas
+  // (see KubeClient.getWorkloadLogsStream).
   app.get("/v1/sites/:name/logs", async (c) => {
     const email = c.get("identity").email;
     const name = c.req.param("name");
@@ -948,10 +992,24 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!site) return c.json({ error: "no such site" }, 404);
     // logs (not read): a viewer is metadata-only — pod logs can leak env-injected secrets.
     if (!can(await actorFor(email, site), "logs")) return c.json({ error: "not permitted" }, 403);
-    if (!d.kube || site.type === "site") return c.json({ logs: "" }); // static sites have no pods
     const tail = Math.min(Number(c.req.query("tail") ?? "100") || 100, 1000);
     // ?release=1 resolves the LATEST release Job's pod instead of the app pods (drop logs --release).
     const wantRelease = c.req.query("release") === "1" || c.req.query("release") === "true";
+    const wantFollow = c.req.query("follow") === "1" || c.req.query("follow") === "true";
+    if (wantFollow && wantRelease) return c.json({ error: "?follow does not support ?release — a release Job runs once and exits" }, 400);
+
+    if (wantFollow) {
+      // No pods to follow: static sites have none; without a cluster there's nothing to stream.
+      if (!d.kube || site.type === "site") return c.body("", 200, { "content-type": "text/plain; charset=utf-8" });
+      // A client disconnect must abort the upstream kube request (no leaked sockets): pass the
+      // incoming request's AbortSignal straight through — @hono/node-server aborts it when the
+      // response socket closes before the body finishes writing (see its `makeCloseHandler`).
+      const stream = await d.kube.getWorkloadLogsStream(site.namespace, name, { tailLines: tail, signal: c.req.raw.signal });
+      if (!stream) return c.body("", 200, { "content-type": "text/plain; charset=utf-8" });
+      return new Response(Readable.toWeb(stream) as ReadableStream, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+
+    if (!d.kube || site.type === "site") return c.json({ logs: "" }); // static sites have no pods
     let logs = "";
     try {
       logs = wantRelease ? await d.kube.getReleaseLogs(site.namespace, name, tail) : await d.kube.getWorkloadLogs(site.namespace, name, tail);
@@ -1331,13 +1389,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await ensureTenant(ns);
     const sandbox = !appCfg.trusted;
     const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
-    const manifests = appManifests(appCfg, { name: site.name, namespace: ns, host: `${site.name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret });
+    const verId = newVersionId(now()); // minted up front so it can stamp the pod-template annotation (H1)
+    const manifests = appManifests(appCfg, { name: site.name, namespace: ns, host: `${site.name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId });
     await d.kube!.applyApp(ns, site.name, manifests);
     const secretKeys = (await d.meta.listSecretKeys(site.name)).map((k) => k.key);
     await d.secrets.ensureBinding({ owner: site.owner, app: site.name, namespace: ns }, secretKeys);
     if (site.runtimeState === "stopped") await d.kube!.stopApp(ns, site.name); // a stopped app stays down across up
-    const verId = newVersionId(now());
-    await d.meta.putVersion(site.name, { id: verId, publishedBy: "stack", createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
+    // (H1) Store the resolved AppConfig so a stack-deployed app can also be rolled back.
+    await d.meta.putVersion(site.name, { id: verId, publishedBy: "stack", createdAt: now().toISOString(), fileCount: 0, bytes: 0, config: appCfg });
     await d.meta.updateSite(site.name, (s) => ({ ...s, currentVersion: verId }));
   };
 

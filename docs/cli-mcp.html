@@ -82,7 +82,8 @@ drop publish ./dist myapp</code></pre>
 <tr><td><code>secrets ls &lt;app&gt;</code></td><td>List an app's secret key names + metadata (never the values)</td><td><code>drop secrets ls myapi</code></td></tr>
 <tr><td><code>secrets rm &lt;app&gt; &lt;KEY&gt;</code></td><td>Delete a secret</td><td><code>drop secrets rm myapi DB_PASSWORD</code></td></tr>
 <tr><td><code>restart / stop / start &lt;app&gt;</code></td><td>Lifecycle: roll the pods (apply secrets) / true-offline / resume</td><td><code>drop restart myapi</code></td></tr>
-<tr><td><code>rollback &lt;name&gt;</code></td><td>Roll back to the previous version, or <code>--to &lt;version&gt;</code> for a specific one (version ids look like <code>v_…</code>; see <code>drop info</code>)</td><td><code>drop rollback myapp</code></td></tr>
+<tr><td><code>logs &lt;name&gt;</code></td><td>Recent logs for an app/database (<code>--release</code> reads the latest release Job's pod instead of the app pods). <code>-f, --follow</code> streams new lines live as they're written — press Ctrl-C to stop; not combinable with <code>--release</code></td><td><code>drop logs myapi -f</code></td></tr>
+<tr><td><code>rollback &lt;name&gt;</code></td><td>Roll back to the previous version, or <code>--to &lt;version&gt;</code> for a specific one (version ids look like <code>v_…</code>; see <code>drop info</code>). Works for <strong>sites</strong> (flips the version pointer) and <strong>apps</strong> (re-applies the target version's stored deploy config, then rolls the pods — a version deployed before this shipped has nothing stored and can't be rolled back to). Databases have no equivalent — restore from a backup instead</td><td><code>drop rollback myapp</code></td></tr>
 <tr><td><code>info &lt;name&gt;</code></td><td>Show site metadata</td><td><code>drop info myapp</code></td></tr>
 <tr><td><code>members &lt;name&gt;</code></td><td>Show owner + collaborators</td><td><code>drop members myapp</code></td></tr>
 <tr><td><code>ls [--org &lt;slug&gt;]</code></td><td>List your workloads (sites · apps · databases); <code>--org</code> filters to one organisation</td><td><code>drop ls --org acme</code></td></tr>
@@ -147,7 +148,7 @@ work without a separate build:</p>
 <tr><td><code>app_restart</code> / <code>app_stop</code> / <code>app_start</code></td><td><code>app</code></td><td>Lifecycle: roll pods / true-offline / resume</td></tr>
 <tr><td><code>list_sites</code></td><td><span class="cx">—</span></td><td>List sites you own or collaborate on</td></tr>
 <tr><td><code>site_info</code></td><td><code>name</code></td><td>Show owner, collaborators, current version, and history</td></tr>
-<tr><td><code>rollback</code></td><td><code>name</code>, <code>version?</code></td><td>Roll a site back to its previous (or a specific) version</td></tr>
+<tr><td><code>rollback</code></td><td><code>name</code>, <code>version?</code></td><td>Roll a site OR app back to its previous (or a specific) version</td></tr>
 <tr><td><code>delete_site</code></td><td><code>name</code></td><td>Unpublish a site (owner only)</td></tr>
 <tr><td><code>add_collaborator</code></td><td><code>name</code>, <code>email</code></td><td>Grant another user publish access (owner only)</td></tr>
 <tr><td><code>remove_collaborator</code></td><td><code>name</code>, <code>email</code></td><td>Revoke a collaborator (owner only)</td></tr>

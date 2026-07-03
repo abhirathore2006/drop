@@ -446,6 +446,52 @@ test("GET /v1/sites/:name/logs?release=1 reads the latest release Job's pod logs
   await db.destroy();
 });
 
+// ---- G1: `drop logs -f` (streaming follow) ----
+
+test("GET /v1/sites/:name/logs?follow=1 streams the scripted lines as chunked text/plain, then ends", async () => {
+  const { app, kube, meta, db } = await mk();
+  await call(app, "POST", "/v1/apps/logapp", "alice", { image: "x:1" });
+  const ns = (await meta.getSitePlain("logapp"))!.namespace;
+  kube.scriptedLogStreams.set(`${ns}/logapp`, { lines: ["line one", "line two"] });
+  const res = await app.request("/v1/sites/logapp/logs?follow=1", { headers: { authorization: "Bearer alice" } });
+  expect(res.status).toBe(200);
+  expect(res.headers.get("content-type")).toContain("text/plain");
+  expect(await res.text()).toBe("line one\nline two\n");
+  await db.destroy();
+});
+
+test("GET /v1/sites/:name/logs?follow=1 with no pod to follow -> empty stream, not an error", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/logapp", "alice", { image: "x:1" });
+  // no scripted stream registered -> FakeKube's getWorkloadLogsStream returns null
+  const res = await app.request("/v1/sites/logapp/logs?follow=1", { headers: { authorization: "Bearer alice" } });
+  expect(res.status).toBe(200);
+  expect(await res.text()).toBe("");
+  await db.destroy();
+});
+
+test("GET /v1/sites/:name/logs?follow=1&release=1 is rejected — a release Job runs once, it can't be followed", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/logapp", "alice", { image: "x:1" });
+  const res = await app.request("/v1/sites/logapp/logs?follow=1&release=1", { headers: { authorization: "Bearer alice" } });
+  expect(res.status).toBe(400);
+  await db.destroy();
+});
+
+test("GET /v1/sites/:name/logs?follow=1 aborts the upstream kube stream when the client disconnects", async () => {
+  const { app, kube, meta, db } = await mk();
+  await call(app, "POST", "/v1/apps/logapp", "alice", { image: "x:1" });
+  const ns = (await meta.getSitePlain("logapp"))!.namespace;
+  kube.scriptedLogStreams.set(`${ns}/logapp`, { lines: ["still going"], keepOpen: true }); // never ends on its own
+  const controller = new AbortController();
+  const res = await app.request("/v1/sites/logapp/logs?follow=1", { headers: { authorization: "Bearer alice" }, signal: controller.signal });
+  expect(res.status).toBe(200);
+  expect(kube.logStreamAborts).toEqual([]); // not aborted yet
+  controller.abort(); // simulate the client going away mid-stream
+  expect(kube.logStreamAborts).toEqual([{ namespace: ns, name: "logapp" }]); // upstream torn down, no leaked socket
+  await db.destroy();
+});
+
 test("image push: claims the app, streams the tarball to the ImageStore, returns the in-cluster ref", async () => {
   const { app, images, meta, db } = await mk();
   const body = new Uint8Array([1, 2, 3, 4, 5]);
@@ -712,13 +758,90 @@ test("app lifecycle: restart/stop/start (editor+), runtime_state tracked; redepl
   await db.destroy();
 });
 
-test("visibility + rollback are static-site only (409 on an app); no fail-open visibility", async () => {
+test("visibility is static-site only (409 on an app); no fail-open visibility", async () => {
   const { app, db } = await mk();
   await call(app, "POST", "/v1/apps/myapp", "alice", { image: "x:1" });
   // an app must not be settable to private/password (the edge proxy path can't enforce it → fail-open)
   expect((await call(app, "POST", "/v1/sites/myapp/visibility", "alice", { visibility: "private" })).status).toBe(409);
-  // rollback is meaningless for an app (no version bytes) — re-deploy instead
-  expect((await call(app, "POST", "/v1/sites/myapp/rollback", "alice", {})).status).toBe(409);
+  // a single-version app has nothing to roll back TO yet (H1 rollback itself is exercised below)
+  expect((await call(app, "POST", "/v1/sites/myapp/rollback", "alice", {})).status).toBe(400);
+  await db.destroy();
+});
+
+test("rollback is database-only-409 (no version bytes / stored config equivalent to restore from)", async () => {
+  const { app, db } = await mk();
+  const dbCfg = { storage: "1Gi" };
+  await call(app, "POST", "/v1/databases/mydb", "alice", dbCfg);
+  const res = await call(app, "POST", "/v1/sites/mydb/rollback", "alice", {});
+  expect(res.status).toBe(409);
+  expect((await res.json()).error).toMatch(/restore-from-backup/);
+  await db.destroy();
+});
+
+// ---- H1: app rollback ----
+
+test("app rollback: re-applies the target version's stored config (old image + fresh version annotation); currentVersion flips", async () => {
+  const { app, kube, meta, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:2" });
+  const ns = (await meta.getSitePlain("billing"))!.namespace;
+  const before = await meta.listVersions("billing");
+  const currentBefore = (await meta.getSitePlain("billing"))!.currentVersion;
+  const target = before.find((v) => v.id !== currentBefore)!.id;
+
+  const appliesBefore = kube.applies.length;
+  const res = await call(app, "POST", "/v1/sites/billing/rollback", "alice", {});
+  expect(res.status).toBe(200);
+  const j = await res.json();
+  expect(j.version).toBe(target);
+
+  // a NEW apply was made (re-applying the OLD version's manifests), not a no-op
+  expect(kube.applies.length).toBe(appliesBefore + 1);
+  const lastApply = kube.applies[kube.applies.length - 1]!;
+  expect(lastApply.namespace).toBe(ns);
+  const ctr = (lastApply.manifests.deployment as any).spec.template.spec.containers[0];
+  expect(ctr.image).toBe("x:1"); // the TARGET version's image, not the currently-running x:2
+  // the pod-template annotation carries the TARGET version id, so pods roll even if the image
+  // string happened to match what's currently deployed.
+  expect((lastApply.manifests.deployment as any).spec.template.metadata.annotations).toEqual({ "drop.dev/version": target });
+
+  expect((await meta.getSitePlain("billing"))!.currentVersion).toBe(target);
+  await db.destroy();
+});
+
+test("app rollback: target version predates rollback support (no stored config) -> 409", async () => {
+  const { app, meta, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
+  // simulate a version deployed before H1 shipped: no config was ever recorded on the row.
+  await meta.putVersion("billing", { id: "v_pre_h1", publishedBy: "alice@example.com", createdAt: new Date().toISOString(), fileCount: 0, bytes: 0 });
+  const res = await call(app, "POST", "/v1/sites/billing/rollback", "alice", { to: "v_pre_h1" });
+  expect(res.status).toBe(409);
+  expect((await res.json()).error).toMatch(/predates rollback support/);
+  await db.destroy();
+});
+
+test("app rollback: a stopped app stays stopped", async () => {
+  const { app, kube, meta, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:2" });
+  await call(app, "POST", "/v1/apps/billing/stop", "alice");
+  const ns = (await meta.getSitePlain("billing"))!.namespace;
+  expect(kube.stopped.has(`${ns}/billing`)).toBe(true);
+
+  const res = await call(app, "POST", "/v1/sites/billing/rollback", "alice", {});
+  expect(res.status).toBe(200);
+  expect(kube.stopped.has(`${ns}/billing`)).toBe(true); // rollback must not silently wake it
+  await db.destroy();
+});
+
+test("app rollback: a held deploy lock -> 409 (serialized under the SAME deploy lock as `drop deploy`)", async () => {
+  const { app, locks, db } = await mk();
+  await call(app, "POST", "/v1/apps/lockapp", "alice", { image: "x:1" });
+  await call(app, "POST", "/v1/apps/lockapp", "alice", { image: "x:2" });
+  await locks.acquire("deploy:lockapp", "another-deploy", 60_000); // simulate an in-flight deploy
+  const res = await call(app, "POST", "/v1/sites/lockapp/rollback", "alice", {});
+  expect(res.status).toBe(409);
+  expect((await res.json()).error).toMatch(/already in progress/);
   await db.destroy();
 });
 

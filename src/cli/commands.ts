@@ -371,7 +371,32 @@ export function buildProgram(): Command {
     .description("Show recent logs for an app/database (--release reads the latest release Job's pod)")
     .option("--tail <n>", "number of lines (default 100, max 1000)", (v) => parseInt(v, 10))
     .option("--release", "read the latest release (migration) Job's logs instead of the app pods")
-    .action(async (name: string, opts: { tail?: number; release?: boolean }) => {
+    .option("-f, --follow", "stream new log lines as they arrive (Ctrl-C to stop)")
+    .action(async (name: string, opts: { tail?: number; release?: boolean; follow?: boolean }) => {
+      if (opts.follow) {
+        if (opts.release) {
+          console.error("--follow cannot be combined with --release (a release Job runs once and exits)");
+          process.exitCode = 1;
+          return;
+        }
+        const controller = new AbortController();
+        process.once("SIGINT", () => controller.abort());
+        const res = await (await client()).logsFollow(name, { tail: opts.tail, signal: controller.signal });
+        const body = res.body;
+        if (!body) return;
+        const reader = body.getReader();
+        const decoder = new TextDecoder();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            process.stdout.write(decoder.decode(value, { stream: true }));
+          }
+        } catch (e) {
+          if (!controller.signal.aborted) throw e; // Ctrl-C aborting the fetch is expected, not an error
+        }
+        return;
+      }
       const res = (await (await client()).logs(name, { tail: opts.tail, release: opts.release })) as { logs: string };
       process.stdout.write(res.logs.endsWith("\n") || res.logs === "" ? res.logs : res.logs + "\n");
     });

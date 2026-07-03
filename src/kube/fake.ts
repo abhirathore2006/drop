@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import {
   PasswordSyncError,
   type KubeClient,
@@ -103,6 +104,40 @@ export class FakeKube implements KubeClient {
   readonly logsByName = new Map<string, string>();
   async getWorkloadLogs(namespace: string, name: string): Promise<string> {
     return this.logsByName.get(this.key(namespace, name)) ?? "";
+  }
+
+  // Scriptable follow-log streams (G1): tests preset the lines a `getWorkloadLogsStream` call should
+  // emit for a given namespace/name, keyed the same way as the other doubles. `keepOpen: true` holds
+  // the stream open after emitting its scripted lines (nothing further is pushed) so a test can
+  // exercise the abort path; otherwise the stream ends (push(null)) once the lines are drained.
+  readonly scriptedLogStreams = new Map<string, { lines: string[]; keepOpen?: boolean }>();
+  // Recorded whenever `opts.signal` fires — lets a test assert the "upstream" stream was torn down.
+  readonly logStreamAborts: { namespace: string; name: string }[] = [];
+  async getWorkloadLogsStream(namespace: string, name: string, opts: { tailLines?: number; signal?: AbortSignal } = {}): Promise<Readable | null> {
+    const script = this.scriptedLogStreams.get(this.key(namespace, name));
+    if (!script) return null;
+    let i = 0;
+    let ended = false;
+    const stream = new Readable({
+      read() {
+        if (ended) return;
+        if (i < script.lines.length) this.push(Buffer.from(script.lines[i++] + "\n"));
+        else if (!script.keepOpen) {
+          ended = true;
+          this.push(null);
+        }
+        // keepOpen && fully drained: push nothing more — the stream just stays open until destroyed.
+      },
+    });
+    if (opts.signal) {
+      const onAbort = () => {
+        this.logStreamAborts.push({ namespace, name });
+        stream.destroy();
+      };
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    return stream;
   }
 
   // Release-Job doubles. Tests SCRIPT the next release outcome by pushing onto `scriptedReleases`

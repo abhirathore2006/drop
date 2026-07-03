@@ -17,7 +17,12 @@ import {
 const iso = (v: unknown): string => (v instanceof Date ? v.toISOString() : String(v));
 const parseCfg = (v: unknown): SiteConfig | undefined =>
   v == null ? undefined : typeof v === "string" ? (JSON.parse(v) as SiteConfig) : (v as SiteConfig);
-const encCfg = (c?: SiteConfig): string | null => (c ? JSON.stringify(c) : null);
+// versions.config is jsonb holding EITHER a SiteConfig (site publish) or an AppConfig (H1 app
+// deploy/rollback) — same column, discriminated only by the workload's own `type`, so parsing it
+// needs the wider type (unlike sites.config, which is always a SiteConfig).
+const parseVersionCfg = (v: unknown): VersionMeta["config"] =>
+  v == null ? undefined : typeof v === "string" ? (JSON.parse(v) as VersionMeta["config"]) : (v as VersionMeta["config"]);
+const encCfg = (c?: unknown): string | null => (c ? JSON.stringify(c) : null);
 
 /**
  * MetaStore is the single seam over all site metadata, now backed by Postgres.
@@ -261,7 +266,7 @@ export class MetaStore {
       createdAt: iso(r.created_at),
       fileCount: r.file_count,
       bytes: Number(r.bytes),
-      config: parseCfg(r.config),
+      config: parseVersionCfg(r.config),
     }));
   }
 

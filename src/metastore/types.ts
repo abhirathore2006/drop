@@ -1,4 +1,5 @@
 import type { SiteConfig } from "../site-config.ts";
+import type { AppConfig } from "../app-config.ts";
 import type { RuntimeState, SiteRole, Visibility, WorkloadType } from "../db/schema.ts";
 
 export type { Visibility, WorkloadType, RuntimeState };
@@ -42,14 +43,17 @@ export interface SitePointer {
   config?: SiteConfig;
 }
 
-/** Per-publish audit metadata. */
+/** Per-publish audit metadata. `config` is the site's parsed drop.yaml for a static-site publish,
+ *  or (H1) the full sanitized AppConfig — including the resolved image ref — for an app deploy;
+ *  the latter is what makes app rollback possible (re-apply a prior version's stored config). A
+ *  version recorded before H1 shipped has no `config` and cannot be rolled back to. */
 export interface VersionMeta {
   id: string;
   publishedBy: string;
   createdAt: string; // ISO
   fileCount: number;
   bytes: number;
-  config?: SiteConfig;
+  config?: SiteConfig | AppConfig;
 }
 
 export class SiteNotFoundError extends Error {

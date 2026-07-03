@@ -28,3 +28,35 @@ test("FakeKube records applyTenant", async () => {
   expect(k.tenantApplies).toHaveLength(1);
   expect(k.tenantApplies[0]!.namespace).toBe("drop-t-x");
 });
+
+// ---- G1: scriptable follow-log stream ----
+
+async function drain(stream: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const c of stream as any) chunks.push(Buffer.from(c));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+test("getWorkloadLogsStream: unscripted namespace/name -> null", async () => {
+  const k = new FakeKube();
+  expect(await k.getWorkloadLogsStream("ns", "nope")).toBeNull();
+});
+
+test("getWorkloadLogsStream: emits the scripted lines then ends", async () => {
+  const k = new FakeKube();
+  k.scriptedLogStreams.set("ns/billing", { lines: ["one", "two", "three"] });
+  const stream = await k.getWorkloadLogsStream("ns", "billing");
+  expect(stream).not.toBeNull();
+  expect(await drain(stream!)).toBe("one\ntwo\nthree\n");
+});
+
+test("getWorkloadLogsStream: aborting the signal destroys a keepOpen stream and records the abort", async () => {
+  const k = new FakeKube();
+  k.scriptedLogStreams.set("ns/billing", { lines: ["one"], keepOpen: true });
+  const controller = new AbortController();
+  const stream = await k.getWorkloadLogsStream("ns", "billing", { signal: controller.signal });
+  expect(stream!.destroyed).toBe(false);
+  controller.abort();
+  expect(k.logStreamAborts).toEqual([{ namespace: "ns", name: "billing" }]);
+  expect(stream!.destroyed).toBe(true);
+});

@@ -5,6 +5,7 @@
 // integration-verified against Floci's k3s (make compute-up) on a Docker host.
 import { request } from "node:https";
 import { readFileSync } from "node:fs";
+import type { Readable } from "node:stream";
 import { parse as parseYaml } from "yaml";
 import {
   PasswordSyncError,
@@ -305,6 +306,61 @@ export class KubeApiClient implements KubeClient {
       return lr.body;
     }
     return "";
+  }
+
+  /** One `follow=true` log GET against a specific pod. Resolves the raw response stream on a 2xx,
+   *  or null on any non-2xx/connection error (so the caller can retry, e.g. without a container
+   *  filter). `signal` aborts the underlying request/connection at any point — before OR during
+   *  the stream — so a client disconnect never leaks the upstream socket. */
+  private openLogStream(namespace: string, pod: string, tailLines: number, container: string | undefined, signal?: AbortSignal): Promise<Readable | null> {
+    const qs = new URLSearchParams({ follow: "true", tailLines: String(tailLines) });
+    if (container) qs.set("container", container);
+    const u = new URL(`${this.conn.server}/api/v1/namespaces/${namespace}/pods/${pod}/log?${qs}`);
+    return new Promise((resolve) => {
+      if (signal?.aborted) return resolve(null);
+      const req = request(
+        {
+          method: "GET",
+          hostname: u.hostname,
+          port: u.port,
+          path: u.pathname + u.search,
+          ca: this.conn.ca,
+          cert: this.conn.cert,
+          key: this.conn.key,
+          headers: { ...(this.conn.token ? { authorization: `Bearer ${this.conn.token}` } : {}) },
+        },
+        (res) => {
+          if ((res.statusCode ?? 0) >= 300) {
+            res.resume(); // drain so the socket closes cleanly instead of hanging half-read
+            resolve(null);
+            return;
+          }
+          resolve(res);
+        },
+      );
+      req.on("error", () => resolve(null)); // nothing more specific to retry — caller surfaces "no logs"
+      if (signal) signal.addEventListener("abort", () => req.destroy(), { once: true });
+      req.end();
+    });
+  }
+
+  async getWorkloadLogsStream(namespace: string, name: string, opts: { tailLines?: number; signal?: AbortSignal } = {}): Promise<Readable | null> {
+    const tail = opts.tailLines ?? 100;
+    for (const sel of [`app.kubernetes.io/name=${name}`, `cnpg.io/cluster=${name},cnpg.io/instanceRole=primary`]) {
+      const pr = await this.call("GET", `/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(sel)}`);
+      if (pr.status >= 300) continue;
+      const pods = (JSON.parse(pr.body).items ?? []) as any[];
+      if (!pods.length) continue;
+      // v1: follow the FIRST READY pod only (see KubeClient.getWorkloadLogsStream doc) — no
+      // multiplexing across a multi-pod app's replicas.
+      const target = pods.find((p) => (p.status?.containerStatuses ?? []).some((cs: any) => cs.ready)) ?? pods[0];
+      const pod = target.metadata.name as string;
+      // container=name may 404 for CNPG (container is "postgres"); retry without the filter.
+      const withContainer = await this.openLogStream(namespace, pod, tail, name, opts.signal);
+      if (withContainer) return withContainer;
+      return await this.openLogStream(namespace, pod, tail, undefined, opts.signal);
+    }
+    return null;
   }
 
   /** Recent restart count + crash reason for a Deployment's pods (Deployment .status has neither). */

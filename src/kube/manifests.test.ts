@@ -272,6 +272,25 @@ test("appManifests: absent processes → unchanged single-process shape (web onl
   expect((m.deployment as any).spec.template.spec.containers[0].command).toBeUndefined(); // image entrypoint
 });
 
+// ---- H1: pod-template version annotation (same-tag redeploy/rollback still rolls pods) ----
+
+test("appManifests: versionId stamps drop.dev/version on the web AND worker pod templates, and changes when versionId changes", () => {
+  const app = sanitizeAppConfig({ image: "app:1", processes: { web: {}, worker: { command: "w" } } })!;
+  const noVersion = appManifests(app, { name: "app", namespace: "ns", host: "h" });
+  expect((noVersion.deployment as any).spec.template.metadata.annotations).toBeUndefined();
+  expect((noVersion.workers![0]!.deployment as any).spec.template.metadata.annotations).toBeUndefined();
+
+  const v1 = appManifests(app, { name: "app", namespace: "ns", host: "h", versionId: "v_1" });
+  expect((v1.deployment as any).spec.template.metadata.annotations).toEqual({ "drop.dev/version": "v_1" });
+  expect((v1.workers![0]!.deployment as any).spec.template.metadata.annotations).toEqual({ "drop.dev/version": "v_1" });
+
+  // same image, DIFFERENT versionId (e.g. a rollback, or a same-tag redeploy) → the annotation
+  // — and thus the pod template — differs, which is exactly what makes kube roll the pods.
+  const v2 = appManifests(app, { name: "app", namespace: "ns", host: "h", versionId: "v_2" });
+  expect((v2.deployment as any).spec.template.metadata.annotations).toEqual({ "drop.dev/version": "v_2" });
+  expect(v2.deployment).not.toEqual(v1.deployment);
+});
+
 test("appManifests: shared config Secret + DB binding reach every process (web + worker)", () => {
   const app = sanitizeAppConfig({
     image: "app:1",

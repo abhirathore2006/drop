@@ -1,3 +1,4 @@
+import type { Readable } from "node:stream";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 
@@ -27,6 +28,13 @@ export interface KubeClient {
   getDatabaseStatus(namespace: string, name: string): Promise<DatabaseStatus | null>;
   /** Recent log lines from the workload's pods (newest pod), for crash diagnostics. "" if none. */
   getWorkloadLogs(namespace: string, name: string, tailLines?: number): Promise<string>;
+  /** Follow a workload's logs (kube `follow=true`), starting `tailLines` back (G1, `drop logs -f`).
+   *  v1: follows the FIRST READY pod only — no fan-out/multiplexing across replicas of a multi-pod
+   *  app (documented behavior; a future console live-tail may fan out to N pods). Returns null if no
+   *  pod can be found. The stream is the raw chunked response body; destroying it (or aborting
+   *  `opts.signal`) must tear down the upstream connection so a client disconnect never leaks a
+   *  socket. */
+  getWorkloadLogsStream(namespace: string, name: string, opts?: { tailLines?: number; signal?: AbortSignal }): Promise<Readable | null>;
   /** Run a release Job (priors already GC'd by deleteReleaseJobs) and wait for it to terminally
    *  succeed or fail/timeout, bounded by `timeoutMs`. Returns the outcome + the tail of the release
    *  pod's logs. Never THROWS on Job failure — the deploy path halts on `ok:false` and surfaces logs. */

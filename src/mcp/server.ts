@@ -154,7 +154,7 @@ export function buildMcp(): McpServer {
   server.registerTool(
     "rollback",
     {
-      description: "Roll a site back to its previous (or a specific) version.",
+      description: "Roll a site or app back to its previous (or a specific) version.",
       inputSchema: { name: z.string(), version: z.string().optional().describe("version id; omit for previous") },
     },
     async ({ name, version }) => run(() => getClient().then((c) => c.rollback(name, version ?? ""))),

@@ -144,6 +144,22 @@ export class Client {
     const qs = q.toString();
     return this.req("GET", `/v1/sites/${name}/logs${qs ? `?${qs}` : ""}`);
   }
+  /** Stream logs live (G1, `drop logs -f`): the server keeps the connection open and writes new
+   *  lines as they arrive. Returns the raw fetch Response — unlike `req()`, the body is
+   *  `text/plain`, not JSON — so the caller can pump `.body` and abort it (e.g. on Ctrl-C). */
+  async logsFollow(name: string, opts: { tail?: number; signal?: AbortSignal } = {}): Promise<Response> {
+    const q = new URLSearchParams({ follow: "1" });
+    if (opts.tail) q.set("tail", String(opts.tail));
+    const res = await fetch(`${this.s.apiBase}/v1/sites/${name}/logs?${q}`, {
+      headers: { authorization: `Bearer ${this.s.token}` },
+      signal: opts.signal,
+    });
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}));
+      throw new Error((json as any).error ?? `logs: ${res.status}`);
+    }
+    return res;
+  }
   list(org?: string) {
     return this.req("GET", `/v1/sites${org ? `?org=${encodeURIComponent(org)}` : ""}`);
   }

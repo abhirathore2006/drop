@@ -10,6 +10,12 @@ export interface ManifestContext {
   host: string; // <name>.<baseDomain> — the registered HTTPScaledObject host
   sandbox?: boolean; // run under the gVisor RuntimeClass (untrusted tenants; prod only)
   imagePullSecret?: string; // name of an imagePullSecret in the tenant ns (registry image backend; omit for local containerd-import + IRSA)
+  // (H1) Stamped onto the pod template as the `drop.dev/version` annotation on EVERY deploy AND
+  // rollback. Server-side apply only rolls pods when the Deployment's pod template actually
+  // changes — an unchanged image tag (a same-tag redeploy, or a rollback to a version whose image
+  // matches what's currently running) would otherwise silently no-op. A version id is always
+  // unique, so stamping it here guarantees the template differs and kube rolls the pods.
+  versionId?: string;
 }
 export interface WorkerManifests {
   name: string; // Deployment name: `<app>-<process>`
@@ -232,6 +238,13 @@ function podSpec(ctx: ManifestContext, container: Record<string, unknown>, bindi
   };
 }
 
+// Pod-template metadata for a Deployment: the selector labels, plus (H1) the `drop.dev/version`
+// annotation when the caller supplied one — present on every process's template so ANY deploy or
+// rollback rolls pods, even when the image tag is byte-for-byte unchanged (see ManifestContext.versionId).
+function podTemplateMeta(labels: Record<string, string>, ctx: ManifestContext): Record<string, unknown> {
+  return { labels, ...(ctx.versionId ? { annotations: { "drop.dev/version": ctx.versionId } } : {}) };
+}
+
 export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests {
   assertHttpOnly(app); // v1 guard: exactly one HTTP service
   assertProcesses(app); // at most one web process
@@ -262,7 +275,7 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
       kind: "Deployment",
       metadata: { name: ctx.name, namespace: ctx.namespace, labels },
       // no `replicas`: the HTTPScaledObject owns the replica count (0..max)
-      spec: { selector: { matchLabels: labels }, template: { metadata: { labels }, spec: podSpec(ctx, container, binding) } },
+      spec: { selector: { matchLabels: labels }, template: { metadata: podTemplateMeta(labels, ctx), spec: podSpec(ctx, container, binding) } },
     };
     out.service = {
       apiVersion: "v1",
@@ -319,7 +332,7 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
         apiVersion: "apps/v1",
         kind: "Deployment",
         metadata: { name: w.name, namespace: ctx.namespace, labels },
-        spec: { replicas: w.scale.min, selector: { matchLabels: labels }, template: { metadata: { labels }, spec: podSpec(ctx, container, binding) } },
+        spec: { replicas: w.scale.min, selector: { matchLabels: labels }, template: { metadata: podTemplateMeta(labels, ctx), spec: podSpec(ctx, container, binding) } },
       },
     });
   }
