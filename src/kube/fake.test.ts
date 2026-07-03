@@ -60,3 +60,28 @@ test("getWorkloadLogsStream: aborting the signal destroys a keepOpen stream and 
   expect(k.logStreamAborts).toEqual([{ namespace: "ns", name: "billing" }]);
   expect(stream!.destroyed).toBe(true);
 });
+
+// ---- C1: aggregated namespace status lists ----
+
+test("listNamespace{App,Database}Statuses: scoped to the namespace, honor overrides", async () => {
+  const k = new FakeKube();
+  const m = appManifests({ image: "x:1", services: [{ internalPort: 8080, protocol: "http" }] }, { name: "api", namespace: "drop-a", host: "api.x" });
+  await k.applyApp("drop-a", "api", m);
+  await k.applyApp("drop-b", "other", m); // a DIFFERENT namespace — must not leak in
+  await k.applyDatabase("drop-a", "pg", {} as any);
+
+  // a crash reason set on the app surfaces through the aggregated list
+  k.statusOverride.set("drop-a/api", { replicas: 1, ready: 0, restarts: 3, reason: "CrashLoopBackOff" });
+
+  const apps = await k.listNamespaceAppStatuses("drop-a");
+  expect(Object.keys(apps)).toEqual(["api"]); // 'other' is in drop-b
+  expect(apps.api).toEqual({ replicas: 1, ready: 0, restarts: 3, reason: "CrashLoopBackOff" });
+
+  const dbs = await k.listNamespaceDatabaseStatuses("drop-a");
+  expect(Object.keys(dbs)).toEqual(["pg"]);
+  expect(dbs.pg.phase).toBe("Cluster in healthy state");
+
+  // an empty namespace yields empty maps (never throws)
+  expect(await k.listNamespaceAppStatuses("drop-empty")).toEqual({});
+  expect(await k.listNamespaceDatabaseStatuses("drop-empty")).toEqual({});
+});

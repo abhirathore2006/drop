@@ -28,7 +28,7 @@ import { planStack, StackCycleError, type LivePresence, type PlanStep } from "..
 import { StackStore } from "../stacks/store.ts";
 import { appManifests, releaseJobManifest, tenantManifests } from "../kube/manifests.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
-import { PasswordSyncError, type KubeClient } from "../kube/types.ts";
+import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus } from "../kube/types.ts";
 import { LockStore, LockHeldError } from "../metastore/lock.ts";
 import type { SecretStore } from "../secrets/types.ts";
 import type { ImageStore } from "../images/types.ts";
@@ -89,6 +89,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.get("/app/:name", shell);
   app.get("/database/:name", shell);
   app.get("/site/:name", shell);
+  app.get("/stack/:name", shell); // C1: the read-only stack canvas
 
   // Public docs site — the same static files GitHub Pages serves (docs/), now
   // shipped with the deployment and served at /docs. Uses relative links, so it
@@ -1666,6 +1667,93 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       resources.push({ key, type: res.type, siteName, exists: !!s, url: siteUrl(siteName), runtimeState: s?.runtimeState ?? null, status });
     }
     return c.json({ name: stack.name, org: await orgOf(stack.orgId), specVersion: stack.specVersion, fromTemplate: stack.fromTemplate, fromTemplateVersion: stack.fromTemplateVersion, spec: stack.spec, resources });
+  });
+
+  // ---- GET /v1/stacks/:name/graph : nodes (live status) + edges (from spec) [+ ?include_plan overlay] ----
+  // The C1 canvas backing. Authz is org membership (same gate as GET /v1/stacks/:name via findStack).
+  // Live status is read with ONE aggregated kube list per KIND per NAMESPACE (listNamespace*Statuses),
+  // never N per-node calls; compute-off (no kube) degrades every node to the no-status normalizeStatus
+  // output. Edges come straight from the stored spec. ?include_plan=1 runs planStack(stored spec as both
+  // desired AND prev) so out-of-band drift (e.g. a resource deleted underneath) surfaces as a pending step.
+  app.get("/v1/stacks/:name/graph", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack } = found;
+    const spec = stack.spec;
+    const mapping = await stacks.mapping(stack.id);
+
+    // Resolve each resource → its site row (namespace + version + runtimeState + existence).
+    const nodesRaw: { key: string; res: StackResource; siteName: string; site: Site | null }[] = [];
+    const namespaces = new Set<string>();
+    for (const [key, res] of Object.entries(spec.resources)) {
+      const siteName = mapping[key] ?? resolveResourceName(spec.name, key, res);
+      const site = await d.meta.getSitePlain(siteName);
+      if (site) namespaces.add(site.namespace);
+      nodesRaw.push({ key, res, siteName, site });
+    }
+
+    // ONE aggregated list per kind per namespace (not 2N per-node calls). Each list degrades to {} on a
+    // cluster-read failure, so a node whose status is missing falls through to normalizeStatus's null path.
+    const appStatuses = new Map<string, Record<string, AppStatus>>();
+    const dbStatuses = new Map<string, Record<string, DatabaseStatus>>();
+    if (d.kube) {
+      for (const ns of namespaces) {
+        try {
+          appStatuses.set(ns, await d.kube.listNamespaceAppStatuses(ns));
+        } catch {
+          appStatuses.set(ns, {});
+        }
+        try {
+          dbStatuses.set(ns, await d.kube.listNamespaceDatabaseStatuses(ns));
+        } catch {
+          dbStatuses.set(ns, {});
+        }
+      }
+    }
+
+    const nodes = nodesRaw.map(({ key, res, siteName, site }) => {
+      const ns = site?.namespace;
+      const appStatus = res.type === "app" && ns ? (appStatuses.get(ns)?.[siteName] ?? null) : null;
+      const dbStatus = res.type === "database" && ns ? (dbStatuses.get(ns)?.[siteName] ?? null) : null;
+      const status = normalizeStatus({ type: res.type, runtimeState: site?.runtimeState ?? null, appStatus, dbStatus });
+      return { key, siteName, type: res.type, url: siteUrl(siteName), currentVersion: site?.currentVersion ?? null, exists: !!site, status };
+    });
+
+    // Edges straight from the stored spec (provider → consumer: db → app via `uses`, app → site via
+    // `env_from` — a clean left-to-right flow for the layered layout). Labels say what flows on the wire.
+    const edges: { from: string; to: string; kind: "uses" | "env_from"; label: string }[] = [];
+    for (const [key, res] of Object.entries(spec.resources)) {
+      if (res.type === "app")
+        for (const u of res.uses ?? []) {
+          const target = spec.resources[u.database];
+          if (!target) continue;
+          const dbSite = mapping[u.database] ?? resolveResourceName(spec.name, u.database, target);
+          edges.push({ from: u.database, to: key, kind: "uses", label: `PG* via ${dbSite}-app` });
+        }
+      if (res.type === "site")
+        for (const e of res.env_from ?? []) {
+          if (!spec.resources[e.resource]) continue;
+          edges.push({ from: e.resource, to: key, kind: "env_from", label: "URL at publish" });
+        }
+    }
+
+    const out: Record<string, unknown> = { name: stack.name, org: await orgOf(stack.orgId), specVersion: stack.specVersion, nodes, edges };
+
+    // Pending-changes overlay: planStack with the stored spec as BOTH desired and prev → unchanged
+    // resources are noop, but anything absent from live state (deleted out-of-band) is create-pending.
+    // noop steps are dropped; only actionable steps ride along for the console to badge.
+    if (c.req.query("include_plan") === "1" || c.req.query("include_plan") === "true") {
+      const live: Record<string, LivePresence> = {};
+      for (const { siteName, site } of nodesRaw) if (site) live[siteName] = { type: site.type };
+      try {
+        out.plan = planStack({ spec, prevSpec: spec, mapping, live }).filter((s) => s.action !== "noop");
+      } catch {
+        out.plan = []; // a cycle in the stored spec must never fail the read
+      }
+    }
+
+    return c.json(out);
   });
 
   // ---- DELETE /v1/stacks/:name?cascade=1 : delete the stack; cascade tears down resources, else orphans ----

@@ -1614,3 +1614,87 @@ test("stack ls lists the caller's stacks across orgs", async () => {
   expect((await (await call(app, "GET", "/v1/stacks", "bob")).json()).stacks).toEqual([]);
   await db.destroy();
 });
+
+// ---- C1: GET /v1/stacks/:name/graph ----
+
+const graphSpec = {
+  name: "shop",
+  resources: {
+    db: { type: "database", storage: "1Gi" },
+    api: { type: "app", uses: [{ database: "db" }] },
+    web: { type: "site", env_from: [{ resource: "api", output: "url", as: "API_BASE" }] },
+  },
+};
+
+test("stack graph: nodes (live status via aggregated ns lists) + edges from spec", async () => {
+  const { app, kube, meta, db } = await mk();
+  await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: graphSpec, resolved: { api: { image: "api:1" } } });
+
+  // A crash reason set on the app must surface through the ONE aggregated ns list (not a per-node call).
+  const ns = (await meta.getSitePlain("shop-api"))!.namespace;
+  kube.statusOverride.set(`${ns}/shop-api`, { replicas: 1, ready: 0, restarts: 5, reason: "CrashLoopBackOff" });
+
+  const res = await call(app, "GET", "/v1/stacks/shop/graph", "alice");
+  expect(res.status).toBe(200);
+  const g = await res.json();
+
+  // nodes: shape + normalized status per kind
+  const byKey = Object.fromEntries(g.nodes.map((n: any) => [n.key, n]));
+  expect(byKey.db).toMatchObject({ siteName: "shop-db", type: "database", url: "https://shop-db.drop.example.com", exists: true });
+  expect(byKey.db.currentVersion).toBeTruthy();
+  expect(byKey.db.status.status).toBe("running"); // FakeKube healthy CNPG default
+  expect(byKey.web.status).toEqual({ status: "running", reason: "serving" }); // static site
+  expect(byKey.api.status.status).toBe("error"); // the CrashLoopBackOff override came through the ns list
+  expect(byKey.api.status.reason).toBe("CrashLoopBackOff");
+
+  // edges straight from the spec, labeled (provider → consumer)
+  expect(g.edges).toContainEqual({ from: "db", to: "api", kind: "uses", label: "PG* via shop-db-app" });
+  expect(g.edges).toContainEqual({ from: "api", to: "web", kind: "env_from", label: "URL at publish" });
+  await db.destroy();
+});
+
+test("stack graph ?include_plan: a resource deleted out-of-band shows as create-pending", async () => {
+  const { app, meta, db } = await mk();
+  await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: graphSpec, resolved: { api: { image: "api:1" } } });
+  // delete the db's site row underneath the stack (drift)
+  await meta.deleteSite("shop-db");
+
+  const res = await call(app, "GET", "/v1/stacks/shop/graph?include_plan=1", "alice");
+  expect(res.status).toBe(200);
+  const g = await res.json();
+  // the node now reports missing, and the overlay flags a pending create for it
+  expect(g.nodes.find((n: any) => n.key === "db").exists).toBe(false);
+  expect(g.plan).toContainEqual(expect.objectContaining({ action: "create", key: "db", siteName: "shop-db" }));
+  // unchanged resources are NOT in the (noop-filtered) overlay
+  expect(g.plan.some((s: any) => s.key === "api")).toBe(false);
+  await db.destroy();
+});
+
+test("stack graph authz: 404 for an unknown stack, 403 for a non-member of the org", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" });
+  await call(app, "POST", "/v1/stacks/shop/up?org=acme", "alice", { spec: { name: "shop", resources: { db: { type: "database" } } } });
+
+  expect((await call(app, "GET", "/v1/stacks/ghost/graph", "alice")).status).toBe(404);
+  const forbidden = await call(app, "GET", "/v1/stacks/shop/graph?org=acme", "bob");
+  expect(forbidden.status).toBe(403);
+  await db.destroy();
+});
+
+test("stack graph: compute-off degrades statuses to the no-status outputs (endpoint still works)", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: graphSpec, resolved: { api: { image: "api:1" } } });
+
+  // A second API instance over the SAME db with NO kube: the graph read must still succeed, statuses degraded.
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com", DROP_S3_ENDPOINT: "http://localhost:4566" });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  const noKube = createApp({ cfg, meta: new MetaStore(db), blob: new FakeBlob(), db, users: new UserStore(db), verifier, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(db), audit: new AuditStore(db) });
+
+  const res = await call(noKube, "GET", "/v1/stacks/shop/graph", "alice");
+  expect(res.status).toBe(200);
+  const byKey = Object.fromEntries((await res.json()).nodes.map((n: any) => [n.key, n]));
+  expect(byKey.api.status).toEqual({ status: "progressing", reason: "status unavailable" });
+  expect(byKey.db.status).toEqual({ status: "progressing", reason: "status unavailable" });
+  expect(byKey.web.status).toEqual({ status: "running", reason: "serving" }); // sites never depend on kube
+  await db.destroy();
+});

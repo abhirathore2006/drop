@@ -81,6 +81,28 @@ export class FakeKube implements KubeClient {
     return this.dbs.has(k) ? { phase: "Cluster in healthy state", ready: 1, instances: 1, hibernated: this.hibernated.has(k) } : null;
   }
 
+  // Aggregated namespace status lists (C1): reuse the per-workload doubles, scoped to one namespace.
+  private inNs(k: string, namespace: string): string | null {
+    const i = k.indexOf("/");
+    return k.slice(0, i) === namespace ? k.slice(i + 1) : null;
+  }
+  async listNamespaceAppStatuses(namespace: string): Promise<Record<string, AppStatus>> {
+    const out: Record<string, AppStatus> = {};
+    for (const k of this.apps.keys()) {
+      const name = this.inNs(k, namespace);
+      if (name) out[name] = (await this.getAppStatus(namespace, name))!;
+    }
+    return out;
+  }
+  async listNamespaceDatabaseStatuses(namespace: string): Promise<Record<string, DatabaseStatus>> {
+    const out: Record<string, DatabaseStatus> = {};
+    for (const k of this.dbs) {
+      const name = this.inNs(k, namespace);
+      if (name) out[name] = (await this.getDatabaseStatus(namespace, name))!;
+    }
+    return out;
+  }
+
   // CNPG backups + declarative hibernation doubles.
   readonly backupsByDb = new Map<string, BackupInfo[]>(); // tests can preset a backup history
   readonly backupTriggers: { namespace: string; name: string; backupName: string }[] = [];

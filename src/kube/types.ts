@@ -26,6 +26,13 @@ export interface KubeClient {
   getAppStatus(namespace: string, name: string): Promise<AppStatus | null>;
   /** Live CNPG database status (phase + ready/desired instances), or null if absent. */
   getDatabaseStatus(namespace: string, name: string): Promise<DatabaseStatus | null>;
+  /** Live status of EVERY app (web Deployment) in a namespace, keyed by app name — ONE aggregated
+   *  Deployments+pods list, so the stack graph reads N apps with 2 calls instead of 2N (C1). Absent
+   *  apps are simply not in the map; a cluster-read failure degrades to an empty map, never throws. */
+  listNamespaceAppStatuses(namespace: string): Promise<Record<string, AppStatus>>;
+  /** Live status of EVERY managed database (CNPG Cluster) in a namespace, keyed by name — ONE
+   *  aggregated Clusters list (C1). Same degradation posture as listNamespaceAppStatuses. */
+  listNamespaceDatabaseStatuses(namespace: string): Promise<Record<string, DatabaseStatus>>;
   /** Recent log lines from the workload's pods (newest pod), for crash diagnostics. "" if none. */
   getWorkloadLogs(namespace: string, name: string, tailLines?: number): Promise<string>;
   /** Follow a workload's logs (kube `follow=true`), starting `tailLines` back (G1, `drop logs -f`).

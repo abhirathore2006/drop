@@ -22,6 +22,21 @@ import { databaseBackupManifest, databasePasswordJob, DEFAULT_OPERAND_IMAGE, PWS
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Restart count + crash reason distilled from a Deployment's pods (Deployment .status carries
+ *  neither). Pure so getAppStatus (single pod GET) and listNamespaceAppStatuses (one namespace-wide
+ *  pod GET, grouped) share identical logic. `deploymentName` picks the container whose name matches. */
+function reasonFromPods(pods: any[], deploymentName: string, replicas: number): { restarts: number; reason: string } {
+  let restarts = 0;
+  let reason = replicas === 0 ? "ScaledToZero" : "NoPods";
+  if (pods.length) {
+    for (const p of pods) for (const cs of p.status?.containerStatuses ?? []) restarts = Math.max(restarts, cs.restartCount ?? 0);
+    const newest = pods[pods.length - 1];
+    const cs = (newest.status?.containerStatuses ?? []).find((c: any) => c.name === deploymentName) ?? newest.status?.containerStatuses?.[0];
+    reason = cs?.state?.waiting?.reason ?? cs?.state?.terminated?.reason ?? newest.status?.phase ?? reason;
+  }
+  return { restarts, reason };
+}
+
 interface KubeConn {
   server: string;
   ca?: Buffer;
@@ -365,23 +380,60 @@ export class KubeApiClient implements KubeClient {
 
   /** Recent restart count + crash reason for a Deployment's pods (Deployment .status has neither). */
   private async podRestartsReason(namespace: string, deploymentName: string, replicas: number): Promise<{ restarts: number; reason: string }> {
-    let restarts = 0;
-    let reason = replicas === 0 ? "ScaledToZero" : "NoPods";
     try {
       const pr = await this.call("GET", this.podsPath(namespace, deploymentName));
-      if (pr.status < 300) {
-        const pods = (JSON.parse(pr.body).items ?? []) as any[];
-        if (pods.length) {
-          for (const p of pods) for (const cs of p.status?.containerStatuses ?? []) restarts = Math.max(restarts, cs.restartCount ?? 0);
-          const newest = pods[pods.length - 1];
-          const cs = (newest.status?.containerStatuses ?? []).find((c: any) => c.name === deploymentName) ?? newest.status?.containerStatuses?.[0];
-          reason = cs?.state?.waiting?.reason ?? cs?.state?.terminated?.reason ?? newest.status?.phase ?? reason;
-        }
-      }
+      if (pr.status < 300) return reasonFromPods((JSON.parse(pr.body).items ?? []) as any[], deploymentName, replicas);
     } catch {
       /* leave restarts/reason at defaults */
     }
-    return { restarts, reason };
+    return { restarts: 0, reason: replicas === 0 ? "ScaledToZero" : "NoPods" };
+  }
+
+  /** Live status of every app (web Deployment) in a namespace — ONE Deployments list + ONE pods list,
+   *  grouped in-process, so the stack graph reads N apps with 2 calls (C1). Worker Deployments
+   *  (labelled drop.dev/process) and non-drop Deployments are skipped; a non-2xx degrades to {}. */
+  async listNamespaceAppStatuses(namespace: string): Promise<Record<string, AppStatus>> {
+    const out: Record<string, AppStatus> = {};
+    const dr = await this.call("GET", `/apis/apps/v1/namespaces/${namespace}/deployments`);
+    if (dr.status >= 300) return out;
+    const deploys = (JSON.parse(dr.body).items ?? []) as any[];
+    const podsByApp = new Map<string, any[]>();
+    const pr = await this.call("GET", `/api/v1/namespaces/${namespace}/pods`);
+    if (pr.status < 300) {
+      for (const p of (JSON.parse(pr.body).items ?? []) as any[]) {
+        const app = p.metadata?.labels?.["app.kubernetes.io/name"];
+        if (!app) continue;
+        const list = podsByApp.get(app);
+        if (list) list.push(p);
+        else podsByApp.set(app, [p]);
+      }
+    }
+    for (const dep of deploys) {
+      const labels = dep.metadata?.labels ?? {};
+      const app = labels["app.kubernetes.io/name"] as string | undefined;
+      // Only the WEB Deployment (name === app); skip worker Deployments and any non-drop object.
+      if (!app || labels["drop.dev/process"] || dep.metadata?.name !== app) continue;
+      const s = (dep.status ?? {}) as { replicas?: number; readyReplicas?: number };
+      const replicas = s.replicas ?? 0;
+      const { restarts, reason } = reasonFromPods(podsByApp.get(app) ?? [], app, replicas);
+      out[app] = { replicas, ready: s.readyReplicas ?? 0, restarts, reason };
+    }
+    return out;
+  }
+
+  /** Live status of every managed database (CNPG Cluster) in a namespace — ONE Clusters list (C1).
+   *  A non-2xx (CNPG absent / compute off) degrades to {}. */
+  async listNamespaceDatabaseStatuses(namespace: string): Promise<Record<string, DatabaseStatus>> {
+    const out: Record<string, DatabaseStatus> = {};
+    const r = await this.call("GET", `/apis/postgresql.cnpg.io/v1/namespaces/${namespace}/clusters`);
+    if (r.status >= 300) return out;
+    for (const o of (JSON.parse(r.body).items ?? []) as any[]) {
+      const name = o.metadata?.name as string | undefined;
+      if (!name) continue;
+      const hibernated = o.metadata?.annotations?.["cnpg.io/hibernation"] === "on";
+      out[name] = { phase: o.status?.phase ?? "unknown", ready: o.status?.readyInstances ?? 0, instances: o.spec?.instances ?? 0, hibernated };
+    }
+    return out;
   }
 
   private releaseSelector = (name: string) => encodeURIComponent(`drop.dev/workload=${name},drop.dev/job=release`);

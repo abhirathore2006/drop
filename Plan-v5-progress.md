@@ -23,10 +23,10 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 2 | B1 DB binding (Future.md item 1) | done | da3842f | envFrom `<db>-app` + `<db>-ca` ca.crt mount + verify-full; same-org 400 validation |
 | 3 | L1 drop.yaml: healthcheck/release/processes | done | 169020c | + LockStore (locks table, migration 0006); drop ps; logs --release; 422 halt semantics |
 | 4 | B2 Stack spec + `drop up` + plan API | done | 9af0966 | pure planner; stack lock; spec_version optimistic 409; release phase NOT run in stack path v1 |
-| 5 | G1 `drop logs -f` · H1 app rollback | in-progress | | |
+| 5 | G1 `drop logs -f` · H1 app rollback | done | 60096ac | follow streams first-ready pod; app rollback re-applies version config under deploy lock; drop.dev/version anno |
 | 6 | M0 Console re-platform + foundation | done | 5c0118c | Vite@6, wouter, TanStack Query; CSP strict; normalizeStatus pure (server wiring pending); vite dev proxy :8473 |
-| 6b | M0.5 Drop zone publish | in-progress | | |
-| 7 | C1 Read-only canvas | todo | | |
+| 6b | M0.5 Drop zone publish | done | a2ef18f | USTAR writer lockstep-tested vs archive.ts; fflate lazy chunk; + status field wired into site detail |
+| 7 | C1 Read-only canvas | in-progress | | |
 | 8 | I1 Buckets (+FM item 10 quotas) | todo | | |
 | 9 | A2 L4 plane: NLB + TCP router | todo | | |
 | 10 | J1 Service accounts / CI tokens | todo | | |

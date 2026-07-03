@@ -6,7 +6,7 @@ import { EmptyState } from "../components/EmptyState.tsx";
 import { NamePromptModal } from "../components/NamePromptModal.tsx";
 import { SkeletonCards } from "../components/Skeleton.tsx";
 import { useToast } from "../components/Toast.tsx";
-import { UsageSummary, WorkloadGrid, useWorkloadsQuery } from "../components/workloads.tsx";
+import { StacksSection, UsageSummary, WorkloadGrid, useWorkloadsQuery } from "../components/workloads.tsx";
 import type { DroppedFile } from "../lib/dropFiles.ts";
 import { publishFiles } from "../lib/publish.ts";
 import { POLL_LIST_MS } from "../lib/query.ts";
@@ -69,6 +69,7 @@ export function WorkloadsPage() {
   return (
     <>
       <NewSitePublishZone />
+      <StacksSection />
       {q.isPending ? (
         <SkeletonCards count={6} />
       ) : q.isError ? (

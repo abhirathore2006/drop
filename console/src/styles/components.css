@@ -420,3 +420,218 @@ code.reveal {
   color: var(--text);
   border-color: var(--border-hover);
 }
+
+/* ============================ C1: read-only stack canvas ============================ */
+
+/* Status dot buckets for a canvas node: green running / gray asleep|stopped / amber
+ * progressing / red error|degraded (see lib/graph.ts nodeDotClass). */
+.sdot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+.sdot-green {
+  background: var(--ok-fg);
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+.sdot-gray {
+  background: var(--text-faint);
+}
+.sdot-amber {
+  background: var(--warn-fg);
+}
+.sdot-red {
+  background: var(--danger-fg);
+}
+
+/* A canvas node body (also rendered raw in the page legend). */
+.snode {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  min-width: 176px;
+  box-shadow: var(--shadow);
+  font-size: 13px;
+}
+.snode-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.snode-name {
+  font-weight: 600;
+  font-size: 14px;
+  flex: 1;
+}
+.snode-sub {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  margin: 4px 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.snode-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.snode-status {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.snode-missing {
+  opacity: 0.72;
+}
+/* pending overlay: dashed outline + a corner action tag */
+.snode-pending {
+  border-style: dashed;
+  border-width: 1.5px;
+}
+.snode-create {
+  border-color: var(--ok-border);
+}
+.snode-update {
+  border-color: var(--warn-border);
+}
+.snode-delete {
+  border-color: var(--danger-border);
+}
+.snode-tag {
+  position: absolute;
+  top: -9px;
+  right: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid;
+}
+.snode-tag-create {
+  color: var(--ok-fg);
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+}
+.snode-tag-update {
+  color: var(--warn-fg);
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+.snode-tag-delete {
+  color: var(--danger-fg);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+/* The canvas viewport container (xyflow measures it — needs an explicit height). */
+.stack-canvas {
+  height: 68vh;
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  margin-top: 12px;
+  overflow: hidden;
+  background: var(--surface-raised);
+}
+
+/* Resource legend (renders node names without the canvas chunk). */
+.stack-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 4px 11px;
+  text-decoration: none;
+  color: inherit;
+  font-size: 13px;
+}
+.legend-chip:hover {
+  border-color: var(--border-hover);
+}
+.legend-name {
+  font-weight: 600;
+}
+.legend-pending {
+  border-style: dashed;
+}
+.legend-create {
+  border-color: var(--ok-border);
+}
+.legend-update {
+  border-color: var(--warn-border);
+}
+.legend-delete {
+  border-color: var(--danger-border);
+}
+
+/* Pending-changes drawer. */
+.pending-drawer {
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin: 12px 0;
+}
+.pending-drawer summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--warn-fg);
+}
+.pending-drawer ul {
+  margin: 10px 0 2px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+.pending-pill {
+  margin-left: 8px;
+}
+
+/* "best on desktop" — only shown on narrow viewports. */
+.desktop-only-note {
+  display: none;
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+@media (max-width: 760px) {
+  .desktop-only-note {
+    display: block;
+  }
+}
+
+/* Tune xyflow chrome to the design tokens (both themes). Node bodies are fully custom (.snode);
+ * this only styles the edges/labels drawn by xyflow. */
+.react-flow__edge-path {
+  stroke: var(--border-hover);
+}
+.react-flow__edge-text {
+  fill: var(--text);
+}
+.react-flow__edge-textbg {
+  fill: var(--surface);
+}
+.sedge-uses .react-flow__edge-path {
+  stroke: var(--ok-fg);
+}
+.sedge-env_from .react-flow__edge-path {
+  stroke: var(--info-fg);
+}

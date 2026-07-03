@@ -137,6 +137,50 @@ export interface Detail {
   };
 }
 
+// ---- Stacks (B2/C1) ----
+export interface StackListItem {
+  name: string;
+  org?: Org | null;
+  specVersion: number;
+  resources: number; // resource count
+  fromTemplate: string | null;
+  updatedAt: string;
+}
+
+/** One node of the stack graph (GET /v1/stacks/:name/graph). `status` is the server-computed
+ *  normalized status contract (src/api/status.ts). */
+export interface GraphNode {
+  key: string;
+  siteName: string;
+  type: WorkloadType;
+  url: string;
+  currentVersion: string | null;
+  exists: boolean;
+  status: ServerStatus;
+}
+export interface GraphEdge {
+  from: string; // resource KEY (provider)
+  to: string; // resource KEY (consumer)
+  kind: "uses" | "env_from";
+  label: string;
+}
+/** A pending plan step in the graph overlay (?include_plan). Mirrors src/stacks/plan.ts PlanStep. */
+export interface GraphPlanStep {
+  action: "create" | "update" | "delete" | "noop";
+  key: string;
+  kind: WorkloadType;
+  siteName: string;
+  reason: string;
+}
+export interface StackGraph {
+  name: string;
+  org?: Org | null;
+  specVersion: number;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  plan?: GraphPlanStep[]; // present only with ?include_plan; already filtered to non-noop steps
+}
+
 async function req<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -184,7 +228,13 @@ export const api = {
   restartApp: (name: string) => req("POST", `/v1/apps/${name}/restart`, {}),
   stopApp: (name: string) => req("POST", `/v1/apps/${name}/stop`, {}),
   startApp: (name: string) => req("POST", `/v1/apps/${name}/start`, {}),
+  // stacks (B2/C1)
+  stacks: () => req<{ stacks: StackListItem[] }>("GET", "/v1/stacks"),
+  stackGraph: (name: string) => req<StackGraph>("GET", `/v1/stacks/${encodeURIComponent(name)}/graph?include_plan=1`),
 };
+
+/** The detail route for a graph node's workload type — the existing per-type detail page. */
+export const stackNodePath = (n: { type: WorkloadType; siteName: string }): string => `/${n.type}/${encodeURIComponent(n.siteName)}`;
 
 // Small shared display helpers (identical semantics to the old console).
 export const pathFor = (w: { type: WorkloadType; name: string }): string => `/${w.type}/${encodeURIComponent(w.name)}`;
