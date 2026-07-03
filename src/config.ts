@@ -118,3 +118,72 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     imageMaxBytes: Number(env.DROP_IMAGE_MAX_BYTES) || 2 * 1024 * 1024 * 1024,
   };
 }
+
+// --- edge-tcp (L4 router, A2a) ------------------------------------------------------------
+// Kept as a SEPARATE loader (not folded into loadConfig) so the router entrypoint stays
+// decoupled from the API's S3/DB requirements: A2a routes from a static JSON env; A2b swaps in
+// the metastore source (which will bring its own DROP_DATABASE_URL). Same env-parsing style.
+
+export interface TcpSharedPort {
+  port: number;
+  protocol: "tls-sni" | "postgres";
+}
+
+export interface TcpConfig {
+  sharedPorts: TcpSharedPort[]; // well-known ports run the SNI / PG-preamble path
+  dynamicPorts: number[]; // per-workload ports routed by port number alone
+  idleTimeoutMs: number; // destroy both sockets after this long with no bytes either way
+  maxConnsPerWorkload: number; // per-workload concurrent-connection cap
+  handshakeTimeoutMs: number; // budget for the pre-splice peek/preamble/dial
+  staticRoutesJson?: string; // DROP_TCP_STATIC_ROUTES — A2a route table (replaced by A2b metastore)
+}
+
+/** Parse `"5432:postgres,6379:tls-sni"` → shared port specs. Unknown protocols are dropped
+ *  (with a warning) rather than crashing the router at boot. */
+function parseSharedPorts(spec: string): TcpSharedPort[] {
+  const out: TcpSharedPort[] = [];
+  for (const part of spec.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const [portStr, protoRaw] = part.split(":").map((s) => s.trim());
+    const port = Number(portStr);
+    const proto = (protoRaw ?? "").toLowerCase();
+    const protocol = proto === "postgres" || proto === "pg" ? "postgres" : proto === "tls-sni" || proto === "sni" || proto === "tls" ? "tls-sni" : null;
+    if (!port || !protocol) {
+      console.warn(`DROP_TCP_SHARED_PORTS: ignoring invalid entry "${part}" (want PORT:postgres|tls-sni)`);
+      continue;
+    }
+    out.push({ port, protocol });
+  }
+  return out;
+}
+
+/** Parse a dynamic-port range: `"7000-7099"` → [7000..7099], or a comma list `"7000,7005"`. */
+function parseDynamicRange(spec: string): number[] {
+  const s = spec.trim();
+  if (!s) return [];
+  if (s.includes(",")) return s.split(",").map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0);
+  const m = /^(\d+)-(\d+)$/.exec(s);
+  if (!m) {
+    const one = Number(s);
+    return Number.isInteger(one) && one > 0 ? [one] : [];
+  }
+  const from = Number(m[1]);
+  const to = Number(m[2]);
+  if (to < from || to - from > 1024) {
+    console.warn(`DROP_TCP_DYNAMIC_RANGE: ignoring range "${s}" (empty or wider than 1024 ports)`);
+    return [];
+  }
+  const out: number[] = [];
+  for (let p = from; p <= to; p++) out.push(p);
+  return out;
+}
+
+export function loadTcpConfig(env: Record<string, string | undefined> = process.env): TcpConfig {
+  return {
+    sharedPorts: parseSharedPorts(env.DROP_TCP_SHARED_PORTS ?? "5432:postgres"),
+    dynamicPorts: parseDynamicRange(env.DROP_TCP_DYNAMIC_RANGE ?? ""),
+    idleTimeoutMs: Number(env.DROP_TCP_IDLE_TIMEOUT_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
+    maxConnsPerWorkload: Number(env.DROP_TCP_MAX_CONNS_PER_WORKLOAD ?? "100") || 100,
+    handshakeTimeoutMs: Number(env.DROP_TCP_HANDSHAKE_TIMEOUT_MS ?? "10000") || 10000,
+    staticRoutesJson: env.DROP_TCP_STATIC_ROUTES || undefined,
+  };
+}

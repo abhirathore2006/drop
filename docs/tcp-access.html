@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TCP access (L4) · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html" class="active">TCP access (L4)</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>TCP access (the L4 plane)</h1>
+<p class="lead">Everything Drop serves over HTTPS rides an L7 load balancer and a Google-authenticated session. But raw-TCP workloads — <code>psql</code> from your laptop, a Redis client, an MQTT broker, gRPC over plain TCP — have no HTTP request to route or session to check. The <strong>L4 plane</strong> is a small in-cluster TCP router (<code>edge-tcp</code>) that gives those workloads a path, using the only two routing keys that exist below HTTP: the <strong>TLS SNI</strong> hostname, or a <strong>dedicated port</strong>.</p>
+
+<div class="note warn"><span class="lbl">Read this first — what L4 does NOT do</span><p>The L4 plane <strong>does not authenticate platform identities</strong>. A TCP <code>SYN</code> carries no Google session and no role, so the router cannot check <em>who</em> you are the way the HTTP edge does. TCP exposure is therefore <strong>opt-in per resource, default off</strong>, and security rests on <strong>protocol-native auth</strong> (the database password, Redis <code>requirepass</code>, your own TLS client certs) plus <strong>NetworkPolicy fencing</strong> — the tenant default-deny gains a single allow-from-<code>edge-tcp</code> rule <em>only</em> for a workload you explicitly expose. If you need real per-user authorization and audit over a database connection, use <a href="#dbproxy"><code>db:proxy</code></a> instead — it is the strongly-authorized alternative and the two are complements, not competitors.</p></div>
+
+<h2 id="modes">Two routing modes: SNI vs port</h2>
+<p>At L4 there is no <code>Host</code> header. The router has exactly two ways to decide where a connection goes:</p>
+<table class="tbl">
+<thead><tr><th>Mode</th><th>Routing key</th><th>Ports used</th><th>Good for</th></tr></thead>
+<tbody>
+<tr><td><strong>SNI</strong></td><td>The TLS <code>server_name</code> (<code>&lt;name&gt;.&lt;baseDomain&gt;</code>) the client puts in its ClientHello</td><td>Shared, well-known (e.g. <code>5432</code>) — one port serves <em>many</em> workloads</td><td>Any TLS protocol that sends SNI: modern <code>libpq</code> (PG 14+), TLS Redis, most GUI tools</td></tr>
+<tr><td><strong>Port</strong></td><td>The port number alone — no parsing, no peeking</td><td>One dedicated port per workload, allocated from a range (default <code>7000–7099</code>)</td><td>Non-SNI protocols: plain Redis, MQTT, anything that speaks bytes before (or without) TLS</td></tr>
+</tbody>
+</table>
+<p>SNI is the primary mechanism because it is <strong>scarce-port-frugal</strong> — one shared listener fronts every SNI-routable workload. Dedicated ports are the fallback, and they are genuinely scarce (an NLB defaults to ~50 listeners), so the port range is capped and metered.</p>
+
+<div class="note"><span class="lbl">The router never terminates TLS</span><p>In SNI mode <code>edge-tcp</code> <strong>peeks</strong> the ClientHello to read the one cleartext field it needs — the SNI — and then splices the bytes straight through to the upstream. The TLS handshake completes <strong>end-to-end</strong> between your client and the workload; the router is a blind pipe and never sees your plaintext or your credentials.</p></div>
+
+<h2 id="postgres">Postgres on a shared port</h2>
+<p><code>libpq</code> doesn't open with a TLS ClientHello — it first sends an <strong>8-byte cleartext <code>SSLRequest</code></strong> and waits for a one-byte answer before it will start TLS. So on the shared Postgres port the router speaks just enough of the protocol to get a routing key:</p>
+<pre><code><span class="tok-c"># the handshake edge-tcp relays, in order:</span>
+client  → router    <span class="tok-c"># SSLRequest (8 bytes, cleartext)</span>
+router  → client    <span class="tok-c"># 'S'  — the router answers ITSELF, so the client sends its ClientHello</span>
+client  → router    <span class="tok-c"># ClientHello (TLS)  → router peeks the SNI, resolves the upstream</span>
+router  → upstream  <span class="tok-c"># the ORIGINAL SSLRequest, replayed verbatim</span>
+upstream→ router    <span class="tok-c"># 'S'  — read and discarded (the client already got its 'S')</span>
+router  → upstream  <span class="tok-c"># ClientHello + splice  → TLS now completes end-to-end</span></code></pre>
+<p>Because the single <code>'S'</code> byte is identical whether the router or the server sends it, both ends see a perfectly well-formed Postgres-over-TLS handshake while the encryption stays end-to-end. A client that tries <strong>GSSAPI</strong> encryption first (<code>GSSENCRequest</code>) is answered <code>'N'</code> — the router doesn't offer GSS transport — and <code>libpq</code> then falls back to an <code>SSLRequest</code>, which re-enters the path above.</p>
+
+<div class="note tip"><span class="lbl"><code>sslmode=require</code> is the default</span><p>A plaintext Postgres connection (<code>sslmode=disable</code>) sends a cleartext startup packet with <strong>no SNI</strong> — there is no routing key on a shared port, so the router closes it. Connect with at least <code>sslmode=require</code> (and prefer <code>verify-full</code> with the cluster CA — that's what the <a href="configuration.html#uses">first-class DB binding</a> already sets for in-cluster apps). If your client is too old to send SNI, use a dedicated port or <a href="#dbproxy"><code>db:proxy</code></a>.</p></div>
+
+<h2 id="limits">Limits &amp; accounting</h2>
+<p>Every connection is bounded so a long-lived or idle socket can't pin router memory or starve a tenant:</p>
+<div class="note"><span class="lbl">Per connection</span><ul>
+  <li><strong>Idle timeout</strong> — a spliced connection with no bytes in either direction for the timeout window has <em>both</em> sockets destroyed.</li>
+  <li><strong>Handshake budget</strong> — a peer that dawdles through the SNI peek / preamble (or never finishes it) is dropped rather than holding a slot.</li>
+  <li><strong>Per-workload concurrency cap</strong> — once a workload hits its concurrent-connection ceiling, new connections are refused (no upstream is even dialed).</li>
+  <li><strong>Byte counters</strong> — bytes in/out and duration are recorded per closed connection, feeding the same metrics seam the WebSocket plane uses.</li>
+</ul></div>
+<p>Because a TCP <code>SYN</code> can't wake a scaled-to-zero pod (the KEDA HTTP interceptor only wakes on HTTP), any app that exposes TCP must run with <code>scale.min ≥ 1</code>. Managed databases (CNPG) are always-on and unaffected.</p>
+
+<h2 id="dbproxy">The authorized alternative: <code>db:proxy</code></h2>
+<p>When you need <strong>real per-user authorization and an audit trail</strong> on a database connection — the thing L4 structurally cannot provide — reach for <code>db:proxy</code>. It opens a local listener whose connections ride an authenticated WebSocket to the control plane, which checks your role and splices to the database in-cluster. It also works on deployments with <em>no</em> L4 plane at all and needs no exposure opt-in. Think of L4 as convenient, protocol-native reach, and <code>db:proxy</code> as the guarded door.</p>
+
+<h2 id="local">Local parity</h2>
+<p>Locally, nginx grows a <code>stream {}</code> block (<code>listen 5432; ssl_preread on;</code>) that forwards the shared port and the dynamic range to <code>edge-tcp</code> exactly as the production NLB will. It ships <strong>off by default</strong> — port <code>5432</code> is already taken by Postgres on most dev machines — and is enabled with <code>make tls TCP_PORTS=1</code>.</p>
+
+<div class="note warn"><span class="lbl">Coming next — the expose API (A2b)</span><p>This slice ships the <strong>router core</strong>. The surface that turns it on for a resource — the <code>tcp_endpoints</code> registry, <code>POST /v1/sites/:name/expose</code>, <code>drop expose</code> / <code>drop unexpose</code>, the MCP tools, the console exposure panel, the Service/NLB patching and the tenant NetworkPolicy allow-rule — arrives in the <strong>next slice (A2b)</strong>. Until then the router routes from an injected route table; there is no self-service expose command yet.</p></div>
+
+<div class="next">
+  <a href="roles-visibility.html"><div class="d">← Back</div><div class="t">Roles &amp; Visibility</div></a>
+  <a href="architecture.html"><div class="d">Next →</div><div class="t">Architecture &amp; diagrams</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

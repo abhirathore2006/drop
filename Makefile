@@ -19,6 +19,14 @@ HTTPS_PORT   ?= 443
 NGINX_IMAGE  ?= docker.io/library/nginx:1.27-alpine
 HOST_GW      ?= host.containers.internal
 HTTPS_SFX    := $(if $(filter 443,$(HTTPS_PORT)),,:$(HTTPS_PORT))
+# L4 (TCP) plane — the A2 edge-tcp router. OFF by default (TCP_PORTS unset): publishing 5432
+# collides with the local Postgres container (drop-postgres) + most dev machines' own Postgres,
+# so the stream block is opt-in. `make tls TCP_PORTS=1` publishes 5432 + the dynamic range and
+# mounts infra/nginx/nginx-stream.conf, forwarding to a host-side edge-tcp on EDGE_TCP_PORT
+# (run it with: DROP_TCP_SHARED_PORTS=$(EDGE_TCP_PORT):postgres node dist/edge-tcp.js).
+EDGE_TCP_PORT    ?= 8475
+TCP_DYNAMIC_FROM ?= 7000
+TCP_DYNAMIC_TO   ?= 7009
 
 # Container engine — works with podman (default if present), Docker Desktop,
 # Rancher Desktop (dockerd/moby engine), or colima. Override with
@@ -213,13 +221,29 @@ tls: engine
 	     -e 's#proxy_pass http://edge:8080;#proxy_pass http://$(HOST_GW):$(EDGE_PORT);#' \
 	     infra/nginx/drop.conf > $(RUN)/nginx.conf
 	@$(CE) rm -f drop-nginx >/dev/null 2>&1 || true
+ifeq ($(TCP_PORTS),1)
+	@# L4 plane ON: template the full nginx.conf (http include + stream block), expanding the
+	@# dynamic-range server blocks at the __DYNAMIC_SERVERS__ marker, then publish 5432 + range.
+	@awk -v host=$(HOST_GW) -v port=$(EDGE_TCP_PORT) -v from=$(TCP_DYNAMIC_FROM) -v to=$(TCP_DYNAMIC_TO) '\
+	  { gsub(/__EDGE_TCP_HOST__/, host); gsub(/__EDGE_TCP_PORT__/, port); \
+	    if ($$0 ~ /__DYNAMIC_SERVERS__/) { for (p=from; p<=to; p++) printf "  server { listen %d; proxy_pass %s:%d; }\n", p, host, p; next } \
+	    print }' infra/nginx/nginx-stream.conf > $(RUN)/nginx-stream.conf
+	@$(CE) run -d --rm --name drop-nginx --add-host $(HOST_GW):host-gateway \
+	  -p $(HTTPS_PORT):443 -p 5432:5432 -p $(TCP_DYNAMIC_FROM)-$(TCP_DYNAMIC_TO):$(TCP_DYNAMIC_FROM)-$(TCP_DYNAMIC_TO) \
+	  -v $(CURDIR)/$(RUN)/nginx-stream.conf:/etc/nginx/nginx.conf:ro \
+	  -v $(CURDIR)/$(RUN)/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
+	  -v $(CURDIR)/infra/nginx/certs:/etc/nginx/certs:ro \
+	  $(NGINX_IMAGE) >/dev/null 2>&1 || true
+else
 	@$(CE) run -d --rm --name drop-nginx --add-host $(HOST_GW):host-gateway -p $(HTTPS_PORT):443 \
 	  -v $(CURDIR)/$(RUN)/nginx.conf:/etc/nginx/conf.d/default.conf:ro \
 	  -v $(CURDIR)/infra/nginx/certs:/etc/nginx/certs:ro \
 	  $(NGINX_IMAGE) >/dev/null 2>&1 || true
+endif
 	@sleep 1
 	@if $(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-nginx$$'; then \
 	  echo "✓ https  https://api.$(BASE_DOMAIN)$(HTTPS_SFX)/  ·  https://<name>.$(BASE_DOMAIN)$(HTTPS_SFX)/   (make trust-cert to silence warnings)"; \
+	  [ "$(TCP_PORTS)" = "1" ] && echo "✓ tcp    :5432 (SNI/postgres) + :$(TCP_DYNAMIC_FROM)-$(TCP_DYNAMIC_TO) (dynamic) → edge-tcp @ $(HOST_GW):$(EDGE_TCP_PORT)  (run: DROP_TCP_SHARED_PORTS=$(EDGE_TCP_PORT):postgres node dist/edge-tcp.js)" || true; \
 	else \
 	  echo "✗ nginx didn't start — port $(HTTPS_PORT) busy? try 'make tls HTTPS_PORT=8443'.  logs:"; $(CE) logs drop-nginx 2>&1 | tail -5; \
 	fi

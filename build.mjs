@@ -1,5 +1,5 @@
 // Bundles the entrypoints into node-runnable ESM with esbuild.
-//   node build.mjs            → builds everything (cli + mcp + api + edge)
+//   node build.mjs            → builds everything (cli + mcp + api + edge + edge-tcp)
 //   node build.mjs cli mcp    → builds only the named targets (prepare uses this for npx)
 import { build } from "esbuild";
 import { readFileSync } from "node:fs";
@@ -31,6 +31,7 @@ const targets = [
   { tag: "mcp", entry: "bin/mcp.ts", out: "dist/mcp.js" },
   { tag: "api", entry: "bin/api.ts", out: "dist/api.js" },
   { tag: "edge", entry: "bin/edge.ts", out: "dist/edge.js" },
+  { tag: "edge-tcp", entry: "bin/edge-tcp.ts", out: "dist/edge-tcp.js" },
 ];
 
 for (const t of targets) {
