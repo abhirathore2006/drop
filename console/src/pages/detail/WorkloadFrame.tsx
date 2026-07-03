@@ -58,6 +58,7 @@ function AccessPanel({ d, isOwner }: { d: Detail; isOwner: boolean }) {
   return (
     <div className="sec">
       <h3>access</h3>
+      {(d.type === "site" || d.type === "app") && <VisibilityRow d={d} isOwner={isOwner} />}
       <div className="item">
         <div className="meta">
           <b>{d.owner}</b>
@@ -86,6 +87,57 @@ function AccessPanel({ d, isOwner }: { d: Detail; isOwner: boolean }) {
           onSubmit={(email) => act.mutate(() => api.addCollaborator(d.name, email))}
         />
       )}
+    </div>
+  );
+}
+
+/** Who can view the served workload: public / password (basic-auth) / private. Mirrors the
+ *  old console's setVisibility flow; the edge enforces it. Owner-only to change. */
+function VisibilityRow({ d, isOwner }: { d: Detail; isOwner: boolean }) {
+  const act = useWorkloadAction();
+  const [vis, setVis] = useState(d.visibility);
+  const [pw, setPw] = useState("");
+  // Changing TO password needs a password; already-password keeps the stored one unless retyped.
+  const needsPw = vis === "password" && d.visibility !== "password" && !pw;
+  const dirty = vis !== d.visibility || (vis === "password" && pw !== "");
+  if (!isOwner) {
+    return (
+      <div className="item">
+        <div className="meta">
+          <b>visibility</b>
+          <div className="sub">{d.visibility}</div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="item visrow">
+      <div className="meta">
+        <b>visibility</b>
+        <div className="sub">who can view the served {d.type}</div>
+      </div>
+      <select className="input" aria-label="visibility" value={vis} disabled={act.isPending} onChange={(e) => setVis(e.target.value)}>
+        <option value="public">public</option>
+        <option value="password">password</option>
+        <option value="private">private</option>
+      </select>
+      {vis === "password" && (
+        <input
+          className="input"
+          type="password"
+          placeholder={d.visibility === "password" ? "keep current password" : "set a password"}
+          value={pw}
+          disabled={act.isPending}
+          onChange={(e) => setPw(e.target.value)}
+        />
+      )}
+      <Button
+        size="sm"
+        disabled={!dirty || needsPw || act.isPending}
+        onClick={() => act.mutate(() => api.setVisibility(d.name, vis, vis === "password" && pw ? pw : undefined), { onSuccess: () => setPw("") })}
+      >
+        apply
+      </Button>
     </div>
   );
 }

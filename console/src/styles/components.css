@@ -635,3 +635,19 @@ code.reveal {
 .sedge-env_from .react-flow__edge-path {
   stroke: var(--info-fg);
 }
+
+/* Visibility row (AccessPanel): controls wrap below the label instead of overflowing the
+   panel — an unwrapped select+password+apply row is wider than the column. */
+.item.visrow {
+  flex-wrap: wrap;
+}
+.item.visrow .meta {
+  flex-basis: 100%;
+}
+.item.visrow select.input {
+  width: auto;
+}
+.item.visrow input.input {
+  flex: 1;
+  min-width: 0;
+}

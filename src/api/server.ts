@@ -1547,7 +1547,18 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (dryRun) {
       return c.json({ stack: name, org: org.slug, specVersion: existing?.specVersion ?? 0, plan, needs, outputs, dryRun: true });
     }
-    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    // Compute is only required for steps that actually touch the cluster: databases, apps with a
+    // known image (an imageless app step just claims the row — the CLI's image push follows), and
+    // pruned app/db deletes. A site-only stack must reconcile fine on a static-only instance.
+    const touchesCluster = (s: PlanStep): boolean => {
+      if (s.kind === "site" || s.action === "noop") return false;
+      if (s.action === "delete") return prune;
+      if (s.kind === "database") return true;
+      return !!(body.resolved?.[s.key]?.image ?? spec.resources[s.key]?.image);
+    };
+    if (!d.kube && plan.some(touchesCluster)) {
+      return c.json({ error: "compute is not enabled on this instance (the stack has app/database changes)" }, 501);
+    }
 
     // Per-org workload cap: a stack `up` can create several resources at once — count them up front.
     const createCount = plan.filter((s) => s.action === "create").length;

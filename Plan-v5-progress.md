@@ -26,7 +26,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 5 | G1 `drop logs -f` · H1 app rollback | done | 60096ac | follow streams first-ready pod; app rollback re-applies version config under deploy lock; drop.dev/version anno |
 | 6 | M0 Console re-platform + foundation | done | 5c0118c | Vite@6, wouter, TanStack Query; CSP strict; normalizeStatus pure (server wiring pending); vite dev proxy :8473 |
 | 6b | M0.5 Drop zone publish | done | a2ef18f | USTAR writer lockstep-tested vs archive.ts; fflate lazy chunk; + status field wired into site detail |
-| 7 | C1 Read-only canvas | in-progress | | |
+| 7 | C1 Read-only canvas | done | 4506133 | graph endpoint w/ aggregated ns status lists; xyflow lazy chunk; CSP unchanged |
 | 8 | I1 Buckets (+FM item 10 quotas) | todo | | |
 | 9 | A2 L4 plane: NLB + TCP router | todo | | |
 | 10 | J1 Service accounts / CI tokens | todo | | |
