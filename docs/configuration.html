@@ -170,10 +170,25 @@
 <tr><td><code>scale</code></td><td>object</td><td><code>{ min, max }</code> KEDA replica bounds (<code>min ≥ 0</code>, <code>max ≥ 1</code>, <code>max ≥ min</code>). <code>min: 0</code> = scale-to-zero. Default <code>{ min: 0, max: 3 }</code>.</td></tr>
 <tr><td><code>resources</code></td><td>object</td><td><code>{ cpu, memory }</code> container limits (k8s quantities, e.g. <code>"500m"</code>, <code>"512Mi"</code>). Default <code>{ cpu: "0.5", memory: "512Mi" }</code> — never unbounded.</td></tr>
 <tr><td><code>env</code></td><td>object</td><td>String→string environment variables. <strong>Non-secret only</strong> — put credentials in write-only secrets (<code>drop secrets set</code>), which are injected as env at runtime.</td></tr>
+<tr><td><code>uses</code></td><td>array</td><td><code>{ database }</code> entries binding managed databases <strong>in the same org</strong> (see <a href="#uses"><code>uses:</code></a>). Each injects the DB's <code>&lt;db&gt;-app</code> Secret (<code>PG*</code> env incl. password), mounts the cluster CA, and sets <code>PGSSLMODE=verify-full</code> — no password ever copied into the app. A missing or cross-org database is rejected at deploy with a <code>400</code>.</td></tr>
 <tr><td><code>trusted</code></td><td>boolean</td><td>Default <code>true</code>. Set <code>false</code> to run the pod under the gVisor <code>RuntimeClass</code> (stronger isolation for untrusted images).</td></tr>
 </tbody>
 </table>
 <div class="note tip"><span class="lbl">Tip</span><p>An app with <code>scale.min: 1</code> boots a pod the instant it deploys — so if it needs a secret (e.g. a DB password) to start, deploy with <code>--no-start</code>, set the secret, then <code>drop start</code>. See <a href="getting-started.html">Getting started</a>.</p></div>
+
+<h3 id="uses">uses:</h3>
+<p>Declare a dependency on a managed <a href="#compute-config">database</a> and let Drop wire the connection for you — no reading the Secret, building a connection string, or copying the DB password into the app's own secret. Each entry names a database <strong>your org owns</strong>; at <code>drop deploy</code> the API resolves it and binds it. A database that doesn't exist, or that belongs to a <strong>different org</strong>, is rejected with a <code>400</code> naming it.</p>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">image</span>: <span class="tok-s">todo:1</span>
+  <span class="tok-k">uses</span>:
+    - { <span class="tok-k">database</span>: <span class="tok-s">tododb</span> }              <span class="tok-c"># a `drop db create tododb` in the same org</span></code></pre>
+<p>For each bound database, Drop injects into the app's pod:</p>
+<ul>
+  <li><code>envFrom</code> the CNPG-generated <code>&lt;db&gt;-app</code> Secret — so <code>PGHOST</code>/<code>PGUSER</code>/<code>PGPASSWORD</code>/<code>PGDATABASE</code> come straight from the database. The password is <strong>never</strong> copied into the app's own secret, so rotation just works (the pod re-reads on restart).</li>
+  <li>the cluster CA (the <code>&lt;db&gt;-ca</code> Secret, <code>ca.crt</code> only — never the CA key) mounted read-only at <code>/var/run/drop/db-ca/&lt;db&gt;/ca.crt</code>.</li>
+  <li><code>PGSSLMODE=verify-full</code> and <code>PGSSLROOTCERT</code> pointed at that CA — so the app verifies the server's TLS certificate against it instead of trusting the connection blindly.</li>
+</ul>
+<div class="note tip"><span class="lbl">Tip</span><p><code>uses</code> replaces the manual <code>PG*</code> + <code>drop db password … --set-secret</code> wiring shown in example 4 below. Pass individual <code>PG*</code> only to <em>override</em> a specific value; prefer discrete <code>PG*</code> over a single <code>DATABASE_URL</code>, which some drivers silently prefer even when stale.</p></div>
 
 <h3>database:</h3>
 <p>Declared under <code>database:</code>, parsed at <code>drop db create</code>. The API translates it into a CloudNativePG <code>Cluster</code> (plus scheduled backups via the Barman Cloud Plugin) in your tenant namespace. A database has no required key — an empty section yields a default Postgres.</p>

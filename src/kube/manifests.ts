@@ -29,6 +29,11 @@ const SERVICE_PORT = 80;
 const DEFAULT_SCALE = { min: 0, max: 3 };
 const KEDA_NAMESPACE = "keda"; // where the KEDA HTTP add-on interceptor runs
 
+// Where a bound database's CNPG cluster CA (`ca.crt` from the `<db>-ca` Secret) is mounted,
+// read-only, one dir per database: `<base>/<db>/ca.crt`. PGSSLROOTCERT points the primary
+// binding at it so the app can verify-full the server's TLS cert.
+const DB_CA_MOUNT_BASE = "/var/run/drop/db-ca";
+
 // The cloud instance-metadata endpoint — same IP on AWS/GCP/Azure, so it's always
 // excluded from the egress allowlist regardless of cluster CIDRs.
 const IMDS_CIDR = "169.254.169.254/32";
@@ -121,6 +126,29 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
     : undefined;
   const scale = app.scale ?? DEFAULT_SCALE;
 
+  // First-class DB binding (app.uses): for each declared database, envFrom its CNPG-generated
+  // `<db>-app` Secret (PG* connection incl. password — never copied into the app's own env),
+  // mount the cluster CA (`<db>-ca`, ca.crt ONLY — never the CA private key) read-only, and turn
+  // on full TLS verification. The `<db>-app`/`<db>-ca` Secrets are namespace-scoped, so this only
+  // resolves when the DB shares the app's namespace — the API enforces same-org before we get here.
+  const boundDbs = app.uses?.map((u) => u.database) ?? [];
+  const dbEnvFrom = boundDbs.map((db) => ({ secretRef: { name: `${db}-app` } }));
+  const dbVolumes = boundDbs.map((db) => ({
+    name: `db-ca-${db}`,
+    secret: { secretName: `${db}-ca`, items: [{ key: "ca.crt", path: "ca.crt" }] },
+  }));
+  const dbVolumeMounts = boundDbs.map((db) => ({ name: `db-ca-${db}`, mountPath: `${DB_CA_MOUNT_BASE}/${db}`, readOnly: true }));
+  // PG* is a single-connection model, so verify-full is set once and PGSSLROOTCERT points at the
+  // FIRST bound db's CA (any additional CAs are still mounted at their own paths for an app that
+  // references them explicitly). These are container `env` (not envFrom) so they win over any
+  // same-named value the `<db>-app`/config Secrets might carry.
+  const dbEnv = boundDbs.length
+    ? [
+        { name: "PGSSLMODE", value: "verify-full" },
+        { name: "PGSSLROOTCERT", value: `${DB_CA_MOUNT_BASE}/${boundDbs[0]}/ca.crt` },
+      ]
+    : [];
+
   const deployment = {
     apiVersion: "apps/v1",
     kind: "Deployment",
@@ -142,16 +170,21 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
               // Make the policy explicit instead of relying on k8s' tag-based default (see imagePullPolicy).
               imagePullPolicy: imagePullPolicy(app.image),
               ports: [{ containerPort }],
-              // env lives in Secrets (not plaintext in the pod spec) — SEC-5. Two sources:
+              // env lives in Secrets (not plaintext in the pod spec) — SEC-5. Sources, in order:
+              //  - <db>-app: each bound database's CNPG creds Secret (app.uses) — the base layer.
               //  - <name>-env: non-secret config from drop.yaml app.env (only when present).
               //  - <name>-secret: write-only app secrets managed out-of-band (CLI/dashboard/MCP),
               //    written by the SecretStore / synced by ESO. Listed LAST so a secret overrides a
               //    same-named config value; optional so a not-yet-created Secret never blocks startup.
               envFrom: [
+                ...dbEnvFrom,
                 ...(hasEnv ? [{ secretRef: { name: secretName } }] : []),
                 { secretRef: { name: `${ctx.name}-secret`, optional: true } },
               ],
+              // TLS-verification env for bound databases (PGSSLMODE/PGSSLROOTCERT); omitted otherwise.
+              ...(dbEnv.length ? { env: dbEnv } : {}),
               ...(limits ? { resources: { limits, requests: limits } } : {}),
+              ...(dbVolumeMounts.length ? { volumeMounts: dbVolumeMounts } : {}),
               // Minimal, non-breaking baseline: block privilege escalation + default
               // seccomp, but DON'T drop caps (most official images chown/setuid at
               // entrypoint and break under `drop: ALL`). Stronger isolation is the
@@ -162,6 +195,7 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
               },
             },
           ],
+          ...(dbVolumes.length ? { volumes: dbVolumes } : {}), // CA volumes for bound databases (app.uses)
         },
       },
     },

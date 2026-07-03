@@ -513,6 +513,40 @@ test("orgs: team org grants org-WIDE rights; non-members blocked; member can't d
   await db.destroy();
 });
 
+test("deploy with uses:[{database}] binds the DB; FakeKube gets envFrom <db>-app + CA + verify-full", async () => {
+  const { app, kube, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/tododb?org=acme", "alice", {})).status).toBe(200); // a DB in the org
+  const res = await call(app, "POST", "/v1/apps/todo?org=acme", "alice", { image: "todo:1", uses: [{ database: "tododb" }] });
+  expect(res.status).toBe(200);
+  // the binding reached kube exactly as the manifest layer emits it
+  const applied = kube.applies.find((a) => a.name === "todo")!.manifests;
+  const ctr = (applied.deployment as any).spec.template.spec.containers[0];
+  expect(ctr.envFrom[0]).toEqual({ secretRef: { name: "tododb-app" } });
+  expect(ctr.env).toContainEqual({ name: "PGSSLMODE", value: "verify-full" });
+  expect(ctr.env).toContainEqual({ name: "PGSSLROOTCERT", value: "/var/run/drop/db-ca/tododb/ca.crt" });
+  expect((applied.deployment as any).spec.template.spec.volumes[0].secret.secretName).toBe("tododb-ca");
+  await db.destroy();
+});
+
+test("deploy uses:[{database}] referencing a missing database → 400 naming it", async () => {
+  const { app, db } = await mk();
+  const res = await call(app, "POST", "/v1/apps/todo", "alice", { image: "todo:1", uses: [{ database: "ghostdb" }] });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error).toContain("ghostdb");
+  await db.destroy();
+});
+
+test("deploy cannot bind a database in a DIFFERENT org → 400", async () => {
+  const { app, db } = await mk();
+  expect((await call(app, "POST", "/v1/databases/alicedb", "alice", {})).status).toBe(200); // alice's personal org
+  // bob (different owner → different personal org) tries to bind alice's DB
+  const res = await call(app, "POST", "/v1/apps/bobapp", "bob", { image: "x:1", uses: [{ database: "alicedb" }] });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error).toContain("different organisation");
+  await db.destroy();
+});
+
 test("app secrets: write-only set/list/delete (owner), value NEVER returned; deploy reconciles the binding", async () => {
   const { app, secrets, db } = await mk();
   await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });

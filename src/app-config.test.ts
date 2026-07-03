@@ -71,3 +71,33 @@ test("sanitizeAppConfig defaults resources (never unbounded) and trusted=true by
   expect(c.trusted).toBe(true); // internal-trusted default (no sandbox dependency)
   expect(sanitizeAppConfig({ image: "x:1", trusted: false })!.trusted).toBe(false); // opt into sandbox
 });
+
+test("sanitizeAppConfig parses uses:[{database}], dropping junk / wrong shapes / bad names / dupes", () => {
+  const c = sanitizeAppConfig({
+    image: "x:1",
+    uses: [
+      { database: "tododb" },
+      { database: "Bad_Name" }, // fails validateName → dropped
+      { database: "tododb" }, // duplicate → collapsed
+      { cache: "nope" }, // wrong shape (no `database`) → dropped
+      "junk", // not an object → dropped
+      { database: 123 }, // non-string → dropped
+      { database: "" }, // empty → dropped
+    ],
+  })!;
+  expect(c.uses).toEqual([{ database: "tododb" }]);
+});
+
+test("sanitizeAppConfig omits uses when absent / not an array / all-invalid; caps the list at 8", () => {
+  expect(sanitizeAppConfig({ image: "x:1" })!.uses).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", uses: "nope" })!.uses).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", uses: [{ cache: "x" }] })!.uses).toBeUndefined();
+  const many = Array.from({ length: 12 }, (_, i) => ({ database: `db${i}` })); // 12 distinct valid names
+  expect(sanitizeAppConfig({ image: "x:1", uses: many })!.uses!.length).toBe(8); // capped
+});
+
+test("sanitizeAppConfig uses is round-trip safe (CLI sanitizes -> JSON -> API re-sanitizes)", () => {
+  const once = sanitizeAppConfig({ image: "x:1", uses: [{ database: "tododb" }] })!;
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!; // feed the sanitized object back in
+  expect(twice.uses).toEqual([{ database: "tododb" }]);
+});

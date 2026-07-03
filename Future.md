@@ -4,6 +4,14 @@ Deferred enhancements with enough design to pick up later. Ordered by leverage.
 
 ## 1. First-class database binding (highest leverage)
 
+> **Status (2026-07-04):** SHIPPED (slice B1). `app.uses: [{ database: <name> }]` → the deploy
+> resolves the database (must be in the caller's org, else a `400`) and wires the app's pod:
+> `envFrom` the CNPG `<db>-app` Secret (PG* incl. password — never copied into the app's own
+> secret), a read-only `<db>-ca` CA mount at `/var/run/drop/db-ca/<db>/ca.crt`, and
+> `PGSSLMODE=verify-full` + `PGSSLROOTCERT`. Landed in `app-config.ts` (`uses` sanitizer),
+> `kube/manifests.ts` (envFrom + CA volume/mount + TLS env), `api/server.ts` (resolve + same-org
+> authz), docs in `configuration.html`.
+
 **Problem.** Today, wiring an app to a managed database is manual and fragile:
 - The operator/user must read the CNPG `<db>-app` Secret, build a connection string, and pass
   it as app `env` (`PGHOST`/`PGPASSWORD`/…). This **copies the DB password into the app's own

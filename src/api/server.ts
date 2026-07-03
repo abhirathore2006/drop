@@ -388,6 +388,19 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const actor = await actorFor(email, site);
     if (!can(actor, "deploy")) return c.json({ error: `app is owned by ${site.owner}` }, 403);
 
+    // Resolve declared DB bindings (app.uses): each must be an existing database in the SAME org.
+    // The CNPG `<db>-app`/`<db>-ca` Secrets the binding wires are namespace-scoped, so a cross-org
+    // database is both unauthorized and unreachable — reject with a named 400 before touching kube.
+    for (const u of appCfg.uses ?? []) {
+      const dbSite = await d.meta.getSitePlain(u.database);
+      if (!dbSite || dbSite.type !== "database") {
+        return c.json({ error: `app uses database "${u.database}", which does not exist` }, 400);
+      }
+      if (dbSite.orgId !== site.orgId) {
+        return c.json({ error: `database "${u.database}" belongs to a different organisation and cannot be bound` }, 400);
+      }
+    }
+
     const verId = newVersionId(now());
     const ns = site.namespace; // per-owner tenant namespace (isolation)
     await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs })); // namespace + NetworkPolicy + quota + LimitRange

@@ -17,6 +17,9 @@ export interface AppScale {
   min: number; // KEDA minReplicaCount (0 = scale-to-zero)
   max: number; // KEDA maxReplicaCount
 }
+export interface AppUse {
+  database: string; // a managed database in the SAME org; deploy wires envFrom <db>-app + CA + verify-full
+}
 export interface AppConfig {
   name?: string;
   image: string;
@@ -25,6 +28,7 @@ export interface AppConfig {
   services: AppService[];
   scale?: AppScale;
   trusted?: boolean; // default true (no sandbox); false opts into the gVisor RuntimeClass (prod)
+  uses?: AppUse[]; // first-class DB binding: `uses: [{ database: <name> }]` (omitted when none declared)
 }
 
 const DEFAULT_SERVICE: AppService = { internalPort: 8080, protocol: "http" };
@@ -77,6 +81,24 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
     const min = typeof s.min === "number" && s.min >= 0 ? s.min : undefined;
     const max = typeof s.max === "number" && s.max >= 1 ? s.max : undefined;
     if (min != null && max != null && max >= min) cfg.scale = { min, max };
+  }
+
+  // `uses` declares dependencies on managed resources (v1: databases). Each entry is
+  // `{ database: <name> }`; the deploy path resolves the name to a same-org database and
+  // wires the app to its CNPG `<db>-app` Secret + cluster CA + PGSSLMODE=verify-full. Same
+  // defensive posture as everything above: ignore non-array input and junk entries, require a
+  // valid workload name, collapse duplicates, and cap the list. Round-trip safe — the sanitized
+  // shape `{ database: <name> }` re-sanitizes unchanged (CLI -> JSON -> API).
+  if (Array.isArray(raw.uses)) {
+    const uses: AppUse[] = [];
+    const seen = new Set<string>();
+    for (const u of (raw.uses as any[]).slice(0, 8)) {
+      const database = str(u?.database, 63);
+      if (!database || validateName(database) !== null || seen.has(database)) continue;
+      seen.add(database);
+      uses.push({ database });
+    }
+    if (uses.length) cfg.uses = uses;
   }
 
   return cfg;

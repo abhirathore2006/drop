@@ -131,3 +131,48 @@ test("appManifests: no runtimeClassName / no config Secret when sandbox off & no
   // even with no config env, the app-secret ref is always present (optional) so set secrets inject.
   expect((m.deployment as any).spec.template.spec.containers[0].envFrom).toEqual([{ secretRef: { name: "a-secret", optional: true } }]);
 });
+
+test("appManifests: uses binds a db — envFrom <db>-app + CA volume/mount + verify-full, exactly once", () => {
+  const m = appManifests(
+    { ...base, env: { LOG_LEVEL: "info" }, uses: [{ database: "tododb" }] },
+    { name: "todo", namespace: "drop-acme", host: "todo.drop.example.com" },
+  );
+  const pod = (m.deployment as any).spec.template.spec;
+  const ctr = pod.containers[0];
+  // <db>-app comes FIRST (base layer), then config Secret, then the optional app-secret (wins on collision).
+  expect(ctr.envFrom).toEqual([
+    { secretRef: { name: "tododb-app" } },
+    { secretRef: { name: "todo-env" } },
+    { secretRef: { name: "todo-secret", optional: true } },
+  ]);
+  // TLS verification env: verify-full + a PGSSLROOTCERT at the mounted CA path — each once.
+  expect(ctr.env).toEqual([
+    { name: "PGSSLMODE", value: "verify-full" },
+    { name: "PGSSLROOTCERT", value: "/var/run/drop/db-ca/tododb/ca.crt" },
+  ]);
+  // CA volume mounts ca.crt ONLY (never the CA private key), read-only, at a stable per-db path.
+  expect(pod.volumes).toEqual([
+    { name: "db-ca-tododb", secret: { secretName: "tododb-ca", items: [{ key: "ca.crt", path: "ca.crt" }] } },
+  ]);
+  expect(ctr.volumeMounts).toEqual([{ name: "db-ca-tododb", mountPath: "/var/run/drop/db-ca/tododb", readOnly: true }]);
+});
+
+test("appManifests: nothing DB-related when uses is absent", () => {
+  const m = appManifests(base, { name: "todo", namespace: "ns", host: "h" });
+  const pod = (m.deployment as any).spec.template.spec;
+  expect(pod.volumes).toBeUndefined();
+  expect(pod.containers[0].volumeMounts).toBeUndefined();
+  expect(pod.containers[0].env).toBeUndefined(); // no PGSSLMODE etc.
+  expect(pod.containers[0].envFrom).toEqual([{ secretRef: { name: "todo-secret", optional: true } }]); // no <db>-app
+});
+
+test("appManifests: two bound dbs → envFrom+CA per db; verify-full once; PGSSLROOTCERT = first db", () => {
+  const m = appManifests({ ...base, uses: [{ database: "db1" }, { database: "db2" }] }, { name: "app", namespace: "ns", host: "h" });
+  const pod = (m.deployment as any).spec.template.spec;
+  const ctr = pod.containers[0];
+  expect(ctr.envFrom.filter((e: any) => e.secretRef.name.endsWith("-app")).map((e: any) => e.secretRef.name)).toEqual(["db1-app", "db2-app"]);
+  expect(pod.volumes.map((v: any) => v.secret.secretName)).toEqual(["db1-ca", "db2-ca"]);
+  expect(ctr.volumeMounts.map((v: any) => v.mountPath)).toEqual(["/var/run/drop/db-ca/db1", "/var/run/drop/db-ca/db2"]);
+  expect(ctr.env.filter((e: any) => e.name === "PGSSLMODE")).toHaveLength(1); // single-connection model
+  expect(ctr.env.find((e: any) => e.name === "PGSSLROOTCERT").value).toBe("/var/run/drop/db-ca/db1/ca.crt");
+});
