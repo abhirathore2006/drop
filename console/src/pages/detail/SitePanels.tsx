@@ -1,13 +1,60 @@
-// Static-site detail panels: version history + rollback.
+// Static-site detail panels: drop-to-publish + version history + rollback.
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { Button } from "../../components/Button.tsx";
+import { DropZone } from "../../components/DropZone.tsx";
+import { useToast } from "../../components/Toast.tsx";
 import { api, shortVersion, type Detail } from "../../lib/api.ts";
+import type { DroppedFile } from "../../lib/dropFiles.ts";
+import { publishFiles } from "../../lib/publish.ts";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
+
+// M2: gate this zone behind the `publish` capability once the capabilities API lands.
+// For now it renders for every viewer of the site; the server's own ownership check
+// (POST /v1/sites/:name/versions → 403 for non-owners) is the real gate, surfaced via toast.
+function PublishDropZone({ name }: { name: string }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [progress, setProgress] = useState<number | null>(null);
+
+  const publish = useMutation({
+    mutationFn: (files: DroppedFile[]) => {
+      setProgress(0);
+      return publishFiles(name, files, setProgress);
+    },
+    onSuccess: async (res) => {
+      setProgress(null);
+      await Promise.all([qc.invalidateQueries({ queryKey: ["/v1/sites"] }), qc.invalidateQueries({ queryKey: ["/v1/sites", name] })]);
+      toast.success(`published — live at ${res.url}`);
+    },
+    onError: (e) => {
+      setProgress(null);
+      toast.error((e as Error).message);
+    },
+  });
+
+  return (
+    <DropZone
+      label="Drop a folder here to publish a new version"
+      disabled={publish.isPending}
+      progress={progress}
+      onFiles={(files) => {
+        if (!files.length) {
+          toast.error("no files found in that folder");
+          return;
+        }
+        publish.mutate(files);
+      }}
+    />
+  );
+}
 
 export function SitePanels({ d, isOwner }: { d: Detail; isOwner: boolean }) {
   const act = useWorkloadAction({ success: "rolled back" });
   return (
     <div className="sec">
       <h3>versions ({d.versions.length})</h3>
+      <PublishDropZone name={d.name} />
       {d.versions.length === 0 && <p className="muted">—</p>}
       {d.versions.map((v) => (
         <div className="item" key={v.id}>

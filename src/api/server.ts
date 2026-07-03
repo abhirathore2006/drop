@@ -35,6 +35,7 @@ import type { ImageStore } from "../images/types.ts";
 import { fingerprint, validateSecretKey } from "../secrets/secrets.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { consoleShell, consoleAsset } from "./dashboard.ts";
+import { normalizeStatus } from "./status.ts";
 import type { AuditStore, AuditEntry } from "../audit/store.ts";
 
 export interface Deps {
@@ -978,6 +979,15 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       }
       out.database = dbInfo;
     }
+    // Normalized status contract (M0): ONE server-side mapping from the raw signals to the
+    // console/CLI enum — the client trusts this field and only falls back to mirroring it
+    // when talking to an older API (console/src/lib/status.ts).
+    out.status = normalizeStatus({
+      type: site.type,
+      runtimeState: site.runtimeState,
+      appStatus: ((out.app as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["appStatus"],
+      dbStatus: ((out.database as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["dbStatus"],
+    });
     return c.json(out);
   });
 

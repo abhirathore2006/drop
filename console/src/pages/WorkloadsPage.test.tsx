@@ -3,6 +3,7 @@ import { setupDom } from "../test/setup.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { render } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
+import { ToastProvider } from "../components/Toast.tsx";
 import { makeQueryClient } from "../lib/query.ts";
 import { WorkloadsPage } from "./WorkloadsPage.tsx";
 
@@ -43,7 +44,9 @@ describe("WorkloadsPage", () => {
   test("renders workloads grouped by type with usage cards", async () => {
     const r = render(
       <QueryClientProvider client={makeQueryClient()}>
-        <WorkloadsPage />
+        <ToastProvider>
+          <WorkloadsPage />
+        </ToastProvider>
       </QueryClientProvider>,
     );
 
@@ -68,7 +71,9 @@ describe("WorkloadsPage", () => {
     globalThis.fetch = (() => Promise.resolve(json({ sites: [] }))) as unknown as typeof fetch;
     const r = render(
       <QueryClientProvider client={makeQueryClient()}>
-        <WorkloadsPage />
+        <ToastProvider>
+          <WorkloadsPage />
+        </ToastProvider>
       </QueryClientProvider>,
     );
     expect(await r.findByText("No workloads yet.")).toBeTruthy();
