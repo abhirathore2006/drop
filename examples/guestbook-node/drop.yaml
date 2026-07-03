@@ -24,3 +24,30 @@ app:
   #   drop db password guestbook-db --set-secret guestbook:PGPASSWORD   # rotate + store; never printed
   #   drop start guestbook   # first boot, already has the password
   # Secrets are stored in the secret manager and injected as env vars — see ../DATABASE_APPS.md.
+
+# --- The SAME guestbook, as a STACK (B2). One command provisions the database AND the app and wires
+# the app→database edge for you:  drop up examples/guestbook-node
+# This is additive — the `app:` section above still works with `drop deploy`. The stack version
+# creates a database `guestbook-db` (key `db` → `<stack>-<key>`) and an app `guestbook-web`, building
+# the image from this folder's Dockerfile. `uses: [{ database: db }]` injects the CNPG `guestbook-db-app`
+# secret + CA + PGSSLMODE=verify-full. As with the standalone flow, set PGPASSWORD after `up`:
+#   drop db password guestbook-db --set-secret guestbook-web:PGPASSWORD && drop restart guestbook-web
+stack:
+  name: guestbook
+  resources:
+    db:
+      type: database
+      storage: 1Gi
+    web:
+      type: app
+      dir: . # build context → built + pushed through Drop at `up`
+      uses: [{ database: db }] # app→database edge; `db` resolves to the site name `guestbook-db`
+      scale: { min: 1, max: 2 }
+      resources: { cpu: "250m", memory: "256Mi" }
+      env:
+        PGHOST: guestbook-db-rw # the `-rw` Service of the `db` resource (materialized as `guestbook-db`)
+        PGPORT: "5432"
+        PGUSER: app
+        PGDATABASE: app
+        # PGSSLMODE is set to verify-full by the `uses` binding (with the mounted CA); PGPASSWORD is a
+        # write-only secret set after `up` (see the comment above).

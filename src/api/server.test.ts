@@ -9,6 +9,7 @@ import { FakeSecretStore } from "../secrets/fake.ts";
 import { FakeImageStore } from "../images/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { LockStore } from "../metastore/lock.ts";
+import { StackStore } from "../stacks/store.ts";
 import { UserStore } from "../users/store.ts";
 import { OrgStore } from "../orgs/store.ts";
 import { AuditStore } from "../audit/store.ts";
@@ -1324,5 +1325,169 @@ test("admin: list all orgs + filter admin/sites by org", async () => {
   expect(acme.every((s: any) => s.org.slug === "acme")).toBe(true);
   // unknown org slug → empty page
   expect((await (await call(app, "GET", "/v1/admin/sites?org=nope", "alice")).json()).sites).toEqual([]);
+  await db.destroy();
+});
+
+// ================================ Stacks (B2): declarative `drop up` ================================
+const shopSpec = {
+  name: "shop",
+  resources: {
+    db: { type: "database", storage: "1Gi" },
+    api: { type: "app", uses: [{ database: "db" }] },
+    web: { type: "site" },
+  },
+};
+
+test("stack up dry-run returns the ordered plan + needs + outputs and applies NOTHING", async () => {
+  const { app, kube, db } = await mk();
+  const spec = {
+    name: "shop",
+    resources: {
+      db: { type: "database" },
+      api: { type: "app", dir: "./api", uses: [{ database: "db" }] },
+      web: { type: "site", dir: "./web", env_from: [{ resource: "api", output: "url", as: "API_BASE" }] },
+    },
+  };
+  const res = await call(app, "POST", "/v1/stacks/shop/up?dry_run=1", "alice", { spec });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.dryRun).toBe(true);
+  expect(body.plan.map((s: any) => [s.action, s.key, s.siteName])).toEqual([
+    ["create", "db", "shop-db"],
+    ["create", "api", "shop-api"],
+    ["create", "web", "shop-web"],
+  ]);
+  // needs: the api image must be built (dir + no image), the web bytes published (dir)
+  expect(body.needs).toContainEqual({ key: "api", kind: "app-image", siteName: "shop-api" });
+  expect(body.needs).toContainEqual({ key: "web", kind: "site-publish", siteName: "shop-web" });
+  // outputs carry the app URL for env_from substitution (done CLI-side)
+  expect(body.outputs.api.url).toBe("https://shop-api.drop.example.com");
+  // nothing hit the cluster, and no stack row was created
+  expect(kube.applies.length).toBe(0);
+  expect(kube.dbApplies.length).toBe(0);
+  expect((await call(app, "GET", "/v1/stacks/shop", "alice")).status).toBe(404);
+  await db.destroy();
+});
+
+test("stack up creates a db + app + site, wires the uses edge, and re-runs as all-noop", async () => {
+  const { app, kube, meta, db } = await mk();
+  const res = await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: shopSpec, resolved: { api: { image: "api:1" } } });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.specVersion).toBe(1);
+  expect(body.plan.map((s: any) => [s.action, s.key])).toEqual([["create", "db"], ["create", "api"], ["create", "web"]]);
+  // FakeKube saw the db + the app
+  expect(kube.dbApplies.some((a) => a.name === "shop-db")).toBe(true);
+  expect(kube.applies.some((a) => a.name === "shop-api")).toBe(true);
+  // the app's uses:[{database:db}] resolved to the materialized DB name and wired the B1 binding
+  const applied = kube.applies.find((a) => a.name === "shop-api")!.manifests;
+  const ctr = (applied.deployment as any).spec.template.spec.containers[0];
+  expect(ctr.envFrom[0]).toEqual({ secretRef: { name: "shop-db-app" } });
+  // resources are ordinary rows of the right type
+  expect((await meta.getSitePlain("shop-db"))!.type).toBe("database");
+  expect((await meta.getSitePlain("shop-api"))!.type).toBe("app");
+  expect((await meta.getSitePlain("shop-web"))!.type).toBe("site");
+  // status endpoint reflects the three resources
+  const status = await (await call(app, "GET", "/v1/stacks/shop", "alice")).json();
+  expect(status.resources.map((r: any) => r.key).sort()).toEqual(["api", "db", "web"]);
+  expect(status.specVersion).toBe(1);
+  // an idempotent re-run converges to all-noop (config unchanged) and bumps the version
+  const res2 = await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: shopSpec, resolved: { api: { image: "api:1" } }, spec_version: 1 });
+  expect(res2.status).toBe(200);
+  const body2 = await res2.json();
+  expect(body2.plan.every((s: any) => s.action === "noop")).toBe(true);
+  expect(body2.specVersion).toBe(2);
+  await db.destroy();
+});
+
+test("stack up: stale spec_version → 409", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: { name: "shop", resources: { db: { type: "database" } } } });
+  const res = await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: { name: "shop", resources: { db: { type: "database" } } }, spec_version: 99 });
+  expect(res.status).toBe(409);
+  await db.destroy();
+});
+
+test("stack up: lock contention → 409", async () => {
+  const { app, db, orgs, locks, users } = await mk();
+  await users.upsertOnLogin("alice@example.com", null); // provision the user (FK) before touching orgs
+  const org = await orgs.ensurePersonalOrg("alice@example.com");
+  const id = new StackStore(db).stackId(org.id, "shop");
+  expect(await locks.acquire(`stack:${id}`, "someone-else", 60_000)).toBe(true); // hold it
+  const res = await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: { name: "shop", resources: { db: { type: "database" } } } });
+  expect(res.status).toBe(409);
+  await db.destroy();
+});
+
+test("stack up: a resource name owned by another org → 409 cross-org conflict", async () => {
+  const { app, db } = await mk();
+  // alice owns a database literally named "shop-db" (in her personal org)
+  expect((await call(app, "POST", "/v1/databases/shop-db", "alice", {})).status).toBe(200);
+  // bob's stack "shop" would materialize db → "shop-db", which belongs to alice's org
+  const res = await call(app, "POST", "/v1/stacks/shop/up", "bob", { spec: { name: "shop", resources: { db: { type: "database" } } } });
+  expect(res.status).toBe(409);
+  expect((await res.json()).error).toContain("another organisation");
+  await db.destroy();
+});
+
+test("stack delete: orphan leaves resources; cascade tears them down; both audited", async () => {
+  const { app, kube, meta, audit, db } = await mk();
+  // orphan case
+  await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: shopSpec, resolved: { api: { image: "api:1" } } });
+  const orphan = await call(app, "DELETE", "/v1/stacks/shop", "alice");
+  expect(orphan.status).toBe(200);
+  const ob = await orphan.json();
+  expect(ob.cascade).toBe(false);
+  expect(ob.resources.every((r: any) => r.action === "orphaned")).toBe(true);
+  expect(await meta.getSitePlain("shop-db")).not.toBeNull(); // still there
+  expect((await call(app, "GET", "/v1/stacks/shop", "alice")).status).toBe(404); // stack gone
+
+  // cascade case (fresh stack)
+  await call(app, "POST", "/v1/stacks/prod/up", "alice", {
+    spec: { name: "prod", resources: { db: { type: "database" }, api: { type: "app", uses: [{ database: "db" }] } } },
+    resolved: { api: { image: "api:1" } },
+  });
+  const casc = await call(app, "DELETE", "/v1/stacks/prod?cascade=1", "alice");
+  expect(casc.status).toBe(200);
+  const cb = await casc.json();
+  expect(cb.cascade).toBe(true);
+  expect(cb.resources.find((r: any) => r.siteName === "prod-db").action).toBe("deleted");
+  expect(kube.dbDeletes.some((d) => d.name === "prod-db")).toBe(true);
+  expect(kube.deletes.some((d) => d.name === "prod-api")).toBe(true);
+  expect(await meta.getSitePlain("prod-db")).toBeNull();
+
+  // audit trail carries stack.up (x2) and stack.delete (x2)
+  const rows = await audit.list({});
+  expect(rows.entries.filter((e) => e.action === "stack.up").length).toBeGreaterThanOrEqual(2);
+  expect(rows.entries.filter((e) => e.action === "stack.delete").length).toBe(2);
+  await db.destroy();
+});
+
+test("stack up: a cross-stack edge cycle is rejected with 400; a bad edge target is 400", async () => {
+  const { app, db } = await mk();
+  // bad edge target: app uses a db key that isn't a resource
+  const bad = await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: { name: "shop", resources: { api: { type: "app", image: "x:1", uses: [{ database: "ghost" }] } } } });
+  expect(bad.status).toBe(400);
+  expect((await bad.json()).error).toContain("ghost");
+  await db.destroy();
+});
+
+test("stack up: a non-member cannot reconcile into another org's stack", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" });
+  // bob is not a member of acme → cannot create a stack there
+  const res = await call(app, "POST", "/v1/stacks/shop/up?org=acme", "bob", { spec: { name: "shop", resources: { db: { type: "database" } } } });
+  expect(res.status).toBe(403);
+  await db.destroy();
+});
+
+test("stack ls lists the caller's stacks across orgs", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/stacks/shop/up", "alice", { spec: { name: "shop", resources: { db: { type: "database" } } } });
+  const list = await (await call(app, "GET", "/v1/stacks", "alice")).json();
+  expect(list.stacks.map((s: any) => s.name)).toContain("shop");
+  expect(list.stacks.find((s: any) => s.name === "shop").resources).toBe(1);
+  // bob sees none
+  expect((await (await call(app, "GET", "/v1/stacks", "bob")).json()).stacks).toEqual([]);
   await db.destroy();
 });

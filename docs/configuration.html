@@ -24,6 +24,7 @@
       <a href="getting-started.html">Getting started</a>
       <a href="configuration.html" class="active">Configuration (drop.yaml)</a>
       <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
       <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
       <a href="roles-visibility.html">Roles &amp; Visibility</a>
       <div class="group">Reference</div>
@@ -74,6 +75,7 @@
 <tr><td><code>headers</code></td><td>array</td><td><code>{source, headers}</code> rules matched by path glob.</td></tr>
 <tr><td><code>cors</code></td><td><code>true</code> · object</td><td>Cross-origin response/preflight headers.</td></tr>
 <tr><td><code>basicAuth</code></td><td>object</td><td>HTTP Basic auth gate with per-user passwords.</td></tr>
+<tr><td><code>stack:</code></td><td>section (top-level)</td><td>A declarative multi-resource group (databases + apps + sites and the edges between them), reconciled with <code>drop up</code>. A sibling of <code>site:</code>/<code>app:</code>/<code>database:</code>, not a <code>site:</code> key. See <a href="stacks.html">Stacks</a>.</td></tr>
 </tbody>
 </table>
 

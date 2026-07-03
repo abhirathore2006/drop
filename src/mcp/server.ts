@@ -6,6 +6,7 @@ import { Client } from "../cli/client.ts";
 import { packDir } from "../cli/pack.ts";
 import { devLoginToken, serverLogin } from "../cli/login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate } from "../cli/resolve-name.ts";
+import { runStackUp } from "../cli/stack.ts";
 
 function apiBase(s?: Session): string {
   return process.env.DROP_API ?? s?.apiBase ?? "https://api.drop.example.com";
@@ -232,6 +233,48 @@ export function buildMcp(): McpServer {
     "app_start",
     { description: "Bring a stopped app back online.", inputSchema: { app: z.string() } },
     async ({ app }) => run(() => getClient().then((c) => c.startApp(app))),
+  );
+
+  // ---- stacks (B2): declarative multi-resource. Agent-safe shape: plan (dry-run) before apply. ----
+  server.registerTool(
+    "stack_plan",
+    {
+      description: "Dry-run a stack: show the ordered plan (create/update/delete/noop) for the stack: section of a folder's drop.yaml WITHOUT applying anything. Always run this before stack_up.",
+      inputSchema: {
+        directory: z.string().describe("folder containing drop.yaml with a stack: section, e.g. ."),
+        org: z.string().optional().describe("target organisation slug (default: your personal org)"),
+        prune: z.boolean().optional().describe("show resources removed from the spec as pruned (default: flagged only)"),
+      },
+    },
+    async ({ directory, org, prune }) =>
+      run(async () => {
+        const res = await runStackUp(await getClient(), resolve(directory), { org, prune, dryRun: true });
+        return { plan: res.plan, needs: res.needs };
+      }),
+  );
+  server.registerTool(
+    "stack_up",
+    {
+      description: "Apply a stack from a folder's drop.yaml stack: section: creates/updates databases, apps and sites and wires their edges. Builds + pushes app images and publishes site content as needed. Prefer stack_plan first to review the plan.",
+      inputSchema: {
+        directory: z.string().describe("folder containing drop.yaml with a stack: section, e.g. ."),
+        org: z.string().optional().describe("target organisation slug (default: your personal org)"),
+        prune: z.boolean().optional().describe("delete resources removed from the spec (default: they are only flagged)"),
+      },
+    },
+    async ({ directory, org, prune }) =>
+      run(async () => {
+        const res = await runStackUp(await getClient(), resolve(directory), { org, prune });
+        return res.result;
+      }),
+  );
+  server.registerTool(
+    "stack_status",
+    {
+      description: "Show a stack's spec + its resources' live status.",
+      inputSchema: { name: z.string(), org: z.string().optional().describe("the stack's organisation slug (disambiguates a name across orgs)") },
+    },
+    async ({ name, org }) => run(() => getClient().then((c) => c.stackGet(name, org))),
   );
 
   // ---- organisations (group resources + org-level permissions) ----

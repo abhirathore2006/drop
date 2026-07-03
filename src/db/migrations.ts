@@ -204,6 +204,44 @@ const m0006_locks: Migration = {
   },
 };
 
+// Stacks (B2): a declarative multi-resource group + its desired-state spec. Resources stay ordinary
+// `sites` rows (every existing route/role/console page keeps working) — a stack is grouping + desired
+// state, its edges live in the `spec` jsonb. `stack_resources` maps a resource KEY to the site name it
+// materialized as (`<stack>-<key>` unless the resource carried an explicit name). Name unique per org.
+const m0007_stacks: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("stacks")
+      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn("name", "text", (c) => c.notNull())
+      .addColumn("org_id", "text", (c) => c.notNull().references("organisations.id").onDelete("cascade"))
+      .addColumn("spec", "jsonb", (c) => c.notNull())
+      .addColumn("spec_version", "integer", (c) => c.notNull().defaultTo(1))
+      .addColumn("from_template", "text") // D2 provenance (template slug)
+      .addColumn("from_template_version", "text") // D2 provenance (template version)
+      .addColumn("created_by", "text", (c) => c.notNull().references("users.email"))
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    // A stack name is unique within its org (the reconcile target is (org, name)); org_id leads the
+    // index so it also serves the org-scoped list.
+    await db.schema.createIndex("one_stack_name_per_org").on("stacks").columns(["org_id", "name"]).unique().execute();
+
+    await db.schema
+      .createTable("stack_resources")
+      .addColumn("stack_id", "text", (c) => c.notNull().references("stacks.id").onDelete("cascade"))
+      .addColumn("resource_key", "text", (c) => c.notNull())
+      .addColumn("site_name", "text", (c) => c.notNull())
+      .addPrimaryKeyConstraint("stack_resources_pk", ["stack_id", "resource_key"])
+      .execute();
+    // A site belongs to at most one stack resource (no two stacks materialize the same name).
+    await db.schema.createIndex("stack_resources_site_uniq").on("stack_resources").column("site_name").unique().execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -214,6 +252,7 @@ export class InlineMigrations implements MigrationProvider {
       "0004_organisations": m0004_organisations,
       "0005_audit_log": m0005_audit_log,
       "0006_locks": m0006_locks,
+      "0007_stacks": m0007_stacks,
     };
   }
 }

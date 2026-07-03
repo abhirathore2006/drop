@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stacks · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html" class="active">Stacks</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Stacks</h1>
+<p class="lead">A <strong>stack</strong> is a declarative, multi-resource graph — one <code>stack:</code> section in <code>drop.yaml</code> that describes a group of databases, apps and sites <em>and</em> the edges that wire them together. <code>drop up</code> reconciles it: it diffs your spec against what's live and applies an ordered plan. It replaces the three-command imperative dance (create a DB, deploy an app, publish a site, and wire the env by hand) with one desired-state file.</p>
+
+<div class="note"><span class="lbl">Note</span><p>A stack is <strong>grouping + desired state</strong>, not a new resource kind. Every resource in a stack is an ordinary database / app / site row — every existing route, role and dashboard page keeps working on it. You can still <code>drop deploy</code>, <code>drop db create</code> or <code>drop publish</code> a stack's resources individually.</p></div>
+
+<h2>The <code>stack:</code> section</h2>
+<p>A stack has a <code>name</code> and a map of <code>resources</code> (≤ 16 in v1). Each resource has a <code>type</code> (<code>database</code>, <code>app</code> or <code>site</code>) and type-specific fields — the <strong>same</strong> fields the standalone <code>app:</code> / <code>database:</code> sections accept.</p>
+<pre><code><span class="tok-k">stack</span>:
+  <span class="tok-k">name</span>: <span class="tok-s">myproduct</span>
+  <span class="tok-k">resources</span>:
+    <span class="tok-k">db</span>:  { <span class="tok-k">type</span>: <span class="tok-s">database</span>, <span class="tok-k">storage</span>: <span class="tok-s">1Gi</span> }
+    <span class="tok-k">api</span>:
+      <span class="tok-k">type</span>: <span class="tok-s">app</span>
+      <span class="tok-k">dir</span>: <span class="tok-s">./api</span>                <span class="tok-c"># build context → built + pushed through Drop at `up`</span>
+      <span class="tok-k">uses</span>: [{ <span class="tok-k">database</span>: <span class="tok-s">db</span> }]  <span class="tok-c"># app→database edge — references the resource KEY `db`</span>
+      <span class="tok-k">expose</span>: { <span class="tok-k">tcp</span>: false }    <span class="tok-c"># A2 TCP opt-in (parsed + stored now)</span>
+      <span class="tok-k">env</span>: { <span class="tok-k">NODE_ENV</span>: <span class="tok-s">production</span> }
+    <span class="tok-k">web</span>:
+      <span class="tok-k">type</span>: <span class="tok-s">site</span>
+      <span class="tok-k">dir</span>: <span class="tok-s">./web/dist</span>
+      <span class="tok-k">env_from</span>: [{ <span class="tok-k">resource</span>: <span class="tok-s">api</span>, <span class="tok-k">output</span>: <span class="tok-s">url</span>, <span class="tok-k">as</span>: <span class="tok-s">API_BASE</span> }]  <span class="tok-c"># site→app edge</span></code></pre>
+
+<h3 id="naming">Resource names</h3>
+<p>A resource with key <code>k</code> in stack <code>s</code> materializes as the site name <strong><code>s-k</code></strong> — so <code>db</code> above becomes <code>myproduct-db</code>, reachable at <code>myproduct-db-rw</code> for Postgres. Set an explicit <code>name:</code> on a resource to override that (e.g. to adopt an existing database). The mapping (<code>resource_key → site_name</code>) is recorded so a rename in your spec never silently forks a second copy.</p>
+
+<h2 id="edges">Edges</h2>
+<p>Edges reference resource <strong>keys</strong> within the same stack; the reconciler resolves each key to its site name. Two edge kinds ship in v1:</p>
+<table class="tbl">
+<thead><tr><th>Edge</th><th>Declared on</th><th>Field</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td><strong>app → database</strong></td><td>an <code>app</code></td><td><code>uses: [{ database: &lt;key&gt; }]</code></td><td>The <a href="configuration.html#uses">first-class DB binding</a>: injects the CNPG <code>&lt;db&gt;-app</code> secret via <code>envFrom</code>, mounts the cluster CA, and sets <code>PGSSLMODE=verify-full</code>. The <code>&lt;key&gt;</code> is resolved to the materialized DB name.</td></tr>
+<tr><td><strong>site → app</strong></td><td>a <code>site</code></td><td><code>env_from: [{ resource, output: url, as }]</code></td><td>Publish-time substitution: the referenced app's <code>url</code> replaces the <code>${as}</code> placeholder in the site's text files (<code>.html/.js/.css/.json/…</code>) as the tarball is packed — <strong>client-side</strong>. The server validates the edge and stores it; it never rewrites bytes.</td></tr>
+</tbody>
+</table>
+<p>Edges define the apply order: <strong>databases before the apps that use them, apps before the sites that read them</strong>. A cycle is rejected with a clear error — there's no valid order.</p>
+
+<h2 id="up">drop up</h2>
+<p><code>drop up [dir]</code> reads the <code>stack:</code> section of <code>dir/drop.yaml</code> (default <code>.</code>), shows the plan, and applies it. The split of responsibility: the <strong>server owns existence + config</strong> (claim, DB create, app deploy, config updates, flagged deletes); the <strong>CLI owns content</strong> (it builds &amp; pushes each app image and publishes each site's bytes).</p>
+<pre><code><span class="tok-c">$ drop up ./myproduct</span>
+  ACTION  KIND      KEY  RESOURCE        REASON
+  create  database  db   myproduct-db    not present — will create
+  create  app       api  myproduct-api   not present — will create
+  create  site      web  myproduct-web   not present — will create
+  ▸ building image for api (…/api)…
+  ▸ applying stack myproduct…
+  ▸ publishing site web → myproduct-web…
+  ✓ stack myproduct reconciled (spec v1)</code></pre>
+<table class="tbl">
+<thead><tr><th>Action</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>create</code></td><td>The resource isn't live yet — claim it and apply.</td></tr>
+<tr><td><code>update</code></td><td>The resource exists; re-apply its (possibly changed) config. Idempotent — re-applying converges.</td></tr>
+<tr><td><code>noop</code></td><td>Live and unchanged vs the last applied spec. Skipped.</td></tr>
+<tr><td><code>delete</code></td><td>Previously managed, now gone from the spec. <strong>Flagged only</strong> unless you pass <code>--prune</code> (see below).</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="lbl">Flags</span><ul>
+  <li><code>--dry-run</code> — print the plan and stop. Applies nothing. (This is the same endpoint the canvas and agent tools use to preview changes.)</li>
+  <li><code>--prune</code> — actually execute the <code>delete</code> steps. Without it, a resource dropped from the spec is <em>flagged</em> in the plan but left running, so removing a key never silently destroys data.</li>
+  <li><code>--org &lt;slug&gt;</code> — reconcile into a team organisation (default: your personal org).</li>
+</ul></div>
+<div class="note warn"><span class="lbl">Halt on failure</span><p>A stack <code>up</code> runs under a per-stack advisory lock (a concurrent <code>up</code> returns <code>409</code>) and <strong>halts on the first failing step</strong> — the steps that already applied stay applied, and a retry converges (server-side-apply mental model). The desired spec is committed only on a fully successful run, so a partial failure re-plans correctly on retry.</p></div>
+
+<h2 id="manage">Inspecting &amp; removing stacks</h2>
+<pre><code><span class="tok-c">$ drop stack ls</span>                    <span class="tok-c"># your stacks across orgs</span>
+<span class="tok-c">$ drop stack status myproduct</span>      <span class="tok-c"># the spec + each resource's live status</span>
+<span class="tok-c">$ drop stack rm myproduct</span>          <span class="tok-c"># delete the stack, ORPHAN its resources (they keep running)</span>
+<span class="tok-c">$ drop stack rm myproduct --cascade</span> <span class="tok-c"># delete the stack AND tear down its resources</span></code></pre>
+<p><code>drop stack rm</code> defaults to <strong>orphaning</strong>: it removes the stack grouping but leaves the databases/apps/sites in place (the response records which were orphaned). <code>--cascade</code> tears each resource down using the same delete path as <code>drop rm</code>. Both are audited (<code>stack.up</code>, <code>stack.delete</code>).</p>
+
+<h2>Agents &amp; the console</h2>
+<p>The MCP tools mirror the CLI with an agent-safe shape: <code>stack_plan</code> (dry-run — show the plan before touching anything), then <code>stack_up</code> to apply, and <code>stack_status</code> to inspect. The dry-run plan is the same one the read-only canvas renders as a pending-changes overlay, so an agent, the CLI and the console all reconcile through one endpoint and can never diverge.</p>
+
+<div class="next">
+  <a href="processes.html"><div class="d">← Back</div><div class="t">Processes, health &amp; releases</div></a>
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

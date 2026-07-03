@@ -1,5 +1,6 @@
 import type { ColumnType, Generated } from "kysely";
 import type { SiteConfig } from "../site-config.ts";
+import type { StackSpec } from "../stack-config.ts";
 
 /** timestamptz: read as Date, write as Date|string, default-insertable. */
 type Ts = ColumnType<Date, Date | string | undefined, Date | string>;
@@ -113,6 +114,30 @@ export interface LocksTable {
   expires_at: ColumnType<Date, Date | string, Date | string>;
 }
 
+/** jsonb stack spec: JSON.stringify on write, JSON.parse on read at the store boundary. */
+type JsonStackSpec = ColumnType<StackSpec, string, string>;
+
+/** A stack: a declarative multi-resource group + its desired-state spec (B2). Name unique per org. */
+export interface StacksTable {
+  id: string;
+  name: string;
+  org_id: string;
+  spec: JsonStackSpec;
+  spec_version: ColumnType<number, number | undefined, number>;
+  from_template: string | null;
+  from_template_version: string | null;
+  created_by: string;
+  created_at: Generated<Ts>;
+  updated_at: Ts;
+}
+
+/** Maps a stack resource KEY to the site name it materialized as (`<stack>-<key>` or an override). */
+export interface StackResourcesTable {
+  stack_id: string;
+  resource_key: string;
+  site_name: string;
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -124,4 +149,6 @@ export interface Database {
   organisations: OrganisationsTable;
   org_members: OrgMembersTable;
   locks: LocksTable;
+  stacks: StacksTable;
+  stack_resources: StackResourcesTable;
 }

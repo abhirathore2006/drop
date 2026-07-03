@@ -5,6 +5,7 @@ import { makeDb } from "../src/db/db.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { MetaStore } from "../src/metastore/store.ts";
 import { LockStore } from "../src/metastore/lock.ts";
+import { StackStore } from "../src/stacks/store.ts";
 import { UserStore } from "../src/users/store.ts";
 import { OrgStore } from "../src/orgs/store.ts";
 import { AuditStore } from "../src/audit/store.ts";
@@ -85,7 +86,8 @@ if (kube) console.log(`drop-api secrets backend: ${cfg.secretBackend} · image b
 const orgs = new OrgStore(db);
 const audit = new AuditStore(db);
 const locks = new LockStore(db);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks });
+const stacks = new StackStore(db);
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });

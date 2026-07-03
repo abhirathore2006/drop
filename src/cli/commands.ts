@@ -8,6 +8,7 @@ import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate } from "./resolve-name.ts";
 import { buildAndPushImage } from "./build-push.ts";
+import { runStackUp } from "./stack.ts";
 import { validateName } from "../names.ts";
 import { VERSION } from "../version.ts";
 
@@ -178,6 +179,41 @@ export function buildProgram(): Command {
       console.log(`  tip: prefer  drop deploy ${dir} --build  (build+push+deploy in one step — a fresh tag each build, so redeploys roll the pods).`);
       console.log(`       if you instead pin  image: ${image}  in drop.yaml, bump the tag on a rebuild — reusing the same tag won't roll the pods.`);
     });
+
+  // ---- stacks (B2): declarative multi-resource `drop up` ----
+  program
+    .command("up [dir]")
+    .description("Reconcile the stack: section of drop.yaml (creates DBs/apps/sites + wires their edges)")
+    .option("--org <slug>", "create in this organisation (default: your personal org)")
+    .option("--dry-run", "print the plan without applying it")
+    .option("--prune", "delete resources removed from the spec (default: they are only flagged)")
+    .action(async (dir: string | undefined, opts: { org?: string; dryRun?: boolean; prune?: boolean }) => {
+      const c = await client();
+      const res = await runStackUp(c, dir ?? ".", { org: opts.org, dryRun: opts.dryRun, prune: opts.prune, log: (s) => console.log(s) });
+      if (res.dryRun) {
+        console.log("  (dry run — nothing applied)");
+        return;
+      }
+      console.log(`  ✓ stack ${res.result!.stack} reconciled (spec v${res.result!.specVersion})`);
+    });
+
+  const stack = program.command("stack").description("Manage stacks (declarative multi-resource groups)");
+  stack
+    .command("ls")
+    .description("List your stacks")
+    .option("--org <slug>", "show only stacks in this organisation")
+    .action(async (opts: { org?: string }) => show(await (await client()).stackList(opts.org)));
+  stack
+    .command("status <name>")
+    .description("Show a stack's spec + its resources' live status")
+    .option("--org <slug>", "the stack's organisation (disambiguates a name across orgs)")
+    .action(async (name: string, opts: { org?: string }) => show(await (await client()).stackGet(name, opts.org)));
+  stack
+    .command("rm <name>")
+    .description("Delete a stack; --cascade also tears down its resources (else they are orphaned)")
+    .option("--org <slug>", "the stack's organisation")
+    .option("--cascade", "also delete the stack's resources (destructive)")
+    .action(async (name: string, opts: { org?: string; cascade?: boolean }) => show(await (await client()).stackDelete(name, { org: opts.org, cascade: opts.cascade })));
 
   const db = program.command("db").description("Manage managed Postgres databases (create / password)");
   db

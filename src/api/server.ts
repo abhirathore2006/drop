@@ -21,8 +21,11 @@ import { OrgStore, validateOrgSlug, type Org } from "../orgs/store.ts";
 import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
-import { sanitizeAppConfig, assertHttpOnly, assertProcesses } from "../app-config.ts";
+import { sanitizeAppConfig, assertHttpOnly, assertProcesses, type AppConfig } from "../app-config.ts";
 import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword, validateDbStorage } from "../db-config.ts";
+import { sanitizeStackConfig, validateStackEdges, resolveResourceName, type StackSpec, type StackResource } from "../stack-config.ts";
+import { planStack, StackCycleError, type LivePresence, type PlanStep } from "../stacks/plan.ts";
+import { StackStore } from "../stacks/store.ts";
 import { appManifests, releaseJobManifest, tenantManifests } from "../kube/manifests.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
 import { PasswordSyncError, type KubeClient } from "../kube/types.ts";
@@ -47,16 +50,21 @@ export interface Deps {
   orgs: OrgStore; // organisations (resource grouping + org-level permissions)
   audit: AuditStore; // append-only trail of mutating/admin actions
   locks?: LockStore; // lease-based advisory locks (serialize deploy/release per app); defaults over `db`
+  stacks?: StackStore; // stack metadata + resource mapping (B2); defaults over `db`
   now?: () => Date;
 }
 
 // Serialize a deploy's release-Job + rollout per app so two deploys can't interleave migrations. TTL
 // bounds a crashed holder; it must exceed the longest release timeout (15m cap) plus rollout slack.
 const DEPLOY_LOCK_TTL_MS = 20 * 60 * 1000;
+// Serialize a stack `up` per stack (same lease mechanism). The reconcile runs several deploys back to
+// back; the TTL bounds a crashed holder generously (16 resources × rollout slack).
+const STACK_LOCK_TTL_MS = 30 * 60 * 1000;
 
 export function createApp(d: Deps): Hono<AuthEnv> {
   const now = d.now ?? (() => new Date());
   const locks = d.locks ?? new LockStore(d.db); // serialize deploy/release per app
+  const stacks = d.stacks ?? new StackStore(d.db); // stack metadata + resource mapping
 
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
   const app = new Hono<AuthEnv>();
@@ -1246,6 +1254,374 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     await audit({ actor: email, action: "site.transfer.owner", target: name, targetType: site.type, orgId: newOwnerOrg.id, detail: { fromOwner: oldOwner, toOwner: newOwner } });
     return c.json({ owner: newOwner, secretsDropped: site.type === "app" });
+  });
+
+  // ============================ Stacks (B2): declarative multi-resource ============================
+  // The reconciler orchestrates EXISTING per-resource operations (claim / db-create / deploy) — it adds
+  // no new resource kind. Resources stay ordinary `sites` rows; the stack is grouping + desired state.
+  // Content is CLI-provided: an app's image (built + sent as `resolved`) and a site's bytes (published
+  // to the created row) come from the client — the server owns EXISTENCE + CONFIG only.
+
+  // The materialized site name for a resource KEY (mapping override wins, else `<stack>-<key>`).
+  const siteNameForKey = (spec: StackSpec, mapping: Record<string, string>, key: string): string =>
+    mapping[key] ?? resolveResourceName(spec.name, key, spec.resources[key]!);
+
+  // Claim the site row for a resource if it doesn't exist yet (apps/sites/databases share the name
+  // namespace). ensureUser must have run first (owner membership FKs to users).
+  const claimResource = async (siteName: string, type: "site" | "app" | "database", org: Org, email: string): Promise<Site> => {
+    let site = await d.meta.getSitePlain(siteName);
+    if (!site) {
+      const claimed = await d.meta.claimSite(siteName, email, type, { id: org.id, namespace: org.namespace });
+      site = claimed ?? (await d.meta.getSitePlain(siteName));
+    }
+    if (!site) throw new Error(`claim failed for ${siteName}`);
+    if (site.type !== type) throw new Error(`resource "${siteName}" is a ${site.type}, not a ${type}`);
+    return site;
+  };
+
+  const ensureTenant = (ns: string) => d.kube!.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs }));
+
+  // Create/update a database resource. Composes the SAME building blocks as POST /v1/databases/:name
+  // (manifests + apply). Intentional duplication: the route's handler is entangled with request/auth
+  // plumbing, so the stacks layer re-composes cnpg.ts rather than re-enter the route (per the plan).
+  const applyDbResource = async (res: StackResource, siteName: string, ns: string, isCreate: boolean): Promise<void> => {
+    const dbCfg = sanitizeDatabaseConfig({ storage: res.storage, hibernation: res.hibernation })!;
+    const local = !!d.cfg.s3Endpoint;
+    if (!local && !d.cfg.dbBackupRoleArn) throw new Error("database backups not configured: set DROP_DB_BACKUP_ROLE_ARN (IRSA role)");
+    await ensureTenant(ns);
+    const backupEndpoint = d.cfg.dbBackupEndpoint ?? d.cfg.s3Endpoint;
+    const storeEgress =
+      local && d.cfg.dbBackupEgressCidr && backupEndpoint
+        ? { cidr: d.cfg.dbBackupEgressCidr, port: Number(new URL(backupEndpoint).port) || 443 }
+        : undefined;
+    const manifests = databaseManifests(dbCfg, {
+      name: siteName,
+      namespace: ns,
+      destinationPath: `s3://${d.cfg.s3Bucket}/databases/${ns}/${siteName}`,
+      ...(isCreate ? { appPassword: generateDbPassword() } : {}), // only on first create — never re-rotate
+      apiServerCidrs: d.cfg.blockedEgressCidrs,
+      ...(local
+        ? { s3: { endpointURL: backupEndpoint, accessKeyId: d.cfg.s3KeyId, secretAccessKey: d.cfg.s3Secret }, objectStoreEgress: storeEgress }
+        : { iamRoleArn: d.cfg.dbBackupRoleArn }),
+    });
+    await d.kube!.applyDatabase(ns, siteName, manifests);
+    const verId = newVersionId(now());
+    await d.meta.putVersion(siteName, { id: verId, publishedBy: "stack", createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
+    await d.meta.updateSite(siteName, (s) => ({ ...s, currentVersion: verId }));
+  };
+
+  // Create/update an app resource from a resolved image. Composes the SAME building blocks as
+  // POST /v1/apps/:name (manifests + apply + secret binding). The release phase is intentionally NOT
+  // run in the stack path v1 (migrations stay on `drop deploy`); noted as a deliberate deviation.
+  const applyAppResource = async (spec: StackSpec, mapping: Record<string, string>, res: StackResource, site: Site, image: string): Promise<void> => {
+    // Resolve `uses` edges: each references a resource KEY in this stack → its materialized DB name.
+    const uses = (res.uses ?? []).map((u) => ({ database: siteNameForKey(spec, mapping, u.database) }));
+    const appCfg: AppConfig = {
+      image,
+      services: res.services ?? [{ internalPort: 8080, protocol: "http" }],
+      resources: res.resources,
+      ...(res.env ? { env: res.env } : {}),
+      ...(res.scale ? { scale: res.scale } : {}),
+      trusted: res.trusted ?? true,
+      ...(uses.length ? { uses } : {}),
+      ...(res.healthcheck ? { healthcheck: res.healthcheck } : {}),
+      ...(res.processes ? { processes: res.processes } : {}),
+    };
+    const ns = site.namespace;
+    await ensureTenant(ns);
+    const sandbox = !appCfg.trusted;
+    const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
+    const manifests = appManifests(appCfg, { name: site.name, namespace: ns, host: `${site.name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret });
+    await d.kube!.applyApp(ns, site.name, manifests);
+    const secretKeys = (await d.meta.listSecretKeys(site.name)).map((k) => k.key);
+    await d.secrets.ensureBinding({ owner: site.owner, app: site.name, namespace: ns }, secretKeys);
+    if (site.runtimeState === "stopped") await d.kube!.stopApp(ns, site.name); // a stopped app stays down across up
+    const verId = newVersionId(now());
+    await d.meta.putVersion(site.name, { id: verId, publishedBy: "stack", createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
+    await d.meta.updateSite(site.name, (s) => ({ ...s, currentVersion: verId }));
+  };
+
+  // Tear down a resource's workload + metadata. Mirrors DELETE /v1/sites/:name (deliberate
+  // duplication — the route is entangled with request plumbing); best-effort on the material stores.
+  const tearDownResource = async (site: Site): Promise<void> => {
+    if (site.type === "app" && d.kube) {
+      await d.kube.deleteApp(site.namespace, site.name);
+      await d.secrets.destroy({ owner: site.owner, app: site.name, namespace: site.namespace }).catch((e) => console.error(`stack delete ${site.name}: secrets.destroy failed: ${(e as Error).message}`));
+      await d.images.destroy({ owner: site.owner, app: site.name, namespace: site.namespace }).catch((e) => console.error(`stack delete ${site.name}: images.destroy failed: ${(e as Error).message}`));
+    } else if (site.type === "database" && d.kube) {
+      await d.kube.deleteDatabase(site.namespace, site.name);
+    }
+    await d.blob.deletePrefix(`sites/${site.name}/files/`).catch(() => {});
+    await d.meta.deleteSite(site.name);
+  };
+
+  // Resolve the target org for a stack `up` (create-capable): explicit ?org=<slug> or the personal org.
+  const resolveStackOrg = async (c: any, email: string): Promise<{ org: Org } | { err: Response }> => {
+    const orgSlug = c.req.query("org");
+    if (!orgSlug) return { org: await d.orgs.ensurePersonalOrg(email) };
+    const found = await d.orgs.getOrgBySlug(String(orgSlug));
+    if (!found) return { err: c.json({ error: `no such org: ${orgSlug}` }, 404) };
+    const role = await d.orgs.roleOf(found.id, email);
+    const platformRole = (await d.users.getUser(email))?.role ?? "member";
+    if (!canCreateInOrg(role, platformRole)) return { err: c.json({ error: `not a member of org ${orgSlug} with create rights` }, 403) };
+    return { org: found };
+  };
+
+  // Find a stack by name across the caller's orgs (or a specified ?org). Enforces membership.
+  const findStack = async (c: any, email: string, name: string) => {
+    const orgSlug = c.req.query("org");
+    if (orgSlug) {
+      const org = await d.orgs.getOrgBySlug(String(orgSlug));
+      if (!org) return { err: c.json({ error: `no such org: ${orgSlug}` }, 404) };
+      if (!(await d.orgs.roleOf(org.id, email)) && !(await isPlatformAdmin(email))) return { err: c.json({ error: `not a member of org ${orgSlug}` }, 403) };
+      const stack = await stacks.getByName(org.id, name);
+      if (!stack) return { err: c.json({ error: `no such stack: ${name}` }, 404) };
+      return { stack, org };
+    }
+    for (const o of await d.orgs.listUserOrgs(email)) {
+      const stack = await stacks.getByName(o.id, name);
+      if (stack) return { stack, org: o };
+    }
+    return { err: c.json({ error: `no such stack: ${name}` }, 404) };
+  };
+
+  // The per-resource action a caller must hold to reconcile an EXISTING resource of this kind.
+  const actionForKind = (kind: "site" | "app" | "database"): Action => (kind === "site" ? "publish" : kind === "app" ? "deploy" : "db:create");
+
+  // ---- POST /v1/stacks/:name/up : reconcile the desired spec (plan + execute; ?dry_run=1 = plan) ----
+  app.post("/v1/stacks/:name/up", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const nameErr = validateName(name);
+    if (nameErr) return c.json({ error: nameErr }, 400);
+
+    await ensureUser(email); // provision the user + personal org (org membership FKs to users)
+    const orgRes = await resolveStackOrg(c, email);
+    if ("err" in orgRes) return orgRes.err;
+    const org = orgRes.org;
+
+    let body: { spec?: unknown; resolved?: Record<string, { image?: string }>; prune?: boolean; spec_version?: number };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const spec = sanitizeStackConfig(body.spec);
+    if (!spec) return c.json({ error: "invalid stack spec (needs a name and at least one resource)" }, 400);
+    if (spec.name !== name) return c.json({ error: `stack name "${spec.name}" does not match target "${name}"` }, 400);
+    const edgeErr = validateStackEdges(spec);
+    if (edgeErr) return c.json({ error: edgeErr }, 400);
+
+    const prune = body.prune === true;
+    const dryRun = c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true";
+    const existing = await stacks.getByName(org.id, name);
+    const mapping = existing ? await stacks.mapping(existing.id) : {};
+
+    // Each resource materializes as a valid site name — surface an over-long/invalid name as a clean 400
+    // rather than a cryptic cluster error later.
+    for (const [key] of Object.entries(spec.resources)) {
+      const sn = siteNameForKey(spec, mapping, key);
+      const e = validateName(sn);
+      if (e) return c.json({ error: `resource "${key}" resolves to an invalid site name "${sn}": ${e}` }, 400);
+    }
+
+    // Optimistic concurrency: a stale editor's spec_version is rejected before any work.
+    if (existing && body.spec_version != null && body.spec_version !== existing.specVersion) {
+      return c.json({ error: `stack was modified (spec_version ${existing.specVersion}, you sent ${body.spec_version}) — re-fetch and retry` }, 409);
+    }
+
+    // Live existence + cross-org conflict check over every candidate site name (spec + removed keys).
+    const candidateNames = new Set<string>();
+    for (const key of Object.keys(spec.resources)) candidateNames.add(siteNameForKey(spec, mapping, key));
+    for (const sn of Object.values(mapping)) candidateNames.add(sn);
+    const live: Record<string, LivePresence> = {};
+    for (const sn of candidateNames) {
+      const s = await d.meta.getSitePlain(sn);
+      if (!s) continue;
+      if (s.orgId && s.orgId !== org.id) return c.json({ error: `resource "${sn}" already exists in another organisation` }, 409);
+      live[sn] = { type: s.type };
+    }
+
+    // Per-resource authz on resources that ALREADY exist (new resources are covered by org create-rights).
+    for (const [key, res] of Object.entries(spec.resources)) {
+      const sn = siteNameForKey(spec, mapping, key);
+      if (!live[sn]) continue;
+      const s = (await d.meta.getSitePlain(sn))!;
+      if (!can(await actorFor(email, s), actionForKind(res.type))) return c.json({ error: `not permitted to reconcile "${sn}" (${res.type})` }, 403);
+    }
+
+    // Plan (pure). A dependency cycle has no apply order → 400.
+    let plan: PlanStep[];
+    try {
+      plan = planStack({ spec, prevSpec: existing?.spec ?? null, mapping, live, prune });
+    } catch (e) {
+      if (e instanceof StackCycleError) return c.json({ error: e.message }, 400);
+      throw e;
+    }
+
+    // Outputs (for site→app env_from substitution, done CLI-side) + content the CLI still owes.
+    const outputs: Record<string, { url: string }> = {};
+    const needs: { key: string; kind: "app-image" | "site-publish"; siteName: string }[] = [];
+    for (const [key, res] of Object.entries(spec.resources)) {
+      const sn = siteNameForKey(spec, mapping, key);
+      if (res.type === "app") {
+        outputs[key] = { url: siteUrl(sn) };
+        const image = body.resolved?.[key]?.image ?? res.image;
+        if (res.dir && !image) needs.push({ key, kind: "app-image", siteName: sn });
+      } else if (res.type === "site") {
+        outputs[key] = { url: siteUrl(sn) };
+        if (res.dir) needs.push({ key, kind: "site-publish", siteName: sn });
+      }
+    }
+
+    if (dryRun) {
+      return c.json({ stack: name, org: org.slug, specVersion: existing?.specVersion ?? 0, plan, needs, outputs, dryRun: true });
+    }
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+
+    // Per-org workload cap: a stack `up` can create several resources at once — count them up front.
+    const createCount = plan.filter((s) => s.action === "create").length;
+    if (d.cfg.maxWorkloadsPerOrg > 0 && (await d.meta.countSitesInOrg(org.id)) + createCount > d.cfg.maxWorkloadsPerOrg) {
+      return c.json({ error: `workload cap reached for this org (${d.cfg.maxWorkloadsPerOrg}) — a stack of ${createCount} new resources would exceed it` }, 429);
+    }
+
+    const stackId = existing?.id ?? stacks.stackId(org.id, name);
+    let outcome: { applied: PlanStep[]; failure: { step: PlanStep; error: string } | null; newVersion: number };
+    try {
+      outcome = await locks.withLock(`stack:${stackId}`, STACK_LOCK_TTL_MS, async () => {
+        const stackRow = existing ?? (await stacks.create({ name, orgId: org.id, spec, createdBy: email }));
+        const applied: PlanStep[] = [];
+        let failure: { step: PlanStep; error: string } | null = null;
+        for (const step of plan) {
+          try {
+            if (step.action === "noop") {
+              applied.push(step);
+              continue;
+            }
+            if (step.action === "delete") {
+              if (!prune) continue; // flagged only — not executed
+              const s = await d.meta.getSitePlain(step.siteName);
+              if (s) await tearDownResource(s);
+              await stacks.deleteResource(stackRow.id, step.key);
+              applied.push(step);
+              continue;
+            }
+            // create / update
+            const res = spec.resources[step.key]!;
+            const site = await claimResource(step.siteName, res.type, org, email);
+            if (res.type === "database") {
+              await applyDbResource(res, step.siteName, site.namespace, step.action === "create");
+            } else if (res.type === "app") {
+              const image = body.resolved?.[step.key]?.image ?? res.image;
+              if (image) await applyAppResource(spec, mapping, res, site, image); // else: row claimed, awaits CLI image (in `needs`)
+            } // site: the row is claimed; bytes come from the CLI publish (in `needs`)
+            await stacks.setResource(stackRow.id, step.key, step.siteName);
+            applied.push(step);
+          } catch (e) {
+            failure = { step, error: (e as Error).message };
+            break; // halt on first failure; applied steps persist; a retry converges
+          }
+        }
+        // Persist the new desired spec ONLY on full success — a partial run keeps the prior spec so a
+        // retry re-plans correctly (an unapplied "update" isn't mistaken for a noop against the new spec).
+        let newVersion = existing ? existing.specVersion : 1;
+        if (!failure && existing) {
+          newVersion = existing.specVersion + 1;
+          await stacks.updateSpec(stackRow.id, spec, newVersion);
+        }
+        return { applied, failure, newVersion };
+      });
+    } catch (e) {
+      if (e instanceof LockHeldError) return c.json({ error: `a stack up is already in progress for ${name}` }, 409);
+      throw e;
+    }
+
+    await audit({
+      actor: email,
+      action: "stack.up",
+      target: name,
+      targetType: "stack",
+      orgId: org.id,
+      detail: { applied: outcome.applied.map((s) => ({ action: s.action, key: s.key })), prune, failed: outcome.failure?.step.key ?? null },
+    });
+    if (outcome.failure) {
+      return c.json(
+        { error: `stack up halted at "${outcome.failure.step.key}": ${outcome.failure.error}`, stack: name, applied: outcome.applied, failedStep: outcome.failure.step, plan, needs, outputs },
+        500,
+      );
+    }
+    return c.json({ stack: name, org: org.slug, specVersion: outcome.newVersion, plan, applied: outcome.applied, needs, outputs });
+  });
+
+  // ---- GET /v1/stacks : org-scoped list (optional ?org=<slug>) ----
+  app.get("/v1/stacks", async (c) => {
+    const email = c.get("identity").email;
+    const orgSlug = c.req.query("org");
+    let rows;
+    if (orgSlug) {
+      const org = await d.orgs.getOrgBySlug(orgSlug);
+      if (!org) return c.json({ error: `no such org: ${orgSlug}` }, 404);
+      if (!(await d.orgs.roleOf(org.id, email)) && !(await isPlatformAdmin(email))) return c.json({ error: `not a member of org ${orgSlug}` }, 403);
+      rows = await stacks.listByOrg(org.id);
+    } else {
+      const userOrgs = await d.orgs.listUserOrgs(email);
+      rows = await stacks.listByOrgs(userOrgs.map((o) => o.id));
+    }
+    const out = [];
+    for (const s of rows) {
+      out.push({ name: s.name, org: await orgOf(s.orgId), specVersion: s.specVersion, resources: Object.keys(s.spec.resources).length, fromTemplate: s.fromTemplate, updatedAt: s.updatedAt });
+    }
+    return c.json({ stacks: out });
+  });
+
+  // ---- GET /v1/stacks/:name : spec + resources + per-resource live status ----
+  app.get("/v1/stacks/:name", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack } = found;
+    const mapping = await stacks.mapping(stack.id);
+    const resources = [];
+    for (const [key, res] of Object.entries(stack.spec.resources)) {
+      const siteName = mapping[key] ?? resolveResourceName(stack.spec.name, key, res);
+      const s = await d.meta.getSitePlain(siteName);
+      let status: unknown = null;
+      if (d.kube && s) {
+        try {
+          if (s.type === "app") status = await d.kube.getAppStatus(s.namespace, siteName);
+          else if (s.type === "database") status = await d.kube.getDatabaseStatus(s.namespace, siteName);
+        } catch {
+          /* best-effort — a cluster read failure degrades to null, never a 500 */
+        }
+      }
+      resources.push({ key, type: res.type, siteName, exists: !!s, url: siteUrl(siteName), runtimeState: s?.runtimeState ?? null, status });
+    }
+    return c.json({ name: stack.name, org: await orgOf(stack.orgId), specVersion: stack.specVersion, fromTemplate: stack.fromTemplate, fromTemplateVersion: stack.fromTemplateVersion, spec: stack.spec, resources });
+  });
+
+  // ---- DELETE /v1/stacks/:name?cascade=1 : delete the stack; cascade tears down resources, else orphans ----
+  app.delete("/v1/stacks/:name", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack, org } = found;
+    // Deleting a stack (and, with cascade, its resources) is an owner/admin action, not a member one.
+    const role = await d.orgs.roleOf(org.id, email);
+    if (!(await isPlatformAdmin(email)) && role !== "owner" && role !== "admin") return c.json({ error: "owner/admin only" }, 403);
+    const cascade = c.req.query("cascade") === "1" || c.req.query("cascade") === "true";
+    const resources = [];
+    for (const { resourceKey, siteName } of await stacks.resources(stack.id)) {
+      const s = await d.meta.getSitePlain(siteName);
+      if (cascade && s) {
+        await tearDownResource(s);
+        resources.push({ key: resourceKey, siteName, action: "deleted" });
+      } else {
+        resources.push({ key: resourceKey, siteName, action: s ? "orphaned" : "gone" });
+      }
+    }
+    await stacks.delete(stack.id); // cascades stack_resources
+    await audit({ actor: email, action: "stack.delete", target: stack.name, targetType: "stack", orgId: org.id, detail: { cascade, resources: resources.map((r) => r.siteName) } });
+    return c.json({ deleted: stack.name, cascade, resources });
   });
 
   return app;

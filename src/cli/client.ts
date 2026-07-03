@@ -1,6 +1,7 @@
 import type { Session } from "./session.ts";
 import type { AppConfig } from "../app-config.ts";
 import type { DatabaseConfig } from "../db-config.ts";
+import type { StackSpec } from "../stack-config.ts";
 
 export class Client {
   constructor(private s: Session) {}
@@ -163,6 +164,34 @@ export class Client {
       contentType: "application/json",
       body: JSON.stringify(target),
     });
+  }
+  // stacks (B2): declarative multi-resource up + list/status/delete
+  stackUp(
+    name: string,
+    spec: StackSpec,
+    opts: { org?: string; dryRun?: boolean; prune?: boolean; resolved?: Record<string, { image: string }>; specVersion?: number } = {},
+  ) {
+    const q = new URLSearchParams();
+    if (opts.org) q.set("org", opts.org);
+    if (opts.dryRun) q.set("dry_run", "1");
+    const qs = q.toString();
+    return this.req("POST", `/v1/stacks/${name}/up${qs ? `?${qs}` : ""}`, {
+      contentType: "application/json",
+      body: JSON.stringify({ spec, ...(opts.resolved ? { resolved: opts.resolved } : {}), ...(opts.prune ? { prune: true } : {}), ...(opts.specVersion != null ? { spec_version: opts.specVersion } : {}) }),
+    });
+  }
+  stackList(org?: string) {
+    return this.req("GET", `/v1/stacks${org ? `?org=${encodeURIComponent(org)}` : ""}`);
+  }
+  stackGet(name: string, org?: string) {
+    return this.req("GET", `/v1/stacks/${name}${org ? `?org=${encodeURIComponent(org)}` : ""}`);
+  }
+  stackDelete(name: string, opts: { org?: string; cascade?: boolean } = {}) {
+    const q = new URLSearchParams();
+    if (opts.org) q.set("org", opts.org);
+    if (opts.cascade) q.set("cascade", "1");
+    const qs = q.toString();
+    return this.req("DELETE", `/v1/stacks/${name}${qs ? `?${qs}` : ""}`);
   }
   // platform admin: users + roles + status
   adminListUsers() {
