@@ -21,8 +21,8 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | --- | --- | --- | --- | --- |
 | 1 | A1 WebSockets through the edge | done | 3a0b730 | checkAccessGate shared with HTTP path; interceptor + DROP_WS_DIRECT wake-shim paths; caps/idle-timeout |
 | 2 | B1 DB binding (Future.md item 1) | done | da3842f | envFrom `<db>-app` + `<db>-ca` ca.crt mount + verify-full; same-org 400 validation |
-| 3 | L1 drop.yaml: healthcheck/release/processes | todo | | |
-| 4 | B2 Stack spec + `drop up` + plan API | todo | | |
+| 3 | L1 drop.yaml: healthcheck/release/processes | done | 169020c | + LockStore (locks table, migration 0006); drop ps; logs --release; 422 halt semantics |
+| 4 | B2 Stack spec + `drop up` + plan API | in-progress | | |
 | 5 | G1 `drop logs -f` · H1 app rollback | todo | | |
 | 6 | M0 Console re-platform + foundation | todo | | |
 | 6b | M0.5 Drop zone publish | todo | | |

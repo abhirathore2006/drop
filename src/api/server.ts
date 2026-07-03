@@ -31,7 +31,7 @@ import type { SecretStore } from "../secrets/types.ts";
 import type { ImageStore } from "../images/types.ts";
 import { fingerprint, validateSecretKey } from "../secrets/secrets.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
-import { dashboardHtml } from "./dashboard.ts";
+import { consoleShell, consoleAsset } from "./dashboard.ts";
 import type { AuditStore, AuditEntry } from "../audit/store.ts";
 
 export interface Deps {
@@ -74,7 +74,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // Dashboard (public page; its JS calls /v1/* with the session cookie).
   // The console SPA shell. Served at the root AND at its client-side routes so deep links and
   // browser refresh load the same shell (the React app reads location and renders the route).
-  const shell = (c: any) => c.html(dashboardHtml(d.cfg.baseDomain));
+  const shell = () => consoleShell(d.cfg);
   app.get("/", shell);
   app.get("/admin", shell);
   app.get("/app/:name", shell);
@@ -126,8 +126,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // Public: the version of the CLI this instance serves (built from the same commit as the API),
   // so `drop update` can show "current → target" before re-installing.
   app.get("/version", (c) => c.json({ version: VERSION }));
-  // The admin console bundle (React; built to <cliDir>/ui/app.js by build.mjs).
-  app.get("/ui/app.js", () => serveCli("ui/app.js"));
+  // The admin console's static assets (built to <cliDir>/ui/ by build.mjs) — hashed
+  // assets/* are immutable, everything else no-cache; traversal rejected in consoleAsset.
+  app.get("/ui/*", (c) => consoleAsset(d.cfg, c.req.path.replace(/^\/ui\//, "")));
 
   app.use(
     "/v1/*",
