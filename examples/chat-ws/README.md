@@ -7,25 +7,13 @@ attaches to the `http.Server` via its `upgrade` event. Messages persist in
 [`pg`](https://node-postgres.com) and broadcast to every connected client in real time. Reads the
 standard libpq `PG*` env vars.
 
-## ⚠ Status: WebSockets through the Drop edge are not wired up yet
+## Status: WebSockets tunnel through the Drop edge
 
-- **The app itself is correct** and runs anywhere that speaks raw WebSockets (locally, in a plain
-  container, behind any HTTP-upgrade-aware proxy).
-- **TODAY, exercise it by port-forwarding straight to the pod/Service**, which bypasses the edge +
-  KEDA HTTP interceptor:
-  ```bash
-  # find your tenant namespace
-  NS=$(kubectl get ns --no-headers -o custom-columns=N:.metadata.name | grep '^drop-t-' | head -1)
-  kubectl port-forward -n "$NS" deploy/chat 8080:8080
-  # then open the chat in a couple of tabs:
-  open http://localhost:8080
-  ```
-- **Routing it through the public edge hostname** (`https://chat.drop.localhost`) requires the
-  platform work in [`../../planning/2026-06-23-websocket-support-plan.md`](../../planning/2026-06-23-websocket-support-plan.md),
-  because the Drop edge proxy doesn't tunnel HTTP `Upgrade` requests, and the KEDA HTTP add-on
-  interceptor returns **403** for WebSocket upgrades ([kedacore/http-add-on#654](https://github.com/kedacore/http-add-on/issues/654)).
-  Until that lands, the public hostname will serve the HTML page but the WebSocket connection from
-  the browser will fail — use the port-forward above to see it working.
+WebSocket upgrades now pass straight through the public edge — **open the app's edge URL and it just
+works**, no `kubectl port-forward` needed. The edge runs the same visibility gate on the upgrade as it
+does for HTTP (a private/password site rejects the handshake before it opens), then splices the socket
+to the pod. Because the connection needs a live pod, this app pins `scale.min: 1` (see `drop.yaml`);
+a scaled-to-zero app pays cold-start latency on the *first* upgrade while KEDA wakes it.
 
 ## Deploy (local k3s dev stack)
 
@@ -44,11 +32,8 @@ drop deploy examples/chat-ws --build --no-start
 drop db password chat-db --set-secret chat:PGPASSWORD   # rotate + store directly; never printed
 drop start chat                                       # first boot, already has the password
 
-# 4. open it — see the "Status" note above: today, port-forward to the pod (the public edge
-#    hostname serves the page but the WebSocket upgrade does not tunnel through the edge yet)
-NS=$(kubectl get ns --no-headers -o custom-columns=N:.metadata.name | grep '^drop-t-' | head -1)
-kubectl port-forward -n "$NS" deploy/chat 8080:8080
-open http://localhost:8080                              # open it in two tabs and chat
+# 4. open it — the WebSocket tunnels through the public edge hostname (no port-forward)
+open https://chat.drop.localhost                        # open it in two tabs and chat
 ```
 
 > `--build` uses `docker` by default; set `DROP_BUILDER=podman` to build with podman. To create
@@ -88,8 +73,9 @@ Manage secrets from the console (the app's page → Secrets) or `secret_*` MCP t
 - **State is per-pod** (the live client set lives in memory), which is why `drop.yaml` pins
   `scale: {min: 1, max: 1}` — see the comments there.
 
-> `drop.yaml` also carries `app.websocket: true`, a flag that marks this app for the edge's
-> (forthcoming) WebSocket routing path — see the plan linked in the Status section above.
+> `drop.yaml` also carries `app.websocket: true`. The edge tunnels WS for *any* `type=app`
+> workload, so the flag isn't required to route — it stays as a declarative marker (and a hook for
+> future per-app WS policy).
 
 ## Verify it persisted
 

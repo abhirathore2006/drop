@@ -124,15 +124,6 @@ export function createEdge(d: EdgeDeps) {
     return entry;
   }
 
-  function siteFromHost(host: string): string | null {
-    const h = host.split(":")[0] ?? "";
-    const suffix = "." + d.baseDomain;
-    if (!h.endsWith(suffix)) return null;
-    const label = h.slice(0, -suffix.length);
-    if (!label || label.includes(".")) return null;
-    return label;
-  }
-
   function notFound(msg: string): Response {
     return new Response(`<!doctype html><title>404</title><h1>404</h1><p>${msg}</p>`, {
       status: 404,
@@ -179,7 +170,7 @@ export function createEdge(d: EdgeDeps) {
   app.all("*", async (c) => {
     // Prefer the proxy-forwarded host (nginx locally, ALB/ingress in prod) so
     // the site name survives a reverse proxy; fall back to the direct Host header.
-    const name = siteFromHost(c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "");
+    const name = siteFromHost(c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "", d.baseDomain);
     if (!name) return notFound("site not found");
 
     const { type, version, config: cfg, visibility, passwordHash } = await current(name);
@@ -196,26 +187,10 @@ export function createEdge(d: EdgeDeps) {
     const urlPath = "/" + posix.normalize("/" + c.req.path).replace(/^\/+/, "");
     const cors = corsHeaders(c.req.header("origin"), config.cors);
 
-    // 0. Visibility: private fails closed (viewer auth lands in a later feature).
-    if (visibility === "private") {
-      return new Response("This site is private. Viewer authentication is coming soon.", {
-        status: 403,
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
-    }
-    // 1. Password gate — when the bundle carries basicAuth or a visibility password is set.
-    const needsAuth = !!config.basicAuth || (visibility === "password" && !!passwordHash);
-    if (needsAuth) {
-      const header = c.req.header("authorization");
-      const okCfg = config.basicAuth ? basicAuthOk(header, config.basicAuth.users) : false;
-      const okHash = passwordHash ? passwordHashOk(header, passwordHash) : false;
-      if (!okCfg && !okHash) {
-        return new Response("Authentication required", {
-          status: 401,
-          headers: { "www-authenticate": `Basic realm="${config.basicAuth?.realm ?? "Drop"}"` },
-        });
-      }
-    }
+    // 0+1. Visibility (private fails closed — viewer auth lands in a later feature) +
+    // password gate, via the shared helper the WS upgrade path reuses verbatim.
+    const denial = checkAccessGate({ visibility, passwordHash, config }, c.req.header("authorization"));
+    if (denial) return new Response(denial.body, { status: denial.status, headers: denial.headers });
     // 2. CORS preflight
     if (c.req.method === "OPTIONS" && config.cors) {
       return new Response(null, { status: 204, headers: cors });
@@ -264,4 +239,59 @@ export function createEdge(d: EdgeDeps) {
 function isNavigationRoute(accept: string, reqPath: string): boolean {
   if (posix.extname(reqPath) !== "") return false; // looks like an asset
   return accept === "" || accept.includes("text/html") || accept.includes("*/*");
+}
+
+/** Resolve a request Host to its site name: `<label>.<baseDomain>` → `<label>` (a single
+ *  DNS label; anything else — the apex, a nested label, a foreign domain — is null).
+ *  Module-level + exported so the WS upgrade path resolves hosts identically. */
+export function siteFromHost(host: string, baseDomain: string): string | null {
+  const h = host.split(":")[0] ?? "";
+  const suffix = "." + baseDomain;
+  if (!h.endsWith(suffix)) return null;
+  const label = h.slice(0, -suffix.length);
+  if (!label || label.includes(".")) return null;
+  return label;
+}
+
+/** The inputs the access gate needs — the lean pointer fields, no request object. */
+export interface AccessGateInput {
+  visibility: Visibility;
+  passwordHash: string | null;
+  config: SiteConfig;
+}
+
+/** A denied request: the status + body + headers to write back (HTTP Response or raw socket). */
+export interface AccessDenial {
+  status: number;
+  body: string;
+  headers?: Record<string, string>;
+}
+
+/** The single source of truth for the visibility + password gate, shared by the HTTP
+ *  handler and the pre-upgrade WebSocket handler so both fail closed identically. Returns
+ *  a denial to write back, or null when the request may proceed. */
+export function checkAccessGate(input: AccessGateInput, authHeader: string | undefined): AccessDenial | null {
+  // Visibility: private fails closed (viewer auth lands in a later feature).
+  if (input.visibility === "private") {
+    return {
+      status: 403,
+      body: "This site is private. Viewer authentication is coming soon.",
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    };
+  }
+  // Password gate — when the bundle carries basicAuth or a visibility password is set.
+  const cfg = input.config;
+  const needsAuth = !!cfg.basicAuth || (input.visibility === "password" && !!input.passwordHash);
+  if (needsAuth) {
+    const okCfg = cfg.basicAuth ? basicAuthOk(authHeader, cfg.basicAuth.users) : false;
+    const okHash = input.passwordHash ? passwordHashOk(authHeader, input.passwordHash) : false;
+    if (!okCfg && !okHash) {
+      return {
+        status: 401,
+        body: "Authentication required",
+        headers: { "www-authenticate": `Basic realm="${cfg.basicAuth?.realm ?? "Drop"}"` },
+      };
+    }
+  }
+  return null;
 }

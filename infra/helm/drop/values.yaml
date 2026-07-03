@@ -78,6 +78,11 @@ ingress:
   annotations: {}
   # nginx example: cert-manager.io/cluster-issuer, etc.
   # ALB example: alb.ingress.kubernetes.io/certificate-arn, scheme: internal, ...
+  # WebSockets (A1): the ALB idle timeout defaults to 60s and will drop quiet WS sockets
+  # (the edge's own idle timeout is 5m — DROP_WS_IDLE_TIMEOUT_MS — so the LB is the tighter
+  # bound). Raise it on the ALB so long-lived connections survive lulls:
+  #   alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600
+  # (A2's NLB removes the concern — 350s and truly transparent.)
   tls:
     enabled: true
     secretName: "" # wildcard cert Secret (nginx). For ALB, use ACM via annotations.

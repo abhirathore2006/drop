@@ -26,6 +26,9 @@ export interface Config {
   edgeDiskCacheDir?: string; // edge: where to cache asset bytes on disk (off if unset)
   edgeDiskCacheBytes: number; // edge: disk cache budget
   interceptorUrl?: string; // edge: KEDA HTTP interceptor base URL — type=app hostnames proxy here (off if unset)
+  wsMaxPerHost: number; // edge: per-host concurrent WebSocket-upgrade cap (0 falls back to the default)
+  wsIdleTimeoutMs: number; // edge: WS idle timeout — destroy both sockets after this long with no bytes
+  wsDirect: boolean; // edge: DROP_WS_DIRECT — bypass the interceptor, dial the app Service directly (wake shim)
   docsDir: string; // api: static docs site served at /docs (relative to cwd)
   cliDir: string; // api: dir holding the CLI bundles served at /cli (relative to cwd)
   // --- app secrets backend (chosen at deploy time) ---
@@ -91,6 +94,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     edgeDiskCacheDir: env.DROP_EDGE_DISK_CACHE || undefined,
     edgeDiskCacheBytes: Number(env.DROP_EDGE_DISK_CACHE_BYTES ?? String(5 * 1024 * 1024 * 1024)),
     interceptorUrl: env.DROP_INTERCEPTOR_URL || undefined,
+    wsMaxPerHost: Number(env.DROP_WS_MAX_PER_HOST ?? "100") || 100,
+    wsIdleTimeoutMs: Number(env.DROP_WS_IDLE_TIMEOUT_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
+    wsDirect: env.DROP_WS_DIRECT === "1",
     dbBackupRoleArn: env.DROP_DB_BACKUP_ROLE_ARN || undefined,
     dbBackupEndpoint: env.DROP_DB_BACKUP_S3_ENDPOINT || undefined,
     dbBackupEgressCidr: env.DROP_DB_BACKUP_S3_EGRESS_CIDR || undefined,

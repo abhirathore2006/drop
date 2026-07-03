@@ -163,17 +163,27 @@
     (<code>push</code>, <code>deploy --build</code>), not yet as an MCP tool. In-cluster builds (no local Docker)
     are a future item.</p></div>
 
-    <h3>WebSockets (edge limitation)</h3>
-    <div class="note warn"><span class="lbl">Known limitation</span><p>WebSockets do <strong>not</strong> yet
-    traverse the public edge. Two independent blockers sit on the path
-    <code>client → edge → KEDA interceptor → pod</code>: the edge proxy doesn't tunnel HTTP <code>Upgrade</code>
-    handshakes (<code>upgrade</code>/<code>connection</code> are in its <code>HOP_BY_HOP</code> strip set, and no
-    <code>'upgrade'</code> listener is attached to the server), and the KEDA HTTP add-on
-    <strong>interceptor returns 403</strong> for WS upgrades. The real WS app <code>examples/chat-ws</code> is
-    exercised today via <code>kubectl port-forward</code> to the pod. The fix — a raw-socket upgrade tunnel in the
-    edge that routes <code>websocket: true</code> apps straight to their in-cluster Service (bypassing the
-    interceptor, <code>min ≥ 1</code> so they never scale to zero) — is in
-    <code>planning/2026-06-23-websocket-support-plan.md</code>.</p></div>
+    <h3>WebSockets</h3>
+    <p>WebSockets <strong>pass through the public edge</strong> to <code>type=app</code> workloads. Upgrades
+    bypass Hono: a Node-level <code>server.on('upgrade')</code> handler (<code>src/edge/ws-proxy.ts</code>) runs the
+    <strong>same visibility gate</strong> as the HTTP path <em>before</em> the handshake — a private site gets a
+    <code>403</code> and a password site a <code>401</code> written to the raw socket, so a viewer-blocked upgrade
+    <strong>never half-opens</strong> (no <code>101</code>). Past the gate the edge opens the upgrade against the
+    same KEDA interceptor the HTTP path uses (Host <code>&lt;name&gt;.drop.example.com</code>, so KEDA routes and
+    wakes the pod) and <strong>splices the two sockets</strong> byte-for-byte — the app computes
+    <code>Sec-WebSocket-Accept</code> and emits the <code>101</code>; the edge is a transparent tunnel. A fallback
+    (<code>DROP_WS_DIRECT=1</code>) dials the app Service in-cluster directly with a wake shim, for interceptor
+    builds that reject WS.</p>
+    <p>Each connection is bounded: a <strong>per-host concurrent-upgrade cap</strong>
+    (<code>DROP_WS_MAX_PER_HOST</code>, default 100) and an <strong>idle timeout</strong>
+    (<code>DROP_WS_IDLE_TIMEOUT_MS</code>, default 5&nbsp;min) that destroys both sockets, so long-lived sockets
+    can't pin edge memory; bytes in/out are counted in one place for a future metrics slice.</p>
+    <div class="note tip"><span class="lbl">Cold start</span><p>On a <strong>scale-from-zero</strong> app the
+    first upgrade waits for KEDA to wake a pod, so cold-start latency applies at the WS handshake. Apps that need
+    <strong>instant</strong> WebSockets should set <code>scale.min: 1</code> so a pod is always live (broadcast /
+    presence state is per-pod anyway — see <code>examples/chat-ws</code>). In prod, also raise the ALB idle timeout
+    (default 60&nbsp;s) via an ingress annotation so the load balancer doesn't drop quiet sockets before the edge's
+    5-minute timeout would.</p></div>
 
     <h3>Databases</h3>
     <p><code>drop db create</code> → a <strong>CloudNativePG</strong> <code>Cluster</code> (Postgres 18, single

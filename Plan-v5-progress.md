@@ -20,7 +20,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | # | Slice | Status | Commit | Notes |
 | --- | --- | --- | --- | --- |
 | 1 | A1 WebSockets through the edge | in-progress | | |
-| 2 | B1 DB binding (Future.md item 1) | in-progress | | |
+| 2 | B1 DB binding (Future.md item 1) | done | da3842f | envFrom `<db>-app` + `<db>-ca` ca.crt mount + verify-full; same-org 400 validation |
 | 3 | L1 drop.yaml: healthcheck/release/processes | todo | | |
 | 4 | B2 Stack spec + `drop up` + plan API | todo | | |
 | 5 | G1 `drop logs -f` · H1 app rollback | todo | | |
