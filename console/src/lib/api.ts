@@ -1,6 +1,17 @@
 // Typed client for the Drop control-plane API. Same-origin fetch carries the session cookie.
+// Errors are thrown as ApiError so callers (and the query layer's 401 interceptor) can
+// branch on status.
 
 export type WorkloadType = "site" | "app" | "database";
+
+export class ApiError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
 
 export interface Me {
   email: string;
@@ -45,6 +56,13 @@ export interface Org {
   kind: string; // "personal" | "team"
 }
 
+/** Server-computed status (M0 status contract). Optional until the API starts sending it;
+ *  lib/status.ts falls back to deriving the same enum from the raw fields. */
+export interface ServerStatus {
+  status: string;
+  reason: string;
+}
+
 export interface ListItem {
   name: string;
   type: WorkloadType;
@@ -54,6 +72,7 @@ export interface ListItem {
   url: string;
   current: string | null;
   collaborators?: number;
+  status?: ServerStatus | null;
 }
 
 export interface AppStatus {
@@ -83,6 +102,12 @@ export interface Version {
   fileCount: number;
   bytes: number;
 }
+export interface SecretMeta {
+  key: string;
+  fingerprint: string;
+  updatedBy: string;
+  updatedAt: string;
+}
 export interface Detail {
   name: string;
   type: WorkloadType;
@@ -94,6 +119,7 @@ export interface Detail {
   current: string | null;
   url: string;
   versions: Version[];
+  status?: ServerStatus | null;
   app?: {
     image: string | null;
     scale: { min: number; max: number } | null;
@@ -101,17 +127,27 @@ export interface Detail {
     status: AppStatus | null;
     runtimeState?: "running" | "stopped";
   };
-  database?: { host: string; port: number; database: string; user: string; credentialsSecret: string; status: DatabaseStatus | null };
+  database?: {
+    host: string;
+    port: number;
+    database: string;
+    user: string;
+    credentialsSecret: string;
+    status: DatabaseStatus | null;
+  };
 }
 
-async function req<T = any>(method: string, path: string, body?: unknown): Promise<T> {
+async function req<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: body ? { "content-type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((json as any).error ?? `${path}: ${res.status}`);
+  const json: unknown = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = (json as { error?: string }).error ?? `${path}: ${res.status}`;
+    throw new ApiError(msg, res.status);
+  }
   return json as T;
 }
 
@@ -124,29 +160,37 @@ export const api = {
   rollback: (name: string, to: string) => req("POST", `/v1/sites/${name}/rollback`, { to }),
   setVisibility: (name: string, visibility: string, password?: string) =>
     req("POST", `/v1/sites/${name}/visibility`, { visibility, password }),
-  setDbPassword: (name: string) => req<{ name: string; user: string; password: string; warning?: string }>("POST", `/v1/databases/${name}/password`, {}),
+  setDbPassword: (name: string) =>
+    req<{ name: string; user: string; password: string; warning?: string }>("POST", `/v1/databases/${name}/password`, {}),
   dbBackups: (name: string) => req<{ backups: BackupInfo[]; lastSuccessAt: string | null }>("GET", `/v1/databases/${name}/backups`),
   triggerDbBackup: (name: string) => req<{ backup: string }>("POST", `/v1/databases/${name}/backups`, {}),
   hibernateDb: (name: string) => req("POST", `/v1/databases/${name}/hibernate`, {}),
   wakeDb: (name: string) => req("POST", `/v1/databases/${name}/wake`, {}),
   addCollaborator: (name: string, email: string) => req("POST", `/v1/sites/${name}/collaborators`, { email }),
-  removeCollaborator: (name: string, email: string) =>
-    req("DELETE", `/v1/sites/${name}/collaborators/${encodeURIComponent(email)}`),
+  removeCollaborator: (name: string, email: string) => req("DELETE", `/v1/sites/${name}/collaborators/${encodeURIComponent(email)}`),
   transfer: (name: string, email: string) => req("POST", `/v1/sites/${name}/transfer`, { email }),
   remove: (name: string) => req("DELETE", `/v1/sites/${name}`),
   setUserStatus: (email: string, status: "active" | "suspended") =>
     req("POST", `/v1/admin/users/${encodeURIComponent(email)}/status`, { status }),
   adminUsers: () => req<{ users: AdminUser[] }>("GET", "/v1/admin/users"),
-  setUserRole: (email: string, role: "admin" | "member") =>
-    req("POST", `/v1/admin/users/${encodeURIComponent(email)}/role`, { role }),
+  setUserRole: (email: string, role: "admin" | "member") => req("POST", `/v1/admin/users/${encodeURIComponent(email)}/role`, { role }),
   adminOrgs: () => req<{ orgs: AdminOrg[] }>("GET", "/v1/admin/orgs"),
   adminAudit: (qs: string) => req<{ entries: AuditRecord[]; nextCursor?: string }>("GET", "/v1/admin/audit" + (qs ? `?${qs}` : "")),
   orgUsage: (slug: string) => req<OrgUsage>("GET", `/v1/orgs/${encodeURIComponent(slug)}/usage`),
   // app secrets (write-only) + lifecycle
-  listSecrets: (name: string) => req<{ secrets: { key: string; fingerprint: string; updatedBy: string; updatedAt: string }[] }>("GET", `/v1/apps/${name}/secrets`),
+  listSecrets: (name: string) => req<{ secrets: SecretMeta[] }>("GET", `/v1/apps/${name}/secrets`),
   setSecret: (name: string, key: string, value: string) => req("PUT", `/v1/apps/${name}/secrets/${encodeURIComponent(key)}`, { value }),
   deleteSecret: (name: string, key: string) => req("DELETE", `/v1/apps/${name}/secrets/${encodeURIComponent(key)}`),
   restartApp: (name: string) => req("POST", `/v1/apps/${name}/restart`, {}),
   stopApp: (name: string) => req("POST", `/v1/apps/${name}/stop`, {}),
   startApp: (name: string) => req("POST", `/v1/apps/${name}/start`, {}),
 };
+
+// Small shared display helpers (identical semantics to the old console).
+export const pathFor = (w: { type: WorkloadType; name: string }): string => `/${w.type}/${encodeURIComponent(w.name)}`;
+// Org display: a personal org's name is the owner's email (redundant on a card that shows
+// the owner), so show "personal"; team orgs show their name.
+export const orgLabel = (o?: { slug: string; name: string; kind: string } | null): string =>
+  !o ? "—" : o.kind === "personal" ? "personal" : o.name;
+export const shortVersion = (id: string): string => "#" + id.replace(/^v_\d+_/, "");
+export const fmtStamp = (s: string | null): string => (s ? new Date(s).toISOString().replace("T", " ").slice(0, 19) : "—");

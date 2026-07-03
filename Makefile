@@ -54,7 +54,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down nuke
+.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down nuke dev-console
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -67,6 +67,7 @@ help:
 	@echo "  make status                     show what's running"
 	@echo "  make logs                       tail api + edge logs"
 	@echo "  make publish DIR=./dist NAME=x  publish a folder and print its URL"
+	@echo "  make dev-console                console dev loop: Vite + HMR on :5173, proxying to the api (:$(API_PORT))"
 	@echo "  make login                      sign in with Google (server-mediated, real auth)"
 	@echo "  make stop-all                   also stop the podman machine"
 	@echo "  make reset                      wipe the Floci + Postgres volumes (all sites + metadata)"
@@ -151,6 +152,11 @@ setup:
 
 build:
 	@$(NODE) build.mjs
+
+# Console dev loop: Vite dev server with HMR on :5173, proxying /v1 + auth routes to the
+# local API (run `make start` first). Override the API origin with DROP_API_ORIGIN.
+dev-console:
+	@DROP_API_ORIGIN=$${DROP_API_ORIGIN:-http://localhost:$(API_PORT)} $(NODE_BIN)/npx vite dev --config console/vite.config.ts
 
 # Trust the local HTTPS cert (infra/nginx/certs) in the OS root store so browsers
 # stop warning — OS-detected (macOS / Linux / Windows). Generates the cert first if

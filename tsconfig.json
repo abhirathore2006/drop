@@ -13,5 +13,5 @@
     "lib": ["ESNext"]
   },
   "include": ["src", "bin", "e2e", "build.mjs"],
-  "exclude": ["node_modules", "dist", "examples", "src/ui"]
+  "exclude": ["node_modules", "dist", "examples", "console"]
 }

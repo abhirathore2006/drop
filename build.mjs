@@ -3,7 +3,8 @@
 //   node build.mjs cli mcp    → builds only the named targets (prepare uses this for npx)
 import { build } from "esbuild";
 import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const only = process.argv.slice(2);
 
@@ -38,19 +39,20 @@ for (const t of targets) {
   console.log(`✓ built ${t.out}`);
 }
 
-// The admin console (React) — a BROWSER bundle (IIFE, no node banner/require). Served as a
-// static asset by the API; it never enters the api/edge node bundles, which stay React-free.
+// The admin console — a proper Vite app (console/, React + wouter + TanStack Query) built
+// to dist/ui/ (index.html shell + content-hashed assets/*). Served as static files by the
+// API (src/api/dashboard.ts); it never enters the api/edge node bundles, which stay
+// React-free. Shelled out so esbuild stays the only bundler for the node targets.
 if (!only.length || only.includes("ui")) {
-  await build({
-    entryPoints: ["src/ui/main.tsx"],
-    outfile: "dist/ui/app.js",
-    bundle: true,
-    format: "iife",
-    platform: "browser",
-    target: "es2020",
-    jsx: "automatic",
-    minify: true,
-    define: { "process.env.NODE_ENV": '"production"' },
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  const viteBin = fileURLToPath(new URL("./node_modules/vite/bin/vite.js", import.meta.url));
+  const r = spawnSync(process.execPath, [viteBin, "build", "--config", "console/vite.config.ts"], {
+    stdio: "inherit",
+    cwd: here,
   });
-  console.log("✓ built dist/ui/app.js");
+  if (r.status !== 0) {
+    console.error("✗ vite build failed for the console (dist/ui)");
+    process.exit(r.status ?? 1);
+  }
+  console.log("✓ built dist/ui (console)");
 }

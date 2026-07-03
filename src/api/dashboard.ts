@@ -1,7 +1,9 @@
 // Console serving for the Drop admin console — the SPA shell + its static assets, isolated
-// here so the API router only needs two calls (consoleShell / consoleAsset). The React app
-// is bundled to <cliDir>/ui/ by build.mjs and calls /v1/* with the session cookie.
+// here so the API router only needs two calls (consoleShell / consoleAsset). The console is
+// a Vite app (console/) built to <cliDir>/ui/ by `node build.mjs ui`: an index.html shell
+// plus content-hashed assets/* — it calls /v1/* with the session cookie.
 import { readFile } from "node:fs/promises";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export interface ConsoleCfg {
@@ -9,21 +11,55 @@ export interface ConsoleCfg {
   baseDomain: string;
 }
 
-/** The SPA shell served at / and every client-side route (deep links + refresh load it). */
-export function consoleShell(_cfg: ConsoleCfg): Response {
-  const html = `<!doctype html>
+// Strict same-origin CSP is possible because the Vite build emits NO inline scripts or
+// styles (external hashed files only) — mandatory groundwork for the exec terminal / SQL
+// surfaces later. Applied to every shell response, including the not-built fallback.
+const SHELL_HEADERS: Record<string, string> = {
+  "content-type": "text/html; charset=utf-8",
+  "content-security-policy":
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "cache-control": "no-cache", // the shell must revalidate; its hashed assets are immutable
+};
+
+// Self-contained "not built yet" page (dev / fresh clone). Deliberately style-free: it must
+// not violate the style-src 'self' CSP above, and / must never 500 just because the console
+// bundle is absent.
+const NOT_BUILT_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>drop · console</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>drop · console (not built)</title>
 </head>
 <body>
-<div id="root"></div>
-<script src="/ui/app.js"></script>
+<main>
+<h1>&#9656; drop console</h1>
+<p>The console bundle isn't built yet. Build it with:</p>
+<pre><code>node build.mjs ui</code></pre>
+<p>then reload this page. The API itself is running &mdash; only the web console is missing.</p>
+</main>
 </body>
 </html>`;
-  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" } });
+
+// Lazily-read shell, cached in memory and invalidated by mtime/size — a redeploy that
+// replaces dist/ui/index.html is picked up without restarting the API.
+let shellCache: { mtimeMs: number; size: number; html: string } | null = null;
+
+/** The SPA shell served at / and every client-side route (deep links + refresh load it). */
+export function consoleShell(cfg: ConsoleCfg): Response {
+  const path = join(cfg.cliDir, "ui", "index.html");
+  try {
+    const st = statSync(path);
+    if (!shellCache || shellCache.mtimeMs !== st.mtimeMs || shellCache.size !== st.size) {
+      shellCache = { mtimeMs: st.mtimeMs, size: st.size, html: readFileSync(path, "utf8") };
+    }
+    return new Response(shellCache.html, { headers: SHELL_HEADERS });
+  } catch {
+    shellCache = null;
+    return new Response(NOT_BUILT_HTML, { headers: SHELL_HEADERS });
+  }
 }
 
 const MIME: Record<string, string> = {
@@ -34,8 +70,15 @@ const MIME: Record<string, string> = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
+  ".gif": "image/gif",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
   ".ico": "image/x-icon",
+  ".woff": "font/woff",
   ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+  ".wasm": "application/wasm",
   ".html": "text/html; charset=utf-8",
 };
 

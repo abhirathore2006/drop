@@ -1,0 +1,114 @@
+/* Design tokens — the single source of truth for both themes.
+ *
+ * The dark palette is the tokenized version of the original console (the hex values that
+ * used to live in a runtime-injected <style> string in src/ui/main.tsx). Light is a
+ * contrast-checked counterpart. main.tsx resolves the persisted preference
+ * (system | light | dark) to a concrete `data-theme` attribute on <html> and keeps it in
+ * sync with prefers-color-scheme, so the CSS only needs the two attribute variants. */
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0b0d10;
+  --bg-translucent: rgba(11, 13, 16, 0.8); /* sticky header w/ backdrop blur */
+  --surface: #11151a; /* cards, inputs, code chips */
+  --surface-raised: #0e1217; /* detail panels */
+  --surface-inset: #08090b; /* logs well */
+  --border: #1c2128;
+  --border-strong: #2a2f37;
+  --border-hover: #3a4150;
+  --line: #14181d; /* row separators */
+
+  --text: #e7e9ea;
+  --text-muted: #8a9099;
+  --text-faint: #6b7280;
+
+  --accent: #9be15d;
+  --accent-glow: rgba(155, 225, 93, 0.4);
+  --on-accent: #0b0d10; /* text on an accent-filled control */
+
+  /* status + type colors: fg / border / bg triplets */
+  --ok-fg: #9be15d;
+  --ok-border: #3d5e2a;
+  --ok-bg: #18260f;
+  --danger-fg: #ff8d8d;
+  --danger-border: #6e2a2a;
+  --danger-bg: #2a1414;
+  --idle-fg: #e8c97a;
+  --idle-border: #6b5a2a;
+  --idle-bg: #241f10;
+  --info-fg: #7fb4ff;
+  --info-border: #2e4d77;
+  --info-bg: #16243a;
+  --purple-fg: #c79bff;
+  --purple-border: #4a357a;
+  --purple-bg: #221836;
+  --warn-fg: #f0b86b;
+  --warn-border: #3a2c14;
+  --warn-bg: #241a0e;
+
+  --org-fg: #9be15d;
+  --org-border: #1f3a2a;
+  --org-bg: #11201a;
+  --reveal-fg: #9be15d;
+  --reveal-border: #1f3a26;
+  --reveal-bg: #0e1f14;
+
+  --logs-fg: #cdd2d6;
+  --overlay: rgba(4, 5, 7, 0.6);
+  --focus-ring: rgba(155, 225, 93, 0.45);
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f6f7f8;
+  --bg-translucent: rgba(246, 247, 248, 0.8);
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-inset: #eef0f2;
+  --border: #dde2e8;
+  --border-strong: #c6cdd6;
+  --border-hover: #a9b3bf;
+  --line: #e8ebee;
+
+  --text: #1b2129;
+  --text-muted: #5a6472;
+  --text-faint: #778291;
+
+  --accent: #3f7d15;
+  --accent-glow: rgba(96, 165, 48, 0.45);
+  --on-accent: #ffffff;
+
+  --ok-fg: #2f6410;
+  --ok-border: #b7d89d;
+  --ok-bg: #eef7e5;
+  --danger-fg: #a52a2a;
+  --danger-border: #e5b6b6;
+  --danger-bg: #fceeee;
+  --idle-fg: #7a5c0d;
+  --idle-border: #e3d2a2;
+  --idle-bg: #faf3df;
+  --info-fg: #1a56a8;
+  --info-border: #b3cdec;
+  --info-bg: #e9f1fb;
+  --purple-fg: #6532b4;
+  --purple-border: #d3bff2;
+  --purple-bg: #f3edfc;
+  --warn-fg: #8a5a00;
+  --warn-border: #ecd3a0;
+  --warn-bg: #fdf3e0;
+
+  --org-fg: #2f6410;
+  --org-border: #c4dcb0;
+  --org-bg: #eef7e5;
+  --reveal-fg: #2f6410;
+  --reveal-border: #b7d89d;
+  --reveal-bg: #eef7e5;
+
+  --logs-fg: #333a42;
+  --overlay: rgba(27, 33, 41, 0.35);
+  --focus-ring: rgba(63, 125, 21, 0.35);
+  --shadow: 0 12px 40px rgba(27, 33, 41, 0.18);
+}
