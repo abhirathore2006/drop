@@ -70,9 +70,12 @@ export function useFolderDrop(onFiles: (files: DroppedFile[]) => void, disabled 
   const pick = useCallback(() => inputRef.current?.click(), []);
 
   const onInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
+    // COPY before clearing: `input.files` is a LIVE FileList in real browsers — resetting
+    // `value` empties it, so reading it afterwards would see zero files (happy-dom snapshots
+    // it, which is why only a real browser catches this).
+    const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-picking the same folder again later
-    if (!files || !files.length) return;
+    if (!files.length) return;
     setReading(true);
     readFileList(files)
       .then((f) => onFilesRef.current(f))

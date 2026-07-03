@@ -81,7 +81,7 @@ export async function readDataTransfer(items: DataTransferItemList): Promise<Dro
 /** Read an `<input webkitdirectory>` FileList into the same shape. Each file's
  *  `webkitRelativePath` includes the picked folder's own name as its first segment
  *  ("myfolder/src/index.html") — stripped so paths match the drag-and-drop shape. */
-export async function readFileList(files: FileList): Promise<DroppedFile[]> {
+export async function readFileList(files: ArrayLike<File>): Promise<DroppedFile[]> {
   const out: DroppedFile[] = [];
   for (const file of Array.from(files)) {
     const full = file.webkitRelativePath || file.name;
