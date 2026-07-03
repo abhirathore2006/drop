@@ -106,6 +106,13 @@ export interface AuditLogTable {
   detail: ColumnType<Record<string, unknown> | null, string | null, string | null>; // extra context (jsonb)
 }
 
+/** Lease-based advisory lock: one row per key, stolen when `expires_at` passes (see LockStore). */
+export interface LocksTable {
+  key: string;
+  holder: string;
+  expires_at: ColumnType<Date, Date | string, Date | string>;
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -116,4 +123,5 @@ export interface Database {
   app_secret_keys: AppSecretKeysTable;
   organisations: OrganisationsTable;
   org_members: OrgMembersTable;
+  locks: LocksTable;
 }

@@ -6,7 +6,16 @@
 import { request } from "node:https";
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
-import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus, type TenantUsage, type BackupInfo } from "./types.ts";
+import {
+  PasswordSyncError,
+  type KubeClient,
+  type AppStatus,
+  type DatabaseStatus,
+  type TenantUsage,
+  type BackupInfo,
+  type ProcessStatus,
+  type ReleaseResult,
+} from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import { databaseBackupManifest, databasePasswordJob, DEFAULT_OPERAND_IMAGE, PWSET_SECRET, type DatabaseManifests } from "./cnpg.ts";
 
@@ -134,9 +143,10 @@ export class KubeApiClient implements KubeClient {
   }
 
   async applyApp(namespace: string, name: string, m: AppManifests): Promise<void> {
-    // Fail fast BEFORE creating any app object: on a cluster without the KEDA HTTP
-    // add-on, applying then throwing would orphan the Deployment/Service/NetworkPolicy.
-    await this.assertCrd("http.keda.sh");
+    // Fail fast BEFORE creating any app object: on a cluster without the KEDA HTTP add-on, applying
+    // then throwing would orphan the Deployment/Service/NetworkPolicy. Only the web process needs
+    // the HTTP add-on — a worker-only app has no HTTPScaledObject and shouldn't require it.
+    if (m.httpScaledObject) await this.assertCrd("http.keda.sh");
     // namespace is provisioned (PSA-labeled) by applyTenant — don't re-apply a bare one here.
     // The env Secret is REPLACED, not server-side-merged: SSA on a Secret's stringData does
     // NOT prune keys removed since the last deploy. DELETE unconditionally (404 if absent —
@@ -144,10 +154,27 @@ export class KubeApiClient implements KubeClient {
     // never leaves a stale Secret behind; then re-create only if the app still has env.
     await this.call("DELETE", this.secretPath(namespace, `${name}-env`));
     if (m.secret) await this.apply(this.secretPath(namespace, this.objName(m.secret)), m.secret as Record<string, unknown>);
-    await this.apply(this.deploymentPath(namespace, name), m.deployment as Record<string, unknown>);
-    await this.apply(this.servicePath(namespace, name), m.service as Record<string, unknown>);
-    await this.apply(this.netpolPath(namespace, this.objName(m.ingressPolicy)), m.ingressPolicy as Record<string, unknown>);
-    await this.apply(this.hsoPath(namespace, name), m.httpScaledObject as Record<string, unknown>);
+    // Web process objects (absent for a worker-only app).
+    if (m.deployment) await this.apply(this.deploymentPath(namespace, name), m.deployment as Record<string, unknown>);
+    if (m.service) await this.apply(this.servicePath(namespace, name), m.service as Record<string, unknown>);
+    if (m.ingressPolicy) await this.apply(this.netpolPath(namespace, this.objName(m.ingressPolicy)), m.ingressPolicy as Record<string, unknown>);
+    if (m.httpScaledObject) await this.apply(this.hsoPath(namespace, name), m.httpScaledObject as Record<string, unknown>);
+    // Worker process Deployments: apply the current set, then prune any worker removed since the
+    // last deploy (SSA can't prune an object that's no longer in the manifest list).
+    for (const w of m.workers ?? []) await this.apply(this.deploymentPath(namespace, w.name), w.deployment as Record<string, unknown>);
+    await this.pruneWorkers(namespace, name, new Set((m.workers ?? []).map((w) => w.name)));
+  }
+
+  /** Delete worker Deployments for an app that aren't in `keep` (label drop.dev/process distinguishes
+   *  workers from the web Deployment, which never carries it → is never pruned). */
+  private async pruneWorkers(namespace: string, name: string, keep: Set<string>): Promise<void> {
+    const sel = encodeURIComponent(`drop.dev/workload=${name},drop.dev/process`);
+    const r = await this.call("GET", `/apis/apps/v1/namespaces/${namespace}/deployments?labelSelector=${sel}`);
+    if (r.status >= 300) return;
+    for (const d of (JSON.parse(r.body).items ?? []) as any[]) {
+      const dn = d.metadata?.name as string | undefined;
+      if (dn && !keep.has(dn)) await this.call("DELETE", this.deploymentPath(namespace, dn));
+    }
   }
 
   async deleteApp(namespace: string, name: string): Promise<void> {
@@ -156,6 +183,8 @@ export class KubeApiClient implements KubeClient {
     await this.call("DELETE", this.servicePath(namespace, name));
     await this.call("DELETE", this.secretPath(namespace, `${name}-env`));
     await this.call("DELETE", this.deploymentPath(namespace, name));
+    await this.pruneWorkers(namespace, name, new Set()); // tear down every worker Deployment too
+    await this.deleteReleaseJobs(namespace, name); // and any release Jobs left for log retrieval
   }
 
   async applyDatabase(namespace: string, name: string, m: DatabaseManifests): Promise<void> {
@@ -254,25 +283,7 @@ export class KubeApiClient implements KubeClient {
     if (r.status >= 300) throw new Error(`getAppStatus ${name} -> ${r.status}`);
     const s = (JSON.parse(r.body).status ?? {}) as { replicas?: number; readyReplicas?: number };
     // Restarts + crash reason come from the PODS (the Deployment status has neither).
-    let restarts = 0;
-    let reason = (s.replicas ?? 0) === 0 ? "ScaledToZero" : "NoPods";
-    try {
-      const pr = await this.call("GET", this.podsPath(namespace, name));
-      if (pr.status < 300) {
-        const pods = (JSON.parse(pr.body).items ?? []) as any[];
-        if (pods.length) {
-          for (const p of pods) {
-            for (const cs of p.status?.containerStatuses ?? []) restarts = Math.max(restarts, cs.restartCount ?? 0);
-          }
-          // reason from the newest pod's app container: waiting reason (e.g. CrashLoopBackOff) or phase.
-          const newest = pods[pods.length - 1];
-          const cs = (newest.status?.containerStatuses ?? []).find((c: any) => c.name === name) ?? newest.status?.containerStatuses?.[0];
-          reason = cs?.state?.waiting?.reason ?? cs?.state?.terminated?.reason ?? newest.status?.phase ?? reason;
-        }
-      }
-    } catch {
-      /* leave restarts/reason at defaults */
-    }
+    const { restarts, reason } = await this.podRestartsReason(namespace, name, s.replicas ?? 0);
     return { replicas: s.replicas ?? 0, ready: s.readyReplicas ?? 0, restarts, reason };
   }
 
@@ -294,6 +305,88 @@ export class KubeApiClient implements KubeClient {
       return lr.body;
     }
     return "";
+  }
+
+  /** Recent restart count + crash reason for a Deployment's pods (Deployment .status has neither). */
+  private async podRestartsReason(namespace: string, deploymentName: string, replicas: number): Promise<{ restarts: number; reason: string }> {
+    let restarts = 0;
+    let reason = replicas === 0 ? "ScaledToZero" : "NoPods";
+    try {
+      const pr = await this.call("GET", this.podsPath(namespace, deploymentName));
+      if (pr.status < 300) {
+        const pods = (JSON.parse(pr.body).items ?? []) as any[];
+        if (pods.length) {
+          for (const p of pods) for (const cs of p.status?.containerStatuses ?? []) restarts = Math.max(restarts, cs.restartCount ?? 0);
+          const newest = pods[pods.length - 1];
+          const cs = (newest.status?.containerStatuses ?? []).find((c: any) => c.name === deploymentName) ?? newest.status?.containerStatuses?.[0];
+          reason = cs?.state?.waiting?.reason ?? cs?.state?.terminated?.reason ?? newest.status?.phase ?? reason;
+        }
+      }
+    } catch {
+      /* leave restarts/reason at defaults */
+    }
+    return { restarts, reason };
+  }
+
+  private releaseSelector = (name: string) => encodeURIComponent(`drop.dev/workload=${name},drop.dev/job=release`);
+
+  async runReleaseJob(namespace: string, name: string, job: Record<string, unknown>, timeoutMs: number): Promise<ReleaseResult> {
+    const jobName = (job.metadata as { name: string }).name;
+    const jp = this.jobPath(namespace, jobName);
+    await this.apply(jp, job); // priors were GC'd by deleteReleaseJobs; this name is version-unique
+    // Poll to a terminal state, bounded by the caller's timeout. backoffLimit:0 → a single failure
+    // (failed>=1) is terminal. Never throw on failure — return ok:false + logs so the deploy halts
+    // cleanly and surfaces the migration output.
+    const deadline = Date.now() + timeoutMs;
+    let reason: ReleaseResult["reason"] = "timeout";
+    while (Date.now() < deadline) {
+      await sleep(2000);
+      const r = await this.call("GET", jp);
+      if (r.status >= 300) continue;
+      const st = (JSON.parse(r.body).status ?? {}) as { succeeded?: number; failed?: number; conditions?: { type: string; status: string }[] };
+      if (st.succeeded && st.succeeded >= 1) { reason = "succeeded"; break; }
+      if ((st.conditions ?? []).some((c) => c.type === "Failed" && c.status === "True") || (st.failed ?? 0) >= 1) { reason = "failed"; break; }
+    }
+    const logs = await this.getReleaseLogs(namespace, name, 200).catch(() => "");
+    return { ok: reason === "succeeded", reason, logs };
+  }
+
+  async deleteReleaseJobs(namespace: string, name: string): Promise<void> {
+    const r = await this.call("GET", `/apis/batch/v1/namespaces/${namespace}/jobs?labelSelector=${this.releaseSelector(name)}`);
+    if (r.status >= 300) return;
+    for (const j of (JSON.parse(r.body).items ?? []) as any[]) {
+      const jn = j.metadata?.name as string | undefined;
+      if (jn) await this.call("DELETE", `${this.jobPath(namespace, jn)}?propagationPolicy=Foreground`);
+    }
+  }
+
+  async getReleaseLogs(namespace: string, name: string, tailLines = 200): Promise<string> {
+    const pr = await this.call("GET", `/api/v1/namespaces/${namespace}/pods?labelSelector=${this.releaseSelector(name)}`);
+    if (pr.status >= 300) return "";
+    const pods = (JSON.parse(pr.body).items ?? []) as any[];
+    if (!pods.length) return "";
+    // newest release pod (a fresh deploy's Job is the current one after the pre-deploy GC)
+    pods.sort((a, b) => ((a.metadata?.creationTimestamp ?? "") < (b.metadata?.creationTimestamp ?? "") ? 1 : -1));
+    const pod = pods[0].metadata.name as string;
+    const lr = await this.call("GET", `/api/v1/namespaces/${namespace}/pods/${pod}/log?tailLines=${tailLines}`);
+    return lr.status < 300 ? lr.body : "";
+  }
+
+  async listAppProcesses(namespace: string, name: string): Promise<ProcessStatus[]> {
+    const sel = encodeURIComponent(`app.kubernetes.io/managed-by=drop,drop.dev/workload=${name}`);
+    const r = await this.call("GET", `/apis/apps/v1/namespaces/${namespace}/deployments?labelSelector=${sel}`);
+    if (r.status >= 300) return [];
+    const out: ProcessStatus[] = [];
+    for (const d of (JSON.parse(r.body).items ?? []) as any[]) {
+      const dn = d.metadata?.name as string;
+      // the web Deployment is named `<app>` and carries no drop.dev/process label.
+      const process = (d.metadata?.labels?.["drop.dev/process"] as string) ?? "web";
+      const web = process === "web" || dn === name;
+      const s = (d.status ?? {}) as { replicas?: number; readyReplicas?: number };
+      const { restarts, reason } = await this.podRestartsReason(namespace, dn, s.replicas ?? 0);
+      out.push({ name: dn, process, web, replicas: s.replicas ?? 0, ready: s.readyReplicas ?? 0, restarts, reason });
+    }
+    return out;
   }
 
   /** Rotate the managed DB's `app` password: run a one-shot (idempotent) Job that ALTERs the role

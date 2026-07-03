@@ -131,6 +131,18 @@ export class Client {
   info(name: string) {
     return this.req("GET", `/v1/sites/${name}`);
   }
+  /** Per-process status for an app (drop ps): one row per web/worker Deployment. */
+  processes(app: string) {
+    return this.req("GET", `/v1/apps/${app}/processes`);
+  }
+  /** Recent workload logs. `release` reads the latest release Job's pod instead of the app pods. */
+  logs(name: string, opts: { tail?: number; release?: boolean } = {}) {
+    const q = new URLSearchParams();
+    if (opts.tail) q.set("tail", String(opts.tail));
+    if (opts.release) q.set("release", "1");
+    const qs = q.toString();
+    return this.req("GET", `/v1/sites/${name}/logs${qs ? `?${qs}` : ""}`);
+  }
   list(org?: string) {
     return this.req("GET", `/v1/sites${org ? `?org=${encodeURIComponent(org)}` : ""}`);
   }

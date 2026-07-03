@@ -8,6 +8,7 @@ import { FakeKube } from "../kube/fake.ts";
 import { FakeSecretStore } from "../secrets/fake.ts";
 import { FakeImageStore } from "../images/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
+import { LockStore } from "../metastore/lock.ts";
 import { UserStore } from "../users/store.ts";
 import { OrgStore } from "../orgs/store.ts";
 import { AuditStore } from "../audit/store.ts";
@@ -44,7 +45,8 @@ async function mk(opts: { admins?: string[] } = {}) {
   const orgs = new OrgStore(db);
   const images = new FakeImageStore();
   const audit = new AuditStore(db);
-  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit }), meta, blob, kube, secrets, images, orgs, audit, db, users };
+  const locks = new LockStore(db);
+  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks }), meta, blob, kube, secrets, images, orgs, audit, locks, db, users };
 }
 
 const pub = (app: any, tok: string, name: string, body: Buffer) =>
@@ -337,6 +339,109 @@ test("deploy: app and site names don't collide (409 both ways)", async () => {
   expect((await call(app, "POST", "/v1/apps/shared", "alice", { image: "x:1" })).status).toBe(409);
   await call(app, "POST", "/v1/apps/onlyapp", "alice", { image: "x:1" }); // an app
   expect((await pub(app, "alice", "onlyapp", await tgz({ "index.html": "x" }))).status).toBe(409);
+  await db.destroy();
+});
+
+// ---- L1: release phase ----
+
+test("deploy: a FAILING release Job halts the deploy — no manifests applied, old version keeps serving", async () => {
+  const { app, kube, meta, db } = await mk();
+  kube.scriptedReleases = [{ ok: false, reason: "failed", logs: "ERROR: relation \"todos\" does not exist\nmigration aborted" }];
+  const res = await call(app, "POST", "/v1/apps/migrapp", "alice", { image: "todo:1", release: "npm run migrate" });
+  expect(res.status).toBe(422);
+  const j = await res.json();
+  expect(j.releaseLogs).toContain("relation \"todos\" does not exist"); // the tail of the Job's pod logs
+  // the release Job ran (after GC'ing priors) but the new Deployment was NEVER applied
+  expect(kube.releaseJobDeletes).toHaveLength(1);
+  expect(kube.releaseRuns).toHaveLength(1);
+  expect(kube.applies).toHaveLength(0);
+  // old state intact: the app is claimed but has no current version (nothing rolled out)
+  expect((await meta.getSitePlain("migrapp"))!.currentVersion).toBeNull();
+  await db.destroy();
+});
+
+test("deploy: a SUCCESSFUL release runs the Job then applies the new manifests + sets the pointer", async () => {
+  const { app, kube, meta, db } = await mk();
+  const res = await call(app, "POST", "/v1/apps/okapp", "alice", { image: "todo:1", release: "npm run migrate" });
+  expect(res.status).toBe(200);
+  expect(kube.releaseRuns).toHaveLength(1); // release ran
+  expect(kube.applies).toHaveLength(1); // then the rollout happened
+  const jobName = (kube.releaseRuns[0]!.job as any).metadata.name;
+  expect(jobName).toMatch(/^okapp-release-/); // deterministic, version-scoped
+  expect((await meta.getSitePlain("okapp"))!.currentVersion).not.toBeNull();
+  await db.destroy();
+});
+
+test("deploy --no-start SKIPS the release phase (configure secrets first, then start)", async () => {
+  const { app, kube, db } = await mk();
+  const res = await call(app, "POST", "/v1/apps/stillapp?start=false", "alice", { image: "todo:1", release: "npm run migrate" });
+  expect(res.status).toBe(200);
+  expect(kube.releaseRuns).toHaveLength(0); // no migration against an unconfigured, not-yet-started app
+  expect(kube.applies).toHaveLength(1);
+  await db.destroy();
+});
+
+test("deploy: a held deploy lock → 409 (two deploys can't interleave migrations)", async () => {
+  const { app, locks, db } = await mk();
+  await locks.acquire("deploy:lockapp", "another-deploy", 60_000); // simulate an in-flight deploy
+  const res = await call(app, "POST", "/v1/apps/lockapp", "alice", { image: "x:1" });
+  expect(res.status).toBe(409);
+  expect((await res.json()).error).toMatch(/already in progress/);
+  await db.destroy();
+});
+
+// ---- L1: processes ----
+
+test("deploy: worker-only app applies NO Service/HTTPScaledObject, just worker Deployments", async () => {
+  const { app, kube, db } = await mk();
+  const res = await call(app, "POST", "/v1/apps/batch", "alice", { image: "batch:1", processes: { worker: { command: "node w.js" } } });
+  expect(res.status).toBe(200);
+  const m = kube.applies[0]!.manifests;
+  expect(m.service).toBeUndefined();
+  expect(m.httpScaledObject).toBeUndefined();
+  expect(m.deployment).toBeUndefined();
+  expect(m.workers).toHaveLength(1);
+  expect(m.workers![0]!.name).toBe("batch-worker");
+  await db.destroy();
+});
+
+test("deploy: more than one web process → 400", async () => {
+  const { app, db } = await mk();
+  const res = await call(app, "POST", "/v1/apps/multi", "alice", {
+    image: "x:1",
+    processes: { web: { command: "a" }, worker: { web: true, command: "b" } },
+  });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error).toMatch(/at most one "web"/);
+  await db.destroy();
+});
+
+test("GET /v1/apps/:name/processes aggregates per-process rows (web + worker)", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/multi2", "alice", {
+    image: "x:1",
+    processes: { web: { command: "a" }, worker: { command: "b" } },
+  });
+  const res = await call(app, "GET", "/v1/apps/multi2/processes", "alice");
+  expect(res.status).toBe(200);
+  const j = await res.json();
+  const byProc = Object.fromEntries((j.processes as any[]).map((p) => [p.process, p]));
+  expect(byProc.web).toMatchObject({ name: "multi2", web: true });
+  expect(byProc.worker).toMatchObject({ name: "multi2-worker", web: false });
+  await db.destroy();
+});
+
+test("GET /v1/sites/:name/logs?release=1 reads the latest release Job's pod logs", async () => {
+  const { app, kube, meta, db } = await mk();
+  await call(app, "POST", "/v1/apps/logapp", "alice", { image: "x:1" });
+  const ns = (await meta.getSitePlain("logapp"))!.namespace;
+  kube.releaseLogs.set(`${ns}/logapp`, "running migrations...\ndone");
+  const rel = await call(app, "GET", "/v1/sites/logapp/logs?release=1", "alice");
+  expect((await rel.json()).logs).toBe("running migrations...\ndone");
+  // without ?release it reads the app pods (empty by default), not the release logs
+  kube.logsByName.set(`${ns}/logapp`, "app stdout");
+  const app_ = await call(app, "GET", "/v1/sites/logapp/logs", "alice");
+  expect((await app_.json()).logs).toBe("app stdout");
   await db.destroy();
 });
 

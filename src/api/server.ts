@@ -21,11 +21,12 @@ import { OrgStore, validateOrgSlug, type Org } from "../orgs/store.ts";
 import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
-import { sanitizeAppConfig, assertHttpOnly } from "../app-config.ts";
+import { sanitizeAppConfig, assertHttpOnly, assertProcesses } from "../app-config.ts";
 import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword, validateDbStorage } from "../db-config.ts";
-import { appManifests, tenantManifests } from "../kube/manifests.ts";
+import { appManifests, releaseJobManifest, tenantManifests } from "../kube/manifests.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
 import { PasswordSyncError, type KubeClient } from "../kube/types.ts";
+import { LockStore, LockHeldError } from "../metastore/lock.ts";
 import type { SecretStore } from "../secrets/types.ts";
 import type { ImageStore } from "../images/types.ts";
 import { fingerprint, validateSecretKey } from "../secrets/secrets.ts";
@@ -45,11 +46,18 @@ export interface Deps {
   images: ImageStore; // image-push backend (containerd-import locally, registry/ECR in prod)
   orgs: OrgStore; // organisations (resource grouping + org-level permissions)
   audit: AuditStore; // append-only trail of mutating/admin actions
+  locks?: LockStore; // lease-based advisory locks (serialize deploy/release per app); defaults over `db`
   now?: () => Date;
 }
 
+// Serialize a deploy's release-Job + rollout per app so two deploys can't interleave migrations. TTL
+// bounds a crashed holder; it must exceed the longest release timeout (15m cap) plus rollout slack.
+const DEPLOY_LOCK_TTL_MS = 20 * 60 * 1000;
+
 export function createApp(d: Deps): Hono<AuthEnv> {
   const now = d.now ?? (() => new Date());
+  const locks = d.locks ?? new LockStore(d.db); // serialize deploy/release per app
+
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
   const app = new Hono<AuthEnv>();
   // In-flight DB password rotations, keyed by name. Serializes per database so two concurrent
@@ -367,6 +375,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!appCfg) return c.json({ error: "app config requires an image" }, 400);
     try {
       assertHttpOnly(appCfg); // v1: one HTTP service (443-only)
+      assertProcesses(appCfg); // at most one web process
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
@@ -403,33 +412,62 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
     const verId = newVersionId(now());
     const ns = site.namespace; // per-owner tenant namespace (isolation)
-    await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs })); // namespace + NetworkPolicy + quota + LimitRange
-    const manifests = appManifests(appCfg, {
-      name,
-      namespace: ns,
-      host: `${name}.${d.cfg.baseDomain}`,
-      sandbox: !appCfg.trusted,
-      imagePullSecret: d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined,
-    });
-    await d.kube.applyApp(ns, name, manifests);
-    // Reconcile the secret-injection wiring (no-op for kube; (re)writes the ESO ExternalSecret for
-    // external backends) using the current key registry.
-    const secretKeys = (await d.meta.listSecretKeys(name)).map((k) => k.key);
-    await d.secrets.ensureBinding({ owner: site.owner, app: name, namespace: ns }, secretKeys);
-    // Don't roll out a running pod until the operator opts in. A fresh app often needs its
-    // secrets/config set BEFORE first boot (e.g. a DB password) or it crash-loops — `--no-start`
-    // (?start=false) deploys it STOPPED so you can configure it, then `drop start` gives it a
-    // healthy first boot. A redeploy of an already-stopped app likewise stays down until `drop start`.
-    let stopped = site.runtimeState === "stopped";
-    if (c.req.query("start") === "false" && !stopped) {
-      await d.meta.setRuntimeState(name, "stopped");
-      stopped = true;
-    }
-    if (stopped) await d.kube.stopApp(ns, name);
+    const kube = d.kube;
+    const theSite = site;
+    await kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs })); // namespace + NetworkPolicy + quota + LimitRange
+    const sandbox = !appCfg.trusted;
+    const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
+    const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret });
+    // A stopped deploy (--no-start / already-stopped) rolls out nothing yet, so it also SKIPS the
+    // release phase — the point of --no-start is to configure secrets first, and the release command
+    // (which needs those secrets/the DB) would otherwise fail against an unconfigured app.
+    const willStop = theSite.runtimeState === "stopped" || c.req.query("start") === "false";
 
-    await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
-    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
-    return c.json({ url: siteUrl(name), name, version: verId, image: appCfg.image, started: !stopped });
+    // Serialize the release + rollout per app so two concurrent deploys can't interleave migrations.
+    // A held lock → 409 (another deploy is mid-flight). Everything cluster-mutating lives inside.
+    let result: { halt: true; reason: string; logs: string } | { halt: false; stopped: boolean };
+    try {
+      result = await locks.withLock(`deploy:${name}`, DEPLOY_LOCK_TTL_MS, async () => {
+        // Release phase: run a Job (same image/env/bindings/secrets) BEFORE applying the new
+        // manifests. On failure the deploy HALTS — the old Deployment/HSO is untouched, so the old
+        // version keeps serving. GC prior release Jobs first; a deterministic version-named Job
+        // stays briefly for `drop logs --release`.
+        if (appCfg.release && !willStop) {
+          await kube.deleteReleaseJobs(ns, name);
+          const job = releaseJobManifest(appCfg, { name, namespace: ns, host: "", versionId: verId, sandbox, imagePullSecret });
+          const rr = await kube.runReleaseJob(ns, name, job, (appCfg.release.timeout ?? 300) * 1000);
+          if (!rr.ok) return { halt: true as const, reason: rr.reason, logs: rr.logs };
+        }
+        await kube.applyApp(ns, name, manifests);
+        // Reconcile the secret-injection wiring (no-op for kube; (re)writes the ESO ExternalSecret
+        // for external backends) using the current key registry.
+        const secretKeys = (await d.meta.listSecretKeys(name)).map((k) => k.key);
+        await d.secrets.ensureBinding({ owner: theSite.owner, app: name, namespace: ns }, secretKeys);
+        // Don't roll out a running pod until the operator opts in. A fresh app often needs its
+        // secrets/config set BEFORE first boot (e.g. a DB password) or it crash-loops — `--no-start`
+        // (?start=false) deploys it STOPPED so you can configure it, then `drop start` gives it a
+        // healthy first boot. A redeploy of an already-stopped app likewise stays down until start.
+        let stopped = theSite.runtimeState === "stopped";
+        if (c.req.query("start") === "false" && !stopped) {
+          await d.meta.setRuntimeState(name, "stopped");
+          stopped = true;
+        }
+        if (stopped) await kube.stopApp(ns, name);
+
+        await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
+        await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
+        return { halt: false as const, stopped };
+      });
+    } catch (e) {
+      if (e instanceof LockHeldError) return c.json({ error: `a deploy is already in progress for ${name}` }, 409);
+      throw e;
+    }
+    if (result.halt) {
+      await audit({ actor: email, action: "app.release.failed", target: name, targetType: "app", orgId: theSite.orgId, detail: { reason: result.reason, version: verId } });
+      // The old version keeps serving; return the release logs so the failure is diagnosable inline.
+      return c.json({ error: `release command failed (${result.reason}) — the previous version keeps serving`, releaseLogs: (result.logs ?? "").slice(-4000) }, 422);
+    }
+    return c.json({ url: siteUrl(name), name, version: verId, image: appCfg.image, started: !result.stopped });
   });
 
   // ---- image push: CLI builds locally + streams a `docker save` tarball; we make it pullable by
@@ -903,13 +941,36 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!can(await actorFor(email, site), "logs")) return c.json({ error: "not permitted" }, 403);
     if (!d.kube || site.type === "site") return c.json({ logs: "" }); // static sites have no pods
     const tail = Math.min(Number(c.req.query("tail") ?? "100") || 100, 1000);
+    // ?release=1 resolves the LATEST release Job's pod instead of the app pods (drop logs --release).
+    const wantRelease = c.req.query("release") === "1" || c.req.query("release") === "true";
     let logs = "";
     try {
-      logs = await d.kube.getWorkloadLogs(site.namespace, name, tail);
+      logs = wantRelease ? await d.kube.getReleaseLogs(site.namespace, name, tail) : await d.kube.getWorkloadLogs(site.namespace, name, tail);
     } catch {
       /* best-effort — never fail the call on a transient cluster error */
     }
     return c.json({ logs });
+  });
+
+  // ---- per-process status (drop ps): aggregate the web + worker Deployments for an app ----
+  app.get("/v1/apps/:name/processes", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (!can(await actorFor(email, site), "read")) return c.json({ error: "not permitted" }, 403);
+    if (site.type !== "app") return c.json({ error: `${name} is a ${site.type}, not an app` }, 409);
+    let processes: Awaited<ReturnType<KubeClient["listAppProcesses"]>> = [];
+    if (d.kube) {
+      try {
+        processes = await d.kube.listAppProcesses(site.namespace, name);
+      } catch {
+        /* best-effort — a cluster read failure degrades to an empty list, never a 500 */
+      }
+      // A stopped app is pinned to 0 in the cluster; surface that on the web process like the site GET.
+      if (site.runtimeState === "stopped") processes = processes.map((p) => (p.web ? { ...p, reason: "Stopped" } : p));
+    }
+    return c.json({ name, runtimeState: site.runtimeState, processes });
   });
 
   // ---- set visibility (owner/admin) ----

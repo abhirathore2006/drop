@@ -203,6 +203,22 @@ export function buildMcp(): McpServer {
     async ({ app, key }) => run(() => getClient().then((c) => c.deleteSecret(app, key))),
   );
   server.registerTool(
+    "app_processes",
+    {
+      description: "Show an app's processes (web + workers) with ready/replicas, restart count, and state (drop ps).",
+      inputSchema: { app: z.string() },
+    },
+    async ({ app }) => run(() => getClient().then((c) => c.processes(app))),
+  );
+  server.registerTool(
+    "app_logs",
+    {
+      description: "Recent logs for an app/database. Set release=true to read the latest release (migration) Job's pod logs.",
+      inputSchema: { name: z.string(), tail: z.number().optional(), release: z.boolean().optional() },
+    },
+    async ({ name, tail, release }) => run(() => getClient().then((c) => c.logs(name, { tail, release }))),
+  );
+  server.registerTool(
     "app_restart",
     { description: "Roll an app's pods (applies newly-set secrets/config).", inputSchema: { app: z.string() } },
     async ({ app }) => run(() => getClient().then((c) => c.restartApp(app))),

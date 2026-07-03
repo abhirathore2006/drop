@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
-import { appManifests, tenantManifests } from "./manifests.ts";
+import { appManifests, releaseJobManifest, tenantManifests } from "./manifests.ts";
 import type { AppConfig } from "../app-config.ts";
+import { sanitizeAppConfig } from "../app-config.ts";
 
 const base: AppConfig = { image: "ecr/billing:v1", services: [{ internalPort: 8080, protocol: "http" }] };
 
@@ -175,4 +176,112 @@ test("appManifests: two bound dbs → envFrom+CA per db; verify-full once; PGSSL
   expect(ctr.volumeMounts.map((v: any) => v.mountPath)).toEqual(["/var/run/drop/db-ca/db1", "/var/run/drop/db-ca/db2"]);
   expect(ctr.env.filter((e: any) => e.name === "PGSSLMODE")).toHaveLength(1); // single-connection model
   expect(ctr.env.find((e: any) => e.name === "PGSSLROOTCERT").value).toBe("/var/run/drop/db-ca/db1/ca.crt");
+});
+
+// ---- L1: healthcheck probes ----
+
+test("appManifests: absent healthcheck → default TCP-socket readiness probe on the container port, no liveness", () => {
+  const ctr = (appManifests(base, { name: "x", namespace: "ns", host: "h" }).deployment as any).spec.template.spec.containers[0];
+  expect(ctr.readinessProbe).toEqual({ tcpSocket: { port: 8080 }, periodSeconds: 10, timeoutSeconds: 2 });
+  expect(ctr.livenessProbe).toBeUndefined(); // no honest liveness signal without a healthcheck
+});
+
+test("appManifests: healthcheck → HTTP readiness + liveness on the same endpoint with parsed bounds", () => {
+  const app = sanitizeAppConfig({ image: "x:1", services: [{ internal_port: 8080 }], healthcheck: { path: "/healthz", interval: "10s", timeout: "2s", grace: "15s" } })!;
+  const ctr = (appManifests(app, { name: "x", namespace: "ns", host: "h" }).deployment as any).spec.template.spec.containers[0];
+  expect(ctr.readinessProbe).toEqual({ httpGet: { path: "/healthz", port: 8080 }, periodSeconds: 10, timeoutSeconds: 2, initialDelaySeconds: 15 });
+  expect(ctr.livenessProbe).toEqual({ httpGet: { path: "/healthz", port: 8080 }, periodSeconds: 10, timeoutSeconds: 2, initialDelaySeconds: 15, failureThreshold: 3 });
+});
+
+// ---- L1: release Job ----
+
+test("releaseJobManifest: shell-form command, backoffLimit 0, Never, deterministic name, envFrom/volumes parity with the app container", () => {
+  const app = sanitizeAppConfig({
+    image: "todo:1",
+    env: { LOG_LEVEL: "info" },
+    uses: [{ database: "tododb" }],
+    release: "npm run migrate",
+  })!;
+  const job = releaseJobManifest(app, { name: "todo", namespace: "drop-acme", host: "", versionId: "v_1" }) as any;
+  expect(job.kind).toBe("Job");
+  expect(job.metadata.name).toBe("todo-release-v_1"); // deterministic, version-scoped
+  expect(job.metadata.labels).toMatchObject({ "drop.dev/workload": "todo", "drop.dev/job": "release" });
+  expect(job.spec.backoffLimit).toBe(0);
+  expect(job.spec.template.spec.restartPolicy).toBe("Never");
+  expect(job.spec.template.metadata.labels["app.kubernetes.io/name"]).toBe("todo-release-v_1"); // log lookup
+  const ctr = job.spec.template.spec.containers[0];
+  expect(ctr.command).toEqual(["/bin/sh", "-c", "npm run migrate"]); // string → shell-form
+  expect(ctr.ports).toBeUndefined(); // a Job isn't routed
+  // envFrom + DB env + CA volumes are IDENTICAL to the app container (same secrets/bindings)
+  const appCtr = (appManifests(app, { name: "todo", namespace: "drop-acme", host: "h" }).deployment as any).spec.template.spec.containers[0];
+  expect(ctr.envFrom).toEqual(appCtr.envFrom);
+  expect(ctr.env).toEqual(appCtr.env);
+  expect(job.spec.template.spec.volumes).toEqual([
+    { name: "db-ca-tododb", secret: { secretName: "tododb-ca", items: [{ key: "ca.crt", path: "ca.crt" }] } },
+  ]);
+});
+
+// ---- L1: processes (web + workers) ----
+
+test("appManifests: web + worker → web keeps Service/HSO; worker is a plain Deployment (no Service/HSO), min≥1", () => {
+  const app = sanitizeAppConfig({
+    image: "app:1",
+    scale: { min: 0, max: 3 },
+    processes: {
+      web: { command: "node server.js" },
+      worker: { command: "node worker.js", scale: { min: 0, max: 2 }, resources: { cpu: "250m" } },
+    },
+  })!;
+  const m = appManifests(app, { name: "app", namespace: "ns", host: "app.example.com" });
+  // web: today's treatment
+  expect((m.deployment as any).metadata.name).toBe("app");
+  expect((m.deployment as any).spec.template.spec.containers[0].command).toEqual(["/bin/sh", "-c", "node server.js"]);
+  expect((m.httpScaledObject as any).spec.replicas).toEqual({ min: 0, max: 3 });
+  expect(m.service).toBeDefined();
+  // worker: plain Deployment named <app>-<process>, static replicas = min (0 clamped to 1), no Service/HSO
+  expect(m.workers).toHaveLength(1);
+  const w = m.workers![0]!;
+  expect(w.name).toBe("app-worker");
+  expect((w.deployment as any).metadata.name).toBe("app-worker");
+  expect((w.deployment as any).spec.replicas).toBe(1); // min≥1 enforced (no wake source for a worker)
+  expect((w.deployment as any).metadata.labels["drop.dev/process"]).toBe("worker");
+  expect((w.deployment as any).spec.template.spec.containers[0].command).toEqual(["/bin/sh", "-c", "node worker.js"]);
+  expect((w.deployment as any).spec.template.spec.containers[0].resources.limits).toEqual({ cpu: "250m" }); // per-process override
+  expect((w.deployment as any).spec.template.spec.containers[0].ports).toBeUndefined(); // workers aren't routed
+  // workers get no probes (not a traffic target)
+  expect((w.deployment as any).spec.template.spec.containers[0].readinessProbe).toBeUndefined();
+});
+
+test("appManifests: worker-only app has NO web Deployment / Service / HSO", () => {
+  const app = sanitizeAppConfig({ image: "batch:1", processes: { worker: { command: "node w.js" } } })!;
+  const m = appManifests(app, { name: "batch", namespace: "ns", host: "h" });
+  expect(m.deployment).toBeUndefined();
+  expect(m.service).toBeUndefined();
+  expect(m.httpScaledObject).toBeUndefined();
+  expect(m.ingressPolicy).toBeUndefined();
+  expect(m.workers).toHaveLength(1);
+  expect(m.workers![0]!.name).toBe("batch-worker");
+});
+
+test("appManifests: absent processes → unchanged single-process shape (web only, no workers)", () => {
+  const m = appManifests(base, { name: "x", namespace: "ns", host: "h" });
+  expect(m.deployment).toBeDefined();
+  expect(m.service).toBeDefined();
+  expect(m.httpScaledObject).toBeDefined();
+  expect(m.workers).toBeUndefined(); // zero migration: no worker set for a classic app
+  expect((m.deployment as any).spec.template.spec.containers[0].command).toBeUndefined(); // image entrypoint
+});
+
+test("appManifests: shared config Secret + DB binding reach every process (web + worker)", () => {
+  const app = sanitizeAppConfig({
+    image: "app:1",
+    env: { LOG_LEVEL: "info" },
+    uses: [{ database: "tododb" }],
+    processes: { web: {}, worker: { command: "w" } },
+  })!;
+  const m = appManifests(app, { name: "app", namespace: "ns", host: "h" });
+  const webEnvFrom = (m.deployment as any).spec.template.spec.containers[0].envFrom;
+  const workerEnvFrom = (m.workers![0]!.deployment as any).spec.template.spec.containers[0].envFrom;
+  expect(workerEnvFrom).toEqual(webEnvFrom); // identical secrets/bindings across processes
+  expect((m.secret as any).stringData.LOG_LEVEL).toBe("info"); // one shared <name>-env Secret
 });

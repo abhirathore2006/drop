@@ -313,6 +313,34 @@ export function buildProgram(): Command {
     .action(async (appName: string) => show(await (await client()).startApp(appName)));
 
   program
+    .command("ps <app>")
+    .description("Show an app's processes (web + workers): ready/replicas, restarts, state")
+    .action(async (appName: string) => {
+      const res = (await (await client()).processes(appName)) as {
+        processes: { name: string; process: string; web: boolean; ready: number; replicas: number; restarts: number; reason: string }[];
+      };
+      if (!res.processes.length) {
+        console.log("  no processes running (app not deployed, or compute is off)");
+        return;
+      }
+      console.log("  PROCESS   READY   RESTARTS   STATE");
+      for (const p of res.processes) {
+        const role = p.web ? "web" : p.process;
+        console.log(`  ${role.padEnd(9)} ${`${p.ready}/${p.replicas}`.padEnd(7)} ${String(p.restarts).padEnd(10)} ${p.reason}`);
+      }
+    });
+
+  program
+    .command("logs <name>")
+    .description("Show recent logs for an app/database (--release reads the latest release Job's pod)")
+    .option("--tail <n>", "number of lines (default 100, max 1000)", (v) => parseInt(v, 10))
+    .option("--release", "read the latest release (migration) Job's logs instead of the app pods")
+    .action(async (name: string, opts: { tail?: number; release?: boolean }) => {
+      const res = (await (await client()).logs(name, { tail: opts.tail, release: opts.release })) as { logs: string };
+      process.stdout.write(res.logs.endsWith("\n") || res.logs === "" ? res.logs : res.logs + "\n");
+    });
+
+  program
     .command("rollback <name>")
     .description("Roll back to the previous (or --to) version")
     .option("--to <version>", "specific version id")

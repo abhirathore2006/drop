@@ -1,4 +1,13 @@
-import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus, type TenantUsage, type BackupInfo } from "./types.ts";
+import {
+  PasswordSyncError,
+  type KubeClient,
+  type AppStatus,
+  type DatabaseStatus,
+  type TenantUsage,
+  type BackupInfo,
+  type ProcessStatus,
+  type ReleaseResult,
+} from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 
@@ -94,6 +103,38 @@ export class FakeKube implements KubeClient {
   readonly logsByName = new Map<string, string>();
   async getWorkloadLogs(namespace: string, name: string): Promise<string> {
     return this.logsByName.get(this.key(namespace, name)) ?? "";
+  }
+
+  // Release-Job doubles. Tests SCRIPT the next release outcome by pushing onto `scriptedReleases`
+  // (FIFO); an unscripted run succeeds with whatever `releaseLogs` holds. Every run/GC is recorded.
+  scriptedReleases: ReleaseResult[] = [];
+  readonly releaseLogs = new Map<string, string>();
+  readonly releaseRuns: { namespace: string; name: string; job: Record<string, unknown> }[] = [];
+  readonly releaseJobDeletes: { namespace: string; name: string }[] = [];
+  async runReleaseJob(namespace: string, name: string, job: Record<string, unknown>, _timeoutMs: number): Promise<ReleaseResult> {
+    this.releaseRuns.push({ namespace, name, job });
+    return this.scriptedReleases.shift() ?? { ok: true, reason: "succeeded", logs: this.releaseLogs.get(this.key(namespace, name)) ?? "" };
+  }
+  async deleteReleaseJobs(namespace: string, name: string): Promise<void> {
+    this.releaseJobDeletes.push({ namespace, name });
+  }
+  async getReleaseLogs(namespace: string, name: string): Promise<string> {
+    return this.releaseLogs.get(this.key(namespace, name)) ?? "";
+  }
+
+  // Per-process status, derived from the applied manifests: the web Deployment (if any) + each
+  // worker. Honors statusOverride keyed by the DEPLOYMENT name, else a healthy default.
+  async listAppProcesses(namespace: string, name: string): Promise<ProcessStatus[]> {
+    const m = this.apps.get(this.key(namespace, name));
+    if (!m) return [];
+    const row = (dn: string, process: string, web: boolean): ProcessStatus => {
+      const ov = this.statusOverride.get(this.key(namespace, dn)) as AppStatus | undefined;
+      return { ...(ov ?? { replicas: 1, ready: 1, restarts: 0, reason: "Running" }), name: dn, process, web };
+    };
+    const out: ProcessStatus[] = [];
+    if (m.deployment) out.push(row(name, "web", true));
+    for (const w of m.workers ?? []) out.push(row(w.name, w.process, false));
+    return out;
   }
 
   readonly restarts: { namespace: string; name: string }[] = [];

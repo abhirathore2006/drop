@@ -188,6 +188,22 @@ const m0005_audit_log: Migration = {
   },
 };
 
+// Lease-based advisory locks (src/metastore/lock.ts): one row per key, stolen when its lease expires.
+// Serializes deploy/release-Job runs per app (`deploy:<app>`) and, later, stack `up` (`stack:<id>`).
+const m0006_locks: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("locks")
+      .addColumn("key", "text", (c) => c.primaryKey())
+      .addColumn("holder", "text", (c) => c.notNull())
+      .addColumn("expires_at", "timestamptz", (c) => c.notNull())
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -197,6 +213,7 @@ export class InlineMigrations implements MigrationProvider {
       "0003_app_secrets": m0003_app_secrets,
       "0004_organisations": m0004_organisations,
       "0005_audit_log": m0005_audit_log,
+      "0006_locks": m0006_locks,
     };
   }
 }

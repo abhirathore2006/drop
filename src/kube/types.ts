@@ -27,6 +27,16 @@ export interface KubeClient {
   getDatabaseStatus(namespace: string, name: string): Promise<DatabaseStatus | null>;
   /** Recent log lines from the workload's pods (newest pod), for crash diagnostics. "" if none. */
   getWorkloadLogs(namespace: string, name: string, tailLines?: number): Promise<string>;
+  /** Run a release Job (priors already GC'd by deleteReleaseJobs) and wait for it to terminally
+   *  succeed or fail/timeout, bounded by `timeoutMs`. Returns the outcome + the tail of the release
+   *  pod's logs. Never THROWS on Job failure — the deploy path halts on `ok:false` and surfaces logs. */
+  runReleaseJob(namespace: string, name: string, job: Record<string, unknown>, timeoutMs: number): Promise<ReleaseResult>;
+  /** Delete all release Jobs for an app (GC prior runs before a deploy; also on app delete). Safe if absent. */
+  deleteReleaseJobs(namespace: string, name: string): Promise<void>;
+  /** Latest release Job pod logs for an app (`drop logs --release`). "" if none. */
+  getReleaseLogs(namespace: string, name: string, tailLines?: number): Promise<string>;
+  /** Per-process live status: one row per process Deployment (web + workers), for `drop ps`. Empty if absent. */
+  listAppProcesses(namespace: string, name: string): Promise<ProcessStatus[]>;
   /** Roll the app's pods (bump a pod-template annotation) — picks up new env/secrets. */
   restartApp(namespace: string, name: string, restartedAt: string): Promise<void>;
   /** Take the app TRULY offline: pause KEDA (pin to 0, ignore traffic) + scale the Deployment to 0. */
@@ -72,6 +82,20 @@ export interface AppStatus {
   ready: number; // ready replicas
   restarts: number; // max container restarts across the app's pods (crash-loop signal)
   reason: string; // "Running" | a waiting reason like "CrashLoopBackOff" | "Pending" | "NoPods"
+}
+
+/** Live status of ONE process Deployment (web or a worker) — an AppStatus plus its identity. */
+export interface ProcessStatus extends AppStatus {
+  name: string; // Deployment name: `<app>` for web, `<app>-<process>` for a worker
+  process: string; // the process key ("web" for the implicit/web process)
+  web: boolean; // gets the Service + HTTPScaledObject
+}
+
+/** Outcome of a release Job run (see runReleaseJob). `logs` is the tail of the release pod's output. */
+export interface ReleaseResult {
+  ok: boolean; // the Job succeeded
+  reason: "succeeded" | "failed" | "timeout";
+  logs: string;
 }
 export interface DatabaseStatus {
   phase: string; // CNPG .status.phase, e.g. "Cluster in healthy state"

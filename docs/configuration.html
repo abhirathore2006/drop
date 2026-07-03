@@ -23,6 +23,7 @@
       <div class="group">Guides</div>
       <a href="getting-started.html">Getting started</a>
       <a href="configuration.html" class="active">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
       <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
       <a href="roles-visibility.html">Roles &amp; Visibility</a>
       <div class="group">Reference</div>
@@ -171,6 +172,9 @@
 <tr><td><code>resources</code></td><td>object</td><td><code>{ cpu, memory }</code> container limits (k8s quantities, e.g. <code>"500m"</code>, <code>"512Mi"</code>). Default <code>{ cpu: "0.5", memory: "512Mi" }</code> — never unbounded.</td></tr>
 <tr><td><code>env</code></td><td>object</td><td>String→string environment variables. <strong>Non-secret only</strong> — put credentials in write-only secrets (<code>drop secrets set</code>), which are injected as env at runtime.</td></tr>
 <tr><td><code>uses</code></td><td>array</td><td><code>{ database }</code> entries binding managed databases <strong>in the same org</strong> (see <a href="#uses"><code>uses:</code></a>). Each injects the DB's <code>&lt;db&gt;-app</code> Secret (<code>PG*</code> env incl. password), mounts the cluster CA, and sets <code>PGSSLMODE=verify-full</code> — no password ever copied into the app. A missing or cross-org database is rejected at deploy with a <code>400</code>.</td></tr>
+<tr><td><code>healthcheck</code></td><td>object</td><td><code>{ path, interval?, timeout?, grace? }</code> → readiness + liveness probes on the web container (readiness gates traffic; liveness restarts a wedged pod). Absent → a TCP-socket readiness probe on the container port. See <a href="processes.html#healthcheck">Processes, health &amp; releases</a>.</td></tr>
+<tr><td><code>release</code></td><td>string / object</td><td><code>"npm run migrate"</code> or <code>{ command, timeout? }</code> → a migration Job run <strong>before</strong> the new version rolls out; a failure <strong>halts the deploy</strong> (the old version keeps serving). See <a href="processes.html#release">Processes, health &amp; releases</a>.</td></tr>
+<tr><td><code>processes</code></td><td>object</td><td>A map of named processes replacing the implicit single process — one <code>web</code> (Service + HTTPScaledObject) plus plain-Deployment <code>worker</code>s. Absent → today's single-process app. See <a href="processes.html#processes">Processes, health &amp; releases</a>.</td></tr>
 <tr><td><code>trusted</code></td><td>boolean</td><td>Default <code>true</code>. Set <code>false</code> to run the pod under the gVisor <code>RuntimeClass</code> (stronger isolation for untrusted images).</td></tr>
 </tbody>
 </table>

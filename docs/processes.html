@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Processes, health &amp; releases · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html" class="active">Processes, health &amp; releases</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Processes, health &amp; releases</h1>
+<p class="lead">Three additions to the <a href="configuration.html#app"><code>app:</code></a> section of <code>drop.yaml</code>, designed together: <code>healthcheck:</code> (readiness/liveness probes), <code>release:</code> (a migration Job that gates the rollout), and <code>processes:</code> (a web process plus long-running workers). All three are optional — an app that declares none behaves exactly as before.</p>
+
+<h2>How they fit together</h2>
+<p>At <code>drop deploy</code> the API, in order: runs the <code>release</code> Job (if any) and <strong>halts on failure</strong>, then applies the Deployment(s) with the <code>healthcheck</code> probes attached to the web container, wiring one Service + KEDA <code>HTTPScaledObject</code> for the <code>web</code> process and a plain Deployment for each worker. The release + rollout are serialized per app under an advisory lock, so two overlapping deploys can't interleave migrations — the second returns <code>409</code>.</p>
+
+<h3 id="healthcheck">healthcheck:</h3>
+<p>Probes on the <strong>web</strong> container. The <strong>readiness</strong> probe gates traffic (Kubernetes won't route to a pod until it passes, so rolling deploys are actually zero-downtime); the <strong>liveness</strong> probe restarts a wedged pod. Both hit the same endpoint by default.</p>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">image</span>: <span class="tok-s">myapi:1</span>
+  <span class="tok-k">healthcheck</span>:
+    <span class="tok-k">path</span>: <span class="tok-s">/healthz</span>                  <span class="tok-c"># required; must start with "/"</span>
+    <span class="tok-k">interval</span>: <span class="tok-s">10s</span>                    <span class="tok-c"># periodSeconds; 1–300s, default 10s</span>
+    <span class="tok-k">timeout</span>: <span class="tok-s">2s</span>                      <span class="tok-c"># timeoutSeconds; 1–60s, default 2s</span>
+    <span class="tok-k">grace</span>: <span class="tok-s">15s</span>                       <span class="tok-c"># initialDelaySeconds; 0–600s, default 15s</span></code></pre>
+<table class="tbl">
+<thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>path</code></td><td>string</td><td><strong>Required.</strong> HTTP path probed on the container port. Must start with <code>/</code>; otherwise the whole block is ignored and the default probe (below) applies.</td></tr>
+<tr><td><code>interval</code></td><td>duration</td><td>How often to probe (<code>periodSeconds</code>). <code>1–300s</code>, default <code>10s</code>. Junk values fall back to the default.</td></tr>
+<tr><td><code>timeout</code></td><td>duration</td><td>Per-probe timeout (<code>timeoutSeconds</code>). <code>1–60s</code>, default <code>2s</code>.</td></tr>
+<tr><td><code>grace</code></td><td>duration</td><td>Startup grace before the first probe (<code>initialDelaySeconds</code>). <code>0–600s</code>, default <code>15s</code>.</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="lbl">Note</span><p>With <strong>no</strong> <code>healthcheck</code>, Drop still attaches a <strong>TCP-socket readiness probe</strong> on the container port — better than nothing, and honest about it: a listening socket isn't proof the app is healthy, but it stops traffic reaching a pod that hasn't bound its port yet. Add an HTTP <code>healthcheck</code> for a real readiness signal and for liveness restarts. Probes apply to the <code>web</code> process only.</p></div>
+
+<h3 id="release">release:</h3>
+<p>A one-shot <strong>Job</strong> run <strong>before</strong> the new version rolls out — the home for database migrations. It runs with the <strong>same image, env, secrets, and <a href="configuration.html#uses"><code>uses</code> bindings</a></strong> as the app (so <code>PG*</code> and the write-only <code>&lt;app&gt;-secret</code> are all present), <code>backoffLimit: 0</code> / <code>restartPolicy: Never</code> — one shot, never a silent retry of a migration.</p>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">image</span>: <span class="tok-s">myapi:1</span>
+  <span class="tok-k">release</span>: <span class="tok-s">"npm run migrate"</span>            <span class="tok-c"># shorthand; runs as ["/bin/sh","-c", …]</span>
+  <span class="tok-c"># — or the object form —</span>
+  <span class="tok-k">release</span>:
+    <span class="tok-k">command</span>: <span class="tok-s">"npm run migrate"</span>
+    <span class="tok-k">timeout</span>: <span class="tok-s">5m</span>                      <span class="tok-c"># wait bound; default 5m, hard cap 15m</span></code></pre>
+<div class="note warn"><span class="lbl">Halt on failure</span><p>If the release Job fails <strong>or times out</strong>, the deploy <strong>halts</strong>: the new Deployment/HTTPScaledObject is <strong>never applied</strong>, so <strong>the old version keeps serving</strong>. The <code>drop deploy</code> call returns an error whose body includes the tail of the Job pod's logs, and the failure is recorded in the audit trail. Fix the migration and redeploy. Read the full logs any time with <code>drop logs &lt;app&gt; --release</code>.</p></div>
+<ul>
+  <li>The Job is named <code>&lt;app&gt;-release-&lt;version&gt;</code> and is kept briefly after it finishes so you can retrieve its logs; prior release Jobs are garbage-collected on the next deploy (and on app delete).</li>
+  <li>A <code>--no-start</code> deploy <strong>skips</strong> the release phase — the point of <code>--no-start</code> is to set secrets first, and a migration would fail against a not-yet-configured app. Set secrets, then <code>drop start</code>, then redeploy to run the release.</li>
+  <li>Two overlapping deploys can't run migrations at once: the release + rollout hold a per-app advisory lock, so a concurrent <code>drop deploy</code> returns <code>409</code>.</li>
+</ul>
+
+<h3 id="processes">processes:</h3>
+<p>Replace the implicit single process with a named map. The <code>web</code> process gets today's treatment — a Service + KEDA <code>HTTPScaledObject</code> on your app's host; every other key is a <strong>worker</strong>: a plain Deployment with no Service and no HTTP scaling. All processes share the same image, env, secrets, and <code>uses</code> bindings; per-process <code>resources</code> override the app-level default.</p>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">image</span>: <span class="tok-s">myapp:1</span>
+  <span class="tok-k">processes</span>:
+    <span class="tok-k">web</span>:    { <span class="tok-k">command</span>: <span class="tok-s">"node server.js"</span> }                 <span class="tok-c"># Service + HTTPScaledObject</span>
+    <span class="tok-k">worker</span>: { <span class="tok-k">command</span>: <span class="tok-s">"node worker.js"</span>,
+              <span class="tok-k">scale</span>: { <span class="tok-k">min</span>: 1, <span class="tok-k">max</span>: 1 },
+              <span class="tok-k">resources</span>: { <span class="tok-k">cpu</span>: <span class="tok-s">"250m"</span>, <span class="tok-k">memory</span>: <span class="tok-s">"256Mi"</span> } }  <span class="tok-c"># plain Deployment</span></code></pre>
+<table class="tbl">
+<thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>command</code></td><td>string / array</td><td>What the process runs. A <strong>string</strong> runs in shell form (<code>["/bin/sh","-c", …]</code>); an <strong>array</strong> is passed through unchanged (exec form). Omit to use the image's own entrypoint.</td></tr>
+<tr><td><code>scale</code></td><td>object</td><td><code>{ min, max }</code>. For <code>web</code>: KEDA replica bounds (as <a href="configuration.html#app"><code>app.scale</code></a>). For a <strong>worker</strong>: static replicas — <code>min</code> is enforced <code>≥ 1</code> (see note) and is the running count today.</td></tr>
+<tr><td><code>resources</code></td><td>object</td><td><code>{ cpu, memory }</code> limits for this process, overriding the app-level default.</td></tr>
+<tr><td><code>scale_on</code></td><td>object</td><td><strong>Reserved.</strong> <code>{ queue, target }</code> is accepted and round-tripped for forward compatibility but <strong>ignored today</strong>; queue-scaled workers (KEDA on a Valkey list) land in a later slice.</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="lbl">Rules</span><ul>
+  <li><strong>At most one <code>web</code>.</strong> Zero is fine — a <strong>worker-only app</strong> is legal (no Service, no host, just workers). More than one web process is rejected at deploy with a <code>400</code>.</li>
+  <li><strong>Workers are <code>min ≥ 1</code>.</strong> A scale-to-zero worker has no wake source (nothing routes traffic to it), so it would never run; Drop enforces at least one replica. A <code>web</code> process may still scale to zero.</li>
+  <li><strong>Zero migration.</strong> Omit <code>processes:</code> entirely and the app is exactly one web process — identical to before.</li>
+</ul></div>
+
+<h2>Observing it</h2>
+<p><code>drop ps &lt;app&gt;</code> shows one row per process — its <code>ready/replicas</code>, restart count, and state — aggregated across the web + worker Deployments:</p>
+<pre><code><span class="tok-c">$ drop ps myapp</span>
+  PROCESS   READY   RESTARTS   STATE
+  web       2/2     0          Running
+  worker    1/1     0          Running</code></pre>
+<p><code>drop logs &lt;app&gt; --release</code> reads the latest release Job's pod logs (the migration output) instead of the app pods — the same one-shot logs endpoint, pointed at the release Job:</p>
+<pre><code><span class="tok-c">$ drop logs myapp --release</span>
+  running migrations…
+  applied 0003_add_index
+  done</code></pre>
+<div class="note tip"><span class="lbl">Tip</span><p>Each process counts as pods against your tenant quota, same as any workload. A worker that's idle most of the time is still an always-on replica (<code>min ≥ 1</code>) — size it accordingly, or wait for queue-scaled workers.</p></div>
+
+<div class="next">
+  <a href="configuration.html"><div class="d">← Back</div><div class="t">Configuration (drop.yaml)</div></a>
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

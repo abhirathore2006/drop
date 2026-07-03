@@ -2,7 +2,7 @@
 // cluster access here — a deterministic mapping the API applies via a KubeClient.
 // v1 is 443-only (one HTTP service); scaling is owned by the KEDA HTTP Add-on
 // (HTTPScaledObject), so the Deployment intentionally omits spec.replicas.
-import { type AppConfig, assertHttpOnly } from "../app-config.ts";
+import { type AppConfig, type AppResources, type ExpandedProcess, assertHttpOnly, assertProcesses, expandProcesses } from "../app-config.ts";
 
 export interface ManifestContext {
   name: string; // claimed workload name (DNS-safe)
@@ -11,12 +11,21 @@ export interface ManifestContext {
   sandbox?: boolean; // run under the gVisor RuntimeClass (untrusted tenants; prod only)
   imagePullSecret?: string; // name of an imagePullSecret in the tenant ns (registry image backend; omit for local containerd-import + IRSA)
 }
+export interface WorkerManifests {
+  name: string; // Deployment name: `<app>-<process>`
+  process: string; // the process key
+  deployment: Record<string, unknown>; // plain Deployment (no Service / HTTPScaledObject)
+}
 export interface AppManifests {
-  deployment: Record<string, unknown>;
-  service: Record<string, unknown>;
-  httpScaledObject: Record<string, unknown>;
-  ingressPolicy: Record<string, unknown>; // let the KEDA interceptor reach this app
-  secret?: Record<string, unknown>; // env (omitted when the app has no env)
+  // The WEB process objects (named `<app>`). Absent for a worker-only app — a legal shape now that
+  // `processes:` exists (`drop deploy` with no `web` process). Existing single-process apps are
+  // unchanged: `deployment`/`service`/`httpScaledObject`/`ingressPolicy` are the web process's.
+  deployment?: Record<string, unknown>;
+  service?: Record<string, unknown>;
+  httpScaledObject?: Record<string, unknown>;
+  ingressPolicy?: Record<string, unknown>; // let the KEDA interceptor reach the web pods
+  secret?: Record<string, unknown>; // env (omitted when the app has no env) — shared by every process
+  workers?: WorkerManifests[]; // extra worker Deployments (omitted when the app is web-only)
 }
 export interface TenantManifests {
   namespace: Record<string, unknown>;
@@ -26,7 +35,6 @@ export interface TenantManifests {
 }
 
 const SERVICE_PORT = 80;
-const DEFAULT_SCALE = { min: 0, max: 3 };
 const KEDA_NAMESPACE = "keda"; // where the KEDA HTTP add-on interceptor runs
 
 // Where a bound database's CNPG cluster CA (`ca.crt` from the `<db>-ca` Secret) is mounted,
@@ -111,137 +119,247 @@ export function imagePullPolicy(image: string): "Always" | "IfNotPresent" {
   return tag === "latest" ? "Always" : "IfNotPresent";
 }
 
-export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests {
-  assertHttpOnly(app); // v1 guard: exactly one HTTP service
-  const containerPort = app.services[0]!.internalPort;
-  const labels = {
-    "app.kubernetes.io/name": ctx.name,
-    "app.kubernetes.io/managed-by": "drop",
-    "drop.dev/workload": ctx.name,
-  };
-  const hasEnv = !!app.env && Object.keys(app.env).length > 0;
-  const secretName = `${ctx.name}-env`;
-  const limits = app.resources
-    ? { ...(app.resources.cpu ? { cpu: app.resources.cpu } : {}), ...(app.resources.memory ? { memory: app.resources.memory } : {}) }
-    : undefined;
-  const scale = app.scale ?? DEFAULT_SCALE;
+// The env/secret/DB-binding wiring every process (and the release Job) shares. Computed once from
+// the AppConfig, then handed to each container so all processes carry identical env — SEC-5.
+interface AppBinding {
+  envFrom: Record<string, unknown>[]; // <db>-app (per app.uses) → <name>-env config → <name>-secret (optional, last → wins)
+  env: Record<string, unknown>[]; // PGSSLMODE/PGSSLROOTCERT for bound databases; empty otherwise
+  volumes: Record<string, unknown>[]; // read-only CA volumes for bound databases
+  volumeMounts: Record<string, unknown>[];
+}
 
+/** Compute the DB-binding + secret wiring shared by all of an app's processes (see app.uses). */
+function appBinding(app: AppConfig, name: string): AppBinding {
+  const hasEnv = !!app.env && Object.keys(app.env).length > 0;
   // First-class DB binding (app.uses): for each declared database, envFrom its CNPG-generated
   // `<db>-app` Secret (PG* connection incl. password — never copied into the app's own env),
   // mount the cluster CA (`<db>-ca`, ca.crt ONLY — never the CA private key) read-only, and turn
   // on full TLS verification. The `<db>-app`/`<db>-ca` Secrets are namespace-scoped, so this only
   // resolves when the DB shares the app's namespace — the API enforces same-org before we get here.
   const boundDbs = app.uses?.map((u) => u.database) ?? [];
-  const dbEnvFrom = boundDbs.map((db) => ({ secretRef: { name: `${db}-app` } }));
-  const dbVolumes = boundDbs.map((db) => ({
-    name: `db-ca-${db}`,
-    secret: { secretName: `${db}-ca`, items: [{ key: "ca.crt", path: "ca.crt" }] },
-  }));
-  const dbVolumeMounts = boundDbs.map((db) => ({ name: `db-ca-${db}`, mountPath: `${DB_CA_MOUNT_BASE}/${db}`, readOnly: true }));
-  // PG* is a single-connection model, so verify-full is set once and PGSSLROOTCERT points at the
-  // FIRST bound db's CA (any additional CAs are still mounted at their own paths for an app that
-  // references them explicitly). These are container `env` (not envFrom) so they win over any
-  // same-named value the `<db>-app`/config Secrets might carry.
-  const dbEnv = boundDbs.length
-    ? [
-        { name: "PGSSLMODE", value: "verify-full" },
-        { name: "PGSSLROOTCERT", value: `${DB_CA_MOUNT_BASE}/${boundDbs[0]}/ca.crt` },
-      ]
-    : [];
+  return {
+    // Sources, in order:
+    //  - <db>-app: each bound database's CNPG creds Secret (app.uses) — the base layer.
+    //  - <name>-env: non-secret config from drop.yaml app.env (only when present).
+    //  - <name>-secret: write-only app secrets managed out-of-band (CLI/dashboard/MCP). Listed LAST
+    //    so a secret overrides a same-named config value; optional so a not-yet-created Secret never
+    //    blocks startup.
+    envFrom: [
+      ...boundDbs.map((db) => ({ secretRef: { name: `${db}-app` } })),
+      ...(hasEnv ? [{ secretRef: { name: `${name}-env` } }] : []),
+      { secretRef: { name: `${name}-secret`, optional: true } },
+    ],
+    // PG* is a single-connection model, so verify-full is set once and PGSSLROOTCERT points at the
+    // FIRST bound db's CA. These are container `env` (not envFrom) so they win over any same-named
+    // value the `<db>-app`/config Secrets might carry.
+    env: boundDbs.length
+      ? [
+          { name: "PGSSLMODE", value: "verify-full" },
+          { name: "PGSSLROOTCERT", value: `${DB_CA_MOUNT_BASE}/${boundDbs[0]}/ca.crt` },
+        ]
+      : [],
+    volumes: boundDbs.map((db) => ({ name: `db-ca-${db}`, secret: { secretName: `${db}-ca`, items: [{ key: "ca.crt", path: "ca.crt" }] } })),
+    volumeMounts: boundDbs.map((db) => ({ name: `db-ca-${db}`, mountPath: `${DB_CA_MOUNT_BASE}/${db}`, readOnly: true })),
+  };
+}
 
-  const deployment = {
-    apiVersion: "apps/v1",
-    kind: "Deployment",
-    metadata: { name: ctx.name, namespace: ctx.namespace, labels },
-    spec: {
+function resourceLimits(resources?: AppResources): Record<string, string> | undefined {
+  if (!resources) return undefined;
+  const l = { ...(resources.cpu ? { cpu: resources.cpu } : {}), ...(resources.memory ? { memory: resources.memory } : {}) };
+  return Object.keys(l).length ? l : undefined;
+}
+
+// string command → shell-form (a full command line); array → exec-form passthrough. Undefined leaves
+// the image's own entrypoint (today's default).
+function normalizeCommand(command?: string | string[]): string[] | undefined {
+  if (command === undefined) return undefined;
+  return typeof command === "string" ? ["/bin/sh", "-c", command] : command;
+}
+
+// readiness (traffic gate) + liveness (restart wedged pods) probes for the WEB container. With a
+// healthcheck: both hit the same HTTP endpoint by default. Without: a plain TCP-socket readiness
+// probe on the container port (better than nothing; there's no honest liveness signal without one).
+function webProbes(app: AppConfig, containerPort: number): { readinessProbe: Record<string, unknown>; livenessProbe?: Record<string, unknown> } {
+  const hc = app.healthcheck;
+  if (!hc) return { readinessProbe: { tcpSocket: { port: containerPort }, periodSeconds: 10, timeoutSeconds: 2 } };
+  const httpGet = { path: hc.path, port: containerPort };
+  const common = { periodSeconds: hc.interval ?? 10, timeoutSeconds: hc.timeout ?? 2, initialDelaySeconds: hc.grace ?? 15 };
+  return { readinessProbe: { httpGet, ...common }, livenessProbe: { httpGet, ...common, failureThreshold: 3 } };
+}
+
+// Build one container spec shared by every code path (web pod, worker pod, release Job). The
+// security baseline is deliberately minimal — block privilege escalation + default seccomp, but
+// DON'T drop caps (most official images chown/setuid at entrypoint and break under `drop: ALL`).
+// Stronger isolation is the tenant/PSA/sandbox layer (tenantManifests + optional gVisor).
+function buildContainer(opts: {
+  name: string;
+  image: string;
+  binding: AppBinding;
+  command?: string | string[];
+  containerPort?: number;
+  resources?: AppResources;
+  probes?: { readinessProbe: Record<string, unknown>; livenessProbe?: Record<string, unknown> };
+}): Record<string, unknown> {
+  const limits = resourceLimits(opts.resources);
+  const command = normalizeCommand(opts.command);
+  return {
+    name: opts.name,
+    image: opts.image,
+    imagePullPolicy: imagePullPolicy(opts.image), // explicit, not k8s' tag-based default (see imagePullPolicy)
+    ...(command ? { command } : {}),
+    ...(opts.containerPort != null ? { ports: [{ containerPort: opts.containerPort }] } : {}),
+    envFrom: opts.binding.envFrom, // env lives in Secrets, not plaintext in the pod spec (SEC-5)
+    ...(opts.binding.env.length ? { env: opts.binding.env } : {}),
+    ...(limits ? { resources: { limits, requests: limits } } : {}),
+    ...(opts.binding.volumeMounts.length ? { volumeMounts: opts.binding.volumeMounts } : {}),
+    ...(opts.probes?.readinessProbe ? { readinessProbe: opts.probes.readinessProbe } : {}),
+    ...(opts.probes?.livenessProbe ? { livenessProbe: opts.probes.livenessProbe } : {}),
+    securityContext: { allowPrivilegeEscalation: false, seccompProfile: { type: "RuntimeDefault" } },
+  };
+}
+
+// Pod spec shared by a Deployment/Job template: sandbox RuntimeClass + pull secret + one container
+// + the DB-CA volumes.
+function podSpec(ctx: ManifestContext, container: Record<string, unknown>, binding: AppBinding, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...(ctx.sandbox ? { runtimeClassName: "gvisor" } : {}),
+    // Pull secret for a private registry image (registry backend). Local containerd-imported images
+    // need none (already on the node); ECR-via-IRSA needs none either.
+    ...(ctx.imagePullSecret ? { imagePullSecrets: [{ name: ctx.imagePullSecret }] } : {}),
+    containers: [container],
+    ...(binding.volumes.length ? { volumes: binding.volumes } : {}), // CA volumes for bound databases (app.uses)
+    ...extra,
+  };
+}
+
+export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests {
+  assertHttpOnly(app); // v1 guard: exactly one HTTP service
+  assertProcesses(app); // at most one web process
+  const containerPort = app.services[0]!.internalPort;
+  const binding = appBinding(app, ctx.name);
+  const hasEnv = !!app.env && Object.keys(app.env).length > 0;
+  const processes = expandProcesses(app, ctx.name);
+
+  const out: AppManifests = {};
+
+  // --- web process: today's Deployment + Service + HTTPScaledObject + interceptor NetworkPolicy ---
+  const web = processes.find((p) => p.web);
+  if (web) {
+    // The web labels/selector are UNCHANGED from before processes existed (no new selector labels),
+    // so redeploying an existing app never trips the immutable-selector guard.
+    const labels = { "app.kubernetes.io/name": ctx.name, "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name };
+    const container = buildContainer({
+      name: ctx.name,
+      image: app.image,
+      binding,
+      command: web.command,
+      containerPort,
+      resources: web.resources,
+      probes: webProbes(app, containerPort),
+    });
+    out.deployment = {
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: { name: ctx.name, namespace: ctx.namespace, labels },
       // no `replicas`: the HTTPScaledObject owns the replica count (0..max)
-      selector: { matchLabels: labels },
+      spec: { selector: { matchLabels: labels }, template: { metadata: { labels }, spec: podSpec(ctx, container, binding) } },
+    };
+    out.service = {
+      apiVersion: "v1",
+      kind: "Service",
+      metadata: { name: ctx.name, namespace: ctx.namespace, labels },
+      spec: { selector: labels, ports: [{ name: "http", port: SERVICE_PORT, targetPort: containerPort }] },
+    };
+    out.httpScaledObject = {
+      apiVersion: "http.keda.sh/v1alpha1",
+      kind: "HTTPScaledObject",
+      metadata: { name: ctx.name, namespace: ctx.namespace, labels },
+      spec: {
+        hosts: [ctx.host],
+        scaleTargetRef: { name: ctx.name, kind: "Deployment", apiVersion: "apps/v1", service: ctx.name, port: SERVICE_PORT },
+        replicas: { min: web.scale.min, max: web.scale.max },
+        scaledownPeriod: 300,
+      },
+    };
+    // Allow the KEDA interceptor (in the keda namespace) to reach the web pods on the CONTAINER
+    // port. The keda namespace is matched by its immutable, control-plane-injected label.
+    out.ingressPolicy = {
+      apiVersion: "networking.k8s.io/v1",
+      kind: "NetworkPolicy",
+      metadata: { name: `${ctx.name}-allow-interceptor`, namespace: ctx.namespace, labels },
+      spec: {
+        podSelector: { matchLabels: labels },
+        policyTypes: ["Ingress"],
+        ingress: [
+          {
+            from: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": KEDA_NAMESPACE } } }],
+            ports: [{ protocol: "TCP", port: containerPort }],
+          },
+        ],
+      },
+    };
+  }
+
+  // --- worker processes: a plain Deployment each (no Service, no HTTPScaledObject) ---
+  // Static replicas = scale.min (min≥1, enforced in expandProcesses). `scaleOn`/scale.max are
+  // reserved for L1b (KEDA queue scaling) and IGNORED here.
+  const workers: WorkerManifests[] = [];
+  for (const w of processes.filter((p) => !p.web)) {
+    const labels = {
+      "app.kubernetes.io/name": w.name,
+      "app.kubernetes.io/managed-by": "drop",
+      "drop.dev/workload": ctx.name, // groups every process under the app (teardown + `drop ps`)
+      "drop.dev/process": w.process, // distinguishes workers from the web Deployment
+    };
+    const container = buildContainer({ name: w.name, image: app.image, binding, command: w.command, resources: w.resources });
+    workers.push({
+      name: w.name,
+      process: w.process,
+      deployment: {
+        apiVersion: "apps/v1",
+        kind: "Deployment",
+        metadata: { name: w.name, namespace: ctx.namespace, labels },
+        spec: { replicas: w.scale.min, selector: { matchLabels: labels }, template: { metadata: { labels }, spec: podSpec(ctx, container, binding) } },
+      },
+    });
+  }
+  if (workers.length) out.workers = workers;
+
+  // Shared config Secret (`<name>-env`) — one for the whole app, referenced by every process.
+  if (hasEnv) {
+    const labels = { "app.kubernetes.io/name": ctx.name, "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name };
+    out.secret = { apiVersion: "v1", kind: "Secret", metadata: { name: `${ctx.name}-env`, namespace: ctx.namespace, labels }, stringData: app.env };
+  }
+  return out;
+}
+
+export interface ReleaseJobContext extends ManifestContext {
+  versionId: string; // the deploy's version id → a deterministic Job name `<name>-release-<versionId>`
+}
+
+// The release Job (run BEFORE the new Deployment is applied): same image/env/bindings/secrets as the
+// app container, `backoffLimit: 0` / `restartPolicy: Never` (one shot — no silent retries of a
+// migration), a deterministic name for log retrieval, and labels so teardown + `drop logs --release`
+// find it. Its command is the release command in shell form. The API waits for it and halts the
+// deploy on failure (old version keeps serving). The `host` in ctx is unused (Jobs aren't routed).
+export function releaseJobManifest(app: AppConfig, ctx: ReleaseJobContext): Record<string, unknown> {
+  const jobName = `${ctx.name}-release-${ctx.versionId}`;
+  const binding = appBinding(app, ctx.name);
+  const labels = { "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name, "drop.dev/job": "release" };
+  const container = buildContainer({ name: "release", image: app.image, binding, command: app.release!.command, resources: app.resources });
+  return {
+    apiVersion: "batch/v1",
+    kind: "Job",
+    metadata: { name: jobName, namespace: ctx.namespace, labels },
+    spec: {
+      backoffLimit: 0, // one shot: a failed migration is terminal, never silently retried
+      activeDeadlineSeconds: (app.release!.timeout ?? 300) + 30, // server also bounds the wait by the timeout
+      ttlSecondsAfterFinished: 3600, // keep ~1h for log retrieval; also GC'd on next deploy + app delete
       template: {
-        metadata: { labels },
-        spec: {
-          ...(ctx.sandbox ? { runtimeClassName: "gvisor" } : {}),
-          // Pull secret for a private registry image (registry backend). Local containerd-imported
-          // images need none (already on the node); ECR-via-IRSA needs none either.
-          ...(ctx.imagePullSecret ? { imagePullSecrets: [{ name: ctx.imagePullSecret }] } : {}),
-          containers: [
-            {
-              name: ctx.name,
-              image: app.image,
-              // Make the policy explicit instead of relying on k8s' tag-based default (see imagePullPolicy).
-              imagePullPolicy: imagePullPolicy(app.image),
-              ports: [{ containerPort }],
-              // env lives in Secrets (not plaintext in the pod spec) — SEC-5. Sources, in order:
-              //  - <db>-app: each bound database's CNPG creds Secret (app.uses) — the base layer.
-              //  - <name>-env: non-secret config from drop.yaml app.env (only when present).
-              //  - <name>-secret: write-only app secrets managed out-of-band (CLI/dashboard/MCP),
-              //    written by the SecretStore / synced by ESO. Listed LAST so a secret overrides a
-              //    same-named config value; optional so a not-yet-created Secret never blocks startup.
-              envFrom: [
-                ...dbEnvFrom,
-                ...(hasEnv ? [{ secretRef: { name: secretName } }] : []),
-                { secretRef: { name: `${ctx.name}-secret`, optional: true } },
-              ],
-              // TLS-verification env for bound databases (PGSSLMODE/PGSSLROOTCERT); omitted otherwise.
-              ...(dbEnv.length ? { env: dbEnv } : {}),
-              ...(limits ? { resources: { limits, requests: limits } } : {}),
-              ...(dbVolumeMounts.length ? { volumeMounts: dbVolumeMounts } : {}),
-              // Minimal, non-breaking baseline: block privilege escalation + default
-              // seccomp, but DON'T drop caps (most official images chown/setuid at
-              // entrypoint and break under `drop: ALL`). Stronger isolation is the
-              // tenant/PSA/sandbox layer (tenantManifests + optional gVisor).
-              securityContext: {
-                allowPrivilegeEscalation: false,
-                seccompProfile: { type: "RuntimeDefault" },
-              },
-            },
-          ],
-          ...(dbVolumes.length ? { volumes: dbVolumes } : {}), // CA volumes for bound databases (app.uses)
-        },
+        // app.kubernetes.io/name=<job> lets getWorkloadLogs/getReleaseLogs surface this Job's pod logs.
+        metadata: { labels: { ...labels, "app.kubernetes.io/name": jobName } },
+        spec: podSpec(ctx, container, binding, { restartPolicy: "Never" }),
       },
     },
   };
-
-  const service = {
-    apiVersion: "v1",
-    kind: "Service",
-    metadata: { name: ctx.name, namespace: ctx.namespace, labels },
-    spec: { selector: labels, ports: [{ name: "http", port: SERVICE_PORT, targetPort: containerPort }] },
-  };
-
-  const httpScaledObject = {
-    apiVersion: "http.keda.sh/v1alpha1",
-    kind: "HTTPScaledObject",
-    metadata: { name: ctx.name, namespace: ctx.namespace, labels },
-    spec: {
-      hosts: [ctx.host],
-      scaleTargetRef: { name: ctx.name, kind: "Deployment", apiVersion: "apps/v1", service: ctx.name, port: SERVICE_PORT },
-      replicas: { min: scale.min, max: scale.max },
-      scaledownPeriod: 300,
-    },
-  };
-
-  // Allow the KEDA interceptor (in the keda namespace) to reach this app's pods on
-  // the CONTAINER port. The keda namespace is matched by its immutable, control-plane
-  // -injected label — NOT a custom `name: keda` label (which isn't applied by helm).
-  const ingressPolicy = {
-    apiVersion: "networking.k8s.io/v1",
-    kind: "NetworkPolicy",
-    metadata: { name: `${ctx.name}-allow-interceptor`, namespace: ctx.namespace, labels },
-    spec: {
-      podSelector: { matchLabels: labels },
-      policyTypes: ["Ingress"],
-      ingress: [
-        {
-          from: [{ namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": KEDA_NAMESPACE } } }],
-          ports: [{ protocol: "TCP", port: containerPort }],
-        },
-      ],
-    },
-  };
-
-  const out: AppManifests = { deployment, service, httpScaledObject, ingressPolicy };
-  if (hasEnv) {
-    out.secret = { apiVersion: "v1", kind: "Secret", metadata: { name: secretName, namespace: ctx.namespace, labels }, stringData: app.env };
-  }
-  return out;
 }

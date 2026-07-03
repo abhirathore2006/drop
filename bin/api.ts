@@ -4,6 +4,7 @@ import { S3Blob } from "../src/blob/s3.ts";
 import { makeDb } from "../src/db/db.ts";
 import { runMigrations } from "../src/db/migrate.ts";
 import { MetaStore } from "../src/metastore/store.ts";
+import { LockStore } from "../src/metastore/lock.ts";
 import { UserStore } from "../src/users/store.ts";
 import { OrgStore } from "../src/orgs/store.ts";
 import { AuditStore } from "../src/audit/store.ts";
@@ -83,7 +84,8 @@ const images = makeImageStore(cfg, kube);
 if (kube) console.log(`drop-api secrets backend: ${cfg.secretBackend} · image backend: ${cfg.imageBackend}`);
 const orgs = new OrgStore(db);
 const audit = new AuditStore(db);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit });
+const locks = new LockStore(db);
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });

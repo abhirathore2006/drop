@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { sanitizeAppConfig, parseAppConfig, assertHttpOnly } from "./app-config.ts";
+import { sanitizeAppConfig, parseAppConfig, assertHttpOnly, assertProcesses, expandProcesses } from "./app-config.ts";
 
 test("sanitizeAppConfig requires an image", () => {
   expect(sanitizeAppConfig({})).toBeUndefined();
@@ -100,4 +100,131 @@ test("sanitizeAppConfig uses is round-trip safe (CLI sanitizes -> JSON -> API re
   const once = sanitizeAppConfig({ image: "x:1", uses: [{ database: "tododb" }] })!;
   const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!; // feed the sanitized object back in
   expect(twice.uses).toEqual([{ database: "tododb" }]);
+});
+
+// ---- healthcheck ----
+
+test("sanitizeAppConfig healthcheck: parses durations, applies defaults, clamps bounds", () => {
+  const c = sanitizeAppConfig({ image: "x:1", healthcheck: { path: "/healthz", interval: "10s", timeout: "2s", grace: "15s" } })!;
+  expect(c.healthcheck).toEqual({ path: "/healthz", interval: 10, timeout: 2, grace: 15 });
+  // defaults when fields absent
+  expect(sanitizeAppConfig({ image: "x:1", healthcheck: { path: "/live" } })!.healthcheck).toEqual({ path: "/live", interval: 10, timeout: 2, grace: 15 });
+  // out-of-bounds clamp to [1,300]/[1,60]/[0,600]; "5m" = 300s
+  const b = sanitizeAppConfig({ image: "x:1", healthcheck: { path: "/h", interval: "5m", timeout: 999, grace: 9999 } })!;
+  expect(b.healthcheck).toEqual({ path: "/h", interval: 300, timeout: 60, grace: 600 });
+  // a negative (unparseable) duration falls back to the default rather than clamping
+  expect(sanitizeAppConfig({ image: "x:1", healthcheck: { path: "/h", grace: -5 } })!.healthcheck!.grace).toBe(15);
+});
+
+test("sanitizeAppConfig healthcheck: junk / relative path drops the block (→ default TCP probe)", () => {
+  expect(sanitizeAppConfig({ image: "x:1", healthcheck: "nope" })!.healthcheck).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", healthcheck: { path: "healthz" } })!.healthcheck).toBeUndefined(); // must start with /
+  expect(sanitizeAppConfig({ image: "x:1", healthcheck: {} })!.healthcheck).toBeUndefined(); // no path
+  // junk durations fall back to the default rather than failing
+  expect(sanitizeAppConfig({ image: "x:1", healthcheck: { path: "/h", interval: "soon" } })!.healthcheck).toEqual({ path: "/h", interval: 10, timeout: 2, grace: 15 });
+});
+
+test("sanitizeAppConfig healthcheck is round-trip safe", () => {
+  const once = sanitizeAppConfig({ image: "x:1", healthcheck: { path: "/z", interval: "30s" } })!;
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!;
+  expect(twice.healthcheck).toEqual({ path: "/z", interval: 30, timeout: 2, grace: 15 });
+});
+
+// ---- release ----
+
+test("sanitizeAppConfig release: string shorthand + object form; timeout default 5m, cap 15m", () => {
+  expect(sanitizeAppConfig({ image: "x:1", release: "npm run migrate" })!.release).toEqual({ command: "npm run migrate", timeout: 300 });
+  expect(sanitizeAppConfig({ image: "x:1", release: { command: "./migrate", timeout: "10m" } })!.release).toEqual({ command: "./migrate", timeout: 600 });
+  expect(sanitizeAppConfig({ image: "x:1", release: { command: "m", timeout: "1h" } })!.release).toEqual({ command: "m", timeout: 900 }); // capped at 15m
+});
+
+test("sanitizeAppConfig release: no/empty command drops the block", () => {
+  expect(sanitizeAppConfig({ image: "x:1", release: "" })!.release).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", release: { timeout: "5m" } })!.release).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", release: 123 })!.release).toBeUndefined();
+});
+
+test("sanitizeAppConfig release is round-trip safe (object form re-sanitizes)", () => {
+  const once = sanitizeAppConfig({ image: "x:1", release: "migrate" })!;
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!;
+  expect(twice.release).toEqual({ command: "migrate", timeout: 300 });
+});
+
+// ---- processes ----
+
+test("sanitizeAppConfig processes: parses web + worker, command string/array, scale, resources", () => {
+  const c = sanitizeAppConfig({
+    image: "x:1",
+    processes: {
+      web: { command: "node server.js" },
+      worker: { command: ["node", "worker.js"], scale: { min: 2, max: 4 }, resources: { cpu: "250m" } },
+      junk: "nope", // non-object value → dropped
+      Bad_Name: { command: "x" }, // invalid key → dropped
+    },
+  })!;
+  expect(c.processes).toEqual({
+    web: { command: "node server.js" },
+    worker: { command: ["node", "worker.js"], scale: { min: 2, max: 4 }, resources: { cpu: "250m" } },
+  });
+});
+
+test("sanitizeAppConfig processes: absent → undefined; all-invalid → undefined", () => {
+  expect(sanitizeAppConfig({ image: "x:1" })!.processes).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", processes: [] })!.processes).toBeUndefined(); // array, not a map
+  expect(sanitizeAppConfig({ image: "x:1", processes: { Bad_Name: {} } })!.processes).toBeUndefined();
+});
+
+test("sanitizeAppConfig processes: scale_on reserved (L1b) round-trips as scaleOn, accepts both spellings", () => {
+  const c = sanitizeAppConfig({ image: "x:1", processes: { worker: { command: "w", scale_on: { queue: "jobs", target: 10 } } } })!;
+  expect(c.processes!.worker!.scaleOn).toEqual({ queue: "jobs", target: 10 });
+  // re-sanitize the sanitized (scaleOn) form → unchanged
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(c)))!;
+  expect(twice.processes!.worker!.scaleOn).toEqual({ queue: "jobs", target: 10 });
+  // junk scale_on dropped
+  expect(sanitizeAppConfig({ image: "x:1", processes: { w: { command: "w", scale_on: { queue: "jobs" } } } })!.processes!.w!.scaleOn).toBeUndefined();
+});
+
+test("assertProcesses: at most one web — two webs throw (deploy 400s); zero/one are fine", () => {
+  // key `web` + another process explicitly web:true → two webs
+  const two = sanitizeAppConfig({ image: "x:1", processes: { web: { command: "a" }, worker: { web: true, command: "b" } } })!;
+  expect(() => assertProcesses(two)).toThrow(/at most one "web"/);
+  // one web (default) is fine
+  expect(() => assertProcesses(sanitizeAppConfig({ image: "x:1", processes: { web: { command: "a" }, worker: { command: "b" } } })!)).not.toThrow();
+  // worker-only (zero web) is legal
+  expect(() => assertProcesses(sanitizeAppConfig({ image: "x:1", processes: { worker: { command: "b" } } })!)).not.toThrow();
+  // absent processes never throws
+  expect(() => assertProcesses(sanitizeAppConfig({ image: "x:1" })!)).not.toThrow();
+});
+
+test("expandProcesses: absent → one implicit web using app-level scale/resources", () => {
+  const app = sanitizeAppConfig({ image: "x:1", scale: { min: 0, max: 3 }, resources: { cpu: "0.5" } })!;
+  expect(expandProcesses(app, "todo")).toEqual([{ name: "todo", process: "web", web: true, scale: { min: 0, max: 3 }, resources: { cpu: "0.5" } }]);
+});
+
+test("expandProcesses: workers get min≥1 static scale; per-process resources override; web keeps app scale", () => {
+  const app = sanitizeAppConfig({
+    image: "x:1",
+    scale: { min: 0, max: 5 },
+    resources: { cpu: "0.5", memory: "512Mi" },
+    processes: {
+      web: {},
+      worker: { command: "node w.js", scale: { min: 0, max: 3 }, resources: { cpu: "1" } }, // min 0 clamped to 1
+      solo: { command: "node s.js" }, // no scale → static {1,1}
+    },
+  })!;
+  const procs = expandProcesses(app, "app");
+  const web = procs.find((p) => p.process === "web")!;
+  expect(web).toMatchObject({ name: "app", web: true, scale: { min: 0, max: 5 }, resources: { cpu: "0.5", memory: "512Mi" } });
+  const worker = procs.find((p) => p.process === "worker")!;
+  expect(worker).toMatchObject({ name: "app-worker", web: false, scale: { min: 1, max: 3 }, resources: { cpu: "1" } }); // min clamped, resources overridden
+  const solo = procs.find((p) => p.process === "solo")!;
+  expect(solo).toMatchObject({ name: "app-solo", web: false, scale: { min: 1, max: 1 } }); // default static single replica
+});
+
+test("expandProcesses: worker-only app has no web process", () => {
+  const app = sanitizeAppConfig({ image: "x:1", processes: { worker: { command: "w" } } })!;
+  const procs = expandProcesses(app, "batch");
+  expect(procs.some((p) => p.web)).toBe(false);
+  expect(procs).toHaveLength(1);
+  expect(procs[0]!.name).toBe("batch-worker");
 });
