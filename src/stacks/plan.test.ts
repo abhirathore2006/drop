@@ -131,3 +131,32 @@ test("a dependency cycle is rejected with StackCycleError", () => {
   };
   expect(() => planStack({ spec: cyclic, prevSpec: null, mapping: {}, live: {} })).toThrow(StackCycleError);
 });
+
+test("H3: app→app `uses` is a dependency edge — target ordered before consumer", () => {
+  // web uses api (service discovery). api must be created BEFORE web so web's API_URL resolves.
+  const spec: StackSpec = {
+    name: "svc",
+    resources: {
+      web: { type: "app", image: "web:1", uses: [{ app: "api" }] },
+      api: { type: "app", image: "api:1" },
+    },
+  };
+  const steps = planStack({ spec, prevSpec: null, mapping: {}, live: {} });
+  expect(steps.map((s) => [s.action, s.key])).toEqual([
+    ["create", "api"],
+    ["create", "web"],
+  ]);
+});
+
+test("H3: a mutual app↔app reference is rejected as a cycle", () => {
+  // a uses b AND b uses a via the app edge — no valid apply order, so the <KEY>_URL injection can't be
+  // ordered. Rejected as a StackCycleError (documented v1 limitation).
+  const cyclic: StackSpec = {
+    name: "loop",
+    resources: {
+      a: { type: "app", image: "x:1", uses: [{ app: "b" }] },
+      b: { type: "app", image: "x:1", uses: [{ app: "a" }] },
+    },
+  };
+  expect(() => planStack({ spec: cyclic, prevSpec: null, mapping: {}, live: {} })).toThrow(StackCycleError);
+});

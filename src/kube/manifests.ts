@@ -22,6 +22,11 @@ export interface ManifestContext {
   // unchanged: the Service still fronts the container port and the HTTPScaledObject keeps scale.min
   // (≥1 for a TCP app) replicas alive; edge-tcp routes to the Service out of band.
   tcpExposed?: boolean;
+  // (H3) app→app service-discovery env: already-RESOLVED `<KEY>_URL` container env vars (an in-cluster
+  // Service URL for an always-on target, or its public wake host for a scale-to-zero one — see
+  // appUseUrl). The reconciler resolves these (it knows each target's namespace + live scale) and hands
+  // them in; the manifest layer just appends them as PLAIN container env (a Service URL is not a secret).
+  appUrlEnv?: { name: string; value: string }[];
 }
 export interface WorkerManifests {
   name: string; // Deployment name: `<app>-<process>`
@@ -80,6 +85,28 @@ export interface ExposedWorkload {
 
 const SERVICE_PORT = 80;
 const KEDA_NAMESPACE = "keda"; // where the KEDA HTTP add-on interceptor runs
+
+// ---- (H3) app→app service discovery ------------------------------------------------------------------
+/** The env-var an app→app edge injects into the consumer: `<KEY>_URL` (KEY = the used resource's key /
+ *  app name, uppercased; non-alnum → `_`). Matches the bucket/cache/auth env-key casing convention. */
+export function appUseEnvName(label: string): string {
+  return label.toUpperCase().replace(/[^A-Z0-9]/g, "_") + "_URL";
+}
+/** Resolve an app→app edge's target URL from the target's live scale floor.
+ *  - An always-on target (`minReplicas ≥ 1`) is reachable directly in-cluster at its Service — the
+ *    lowest-latency path, and the tenant default-deny NetworkPolicy already permits intra-namespace
+ *    traffic (no hole to open).
+ *  - A scale-to-zero target (`minReplicas < 1`) has no pod to dial, so we point at its PUBLIC host: the
+ *    call hairpins back through the edge → KEDA HTTP interceptor (the same wake path external traffic
+ *    takes), which scales the target up on first hit. This costs an external round-trip plus a cold
+ *    start — DOCUMENTED added latency — and reaches the edge over the NetworkPolicy's existing 443
+ *    egress allowance, so it opens NO cross-namespace hole (unlike dialing the in-cluster interceptor,
+ *    which the default-deny would block). */
+export function appUseUrl(opts: { targetName: string; namespace: string; publicHost: string; minReplicas: number }): string {
+  return opts.minReplicas >= 1
+    ? `http://${opts.targetName}.${opts.namespace}.svc.cluster.local:${SERVICE_PORT}`
+    : `https://${opts.publicHost}`;
+}
 // (A2b) The component label the edge-tcp router pods carry — the source selector every tenant
 // "allow from edge-tcp" NetworkPolicy matches on (see edgeTcpAllowPolicy + edgeTcpManifests).
 const EDGE_TCP_COMPONENT = "edge-tcp";
@@ -162,9 +189,14 @@ export function tenantManifests(
       spec: {
         podSelector: {},
         policyTypes: ["Ingress", "Egress"],
+        // (H3) These two intra-namespace rules are exactly what makes app→app service discovery work
+        // with NO extra policy: a consumer app reaches an always-on peer's `<KEY>_URL`
+        // (`<peer>.<ns>.svc:80`) over the intra-namespace ingress/egress below. A CROSS-namespace (cross-
+        // org) peer is unreachable here — which IS the H3 refusal, enforced up front in the reconciler.
+        // The scale-to-zero wake host (`https://<peer>.<baseDomain>`) rides the 443 egress rule further down.
         ingress: [{ from: [{ podSelector: {} }] }], // intra-namespace ingress only (interceptor allowed per-app)
         egress: [
-          { to: [{ podSelector: {} }] }, // intra-namespace (incl. the tenant's own DB)
+          { to: [{ podSelector: {} }] }, // intra-namespace (incl. the tenant's own DB + H3 peer apps)
           { to: [{ namespaceSelector: {} }], ports: [{ protocol: "UDP", port: 53 }, { protocol: "TCP", port: 53 }] }, // DNS
           {
             // Default-deny (above) already blocks ALL egress except intra-namespace +
@@ -411,6 +443,10 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
   if (!ctx.tcpExposed) assertHttpOnly(app); // v1 guard: exactly one HTTP service (retired for TCP-exposed apps, A2b)
   assertProcesses(app); // at most one web process; schedule's exclusivity with processes/services/healthcheck (H2)
   const binding = appBinding(app, ctx.name);
+  // (H3) app→app URLs: plain, non-secret container env resolved by the reconciler. Appended to the
+  // shared binding so EVERY process (web + workers, and a cron app) carries identical env (SEC-5).
+  // Container `env` (last) so it wins over any same-named config/secret value, same as PGSSLMODE.
+  if (ctx.appUrlEnv?.length) binding.env = [...binding.env, ...ctx.appUrlEnv];
   const hasEnv = !!app.env && Object.keys(app.env).length > 0;
 
   // (H2) `schedule` replaces the ENTIRE web/worker surface with a single CronJob — no Deployment,

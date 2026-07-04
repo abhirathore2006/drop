@@ -63,15 +63,26 @@
 <p>A resource with key <code>k</code> in stack <code>s</code> materializes as the site name <strong><code>s-k</code></strong> — so <code>db</code> above becomes <code>myproduct-db</code>, reachable at <code>myproduct-db-rw</code> for Postgres. Set an explicit <code>name:</code> on a resource to override that (e.g. to adopt an existing database). The mapping (<code>resource_key → site_name</code>) is recorded so a rename in your spec never silently forks a second copy.</p>
 
 <h2 id="edges">Edges</h2>
-<p>Edges reference resource <strong>keys</strong> within the same stack; the reconciler resolves each key to its site name. Two edge kinds ship in v1:</p>
+<p>Edges reference resource <strong>keys</strong> within the same stack; the reconciler resolves each key to its site name. The edge kinds:</p>
 <table class="tbl">
 <thead><tr><th>Edge</th><th>Declared on</th><th>Field</th><th>What it does</th></tr></thead>
 <tbody>
 <tr><td><strong>app → database</strong></td><td>an <code>app</code></td><td><code>uses: [{ database: &lt;key&gt; }]</code></td><td>The <a href="configuration.html#uses">first-class DB binding</a>: injects the CNPG <code>&lt;db&gt;-app</code> secret via <code>envFrom</code>, mounts the cluster CA, and sets <code>PGSSLMODE=verify-full</code>. The <code>&lt;key&gt;</code> is resolved to the materialized DB name.</td></tr>
-<tr><td><strong>site → app</strong></td><td>a <code>site</code></td><td><code>env_from: [{ resource, output: url, as }]</code></td><td>Publish-time substitution: the referenced app's <code>url</code> replaces the <code>${as}</code> placeholder in the site's text files (<code>.html/.js/.css/.json/…</code>) as the tarball is packed — <strong>client-side</strong>. The server validates the edge and stores it; it never rewrites bytes.</td></tr>
+<tr><td><strong>app → app</strong></td><td>an <code>app</code></td><td><code>uses: [{ app: &lt;key&gt; }]</code></td><td>Service discovery (see below): injects a plain <code>&lt;KEY&gt;_URL</code> env pointing at the peer app's in-cluster Service — or, when the peer scales to zero, at its public host so a call wakes it.</td></tr>
+<tr><td><strong>site → app</strong></td><td>a <code>site</code></td><td><code>env_from: [{ resource, output: url, as }]</code></td><td>Publish-time substitution: the referenced app's <code>url</code> replaces the <code>${as}</code> placeholder in the site's text files (<code>.html/.js/.css/.json/…</code>) as the tarball is packed — <strong>client-side</strong>. The server validates the edge and stores it; it never rewrites bytes. A static site has no runtime env, so a site consumes an app only this way — never via <code>uses</code>.</td></tr>
 </tbody>
 </table>
-<p>Edges define the apply order: <strong>databases before the apps that use them, apps before the sites that read them</strong>. A cycle is rejected with a clear error — there's no valid order.</p>
+<p>(An app can also <code>uses</code>-bind a <a href="configuration.html#uses">bucket, cache, or auth resource</a> — same shape, credential injection via the write-only secret path.)</p>
+<p>Edges define the apply order: <strong>databases before the apps that use them, apps before the sites that read them, and a used app before the app that calls it</strong>. A cycle is rejected with a clear error — there's no valid order.</p>
+
+<h3 id="app-app">app → app: service discovery</h3>
+<p>Declaring <code>uses: [{ app: &lt;key&gt; }]</code> on an app injects an env var named <code>&lt;KEY&gt;_URL</code> (the referenced resource key, uppercased) into the consumer — so <code>uses: [{ app: api }]</code> gives the consumer <code>API_URL</code>. Multiple app uses inject multiple <code>&lt;KEY&gt;_URL</code> vars. It's a <strong>plain, non-secret container env</strong> (a Service URL carries nothing sensitive), resolved fresh at every deploy, not stored in the secret path.</p>
+<p>What the URL points at depends on the target's scale floor:</p>
+<ul>
+  <li><strong>Always-on target</strong> (<code>scale.min ≥ 1</code>) → its in-cluster Service, <code>http://&lt;name&gt;.&lt;ns&gt;.svc.cluster.local:80</code>. This is a direct, lowest-latency hop, allowed by the tenant's default intra-namespace network policy.</li>
+  <li><strong>Scale-to-zero target</strong> (<code>scale.min = 0</code>) → its <em>public</em> host, <code>https://&lt;name&gt;.&lt;baseDomain&gt;</code>. There's no pod to dial directly, so the call hairpins out through the edge → KEDA HTTP interceptor (the same wake path external traffic takes), which scales the target up on first hit. <strong>Added latency:</strong> the first call after idle pays an external round-trip plus a cold start; steady-state calls are normal edge-proxied requests. If a peer is on a hot path, give it <code>scale: { min: 1 }</code> to keep the direct in-cluster URL.</li>
+</ul>
+<div class="note warn"><span class="lbl">Same org only</span><p>An app→app edge may only target another app in the <strong>same organisation</strong> (which shares the namespace). A cross-org reference is <strong>refused</strong> (<code>400</code>) — the tenant isolation boundary is a feature, not a hole to punch. Within a stack every resource already shares the namespace, so this is automatic; a direct <code>drop deploy</code> that names a peer in another org (or another namespace) is rejected up front. Mutually-referencing apps (<code>a</code> uses <code>b</code> <em>and</em> <code>b</code> uses <code>a</code>) are rejected as a cycle in v1.</p></div>
 
 <h2 id="up">drop up</h2>
 <p><code>drop up [dir]</code> reads the <code>stack:</code> section of <code>dir/drop.yaml</code> (default <code>.</code>), shows the plan, and applies it. The split of responsibility: the <strong>server owns existence + config</strong> (claim, DB create, app deploy, config updates, flagged deletes); the <strong>CLI owns content</strong> (it builds &amp; pushes each app image and publishes each site's bytes).</p>

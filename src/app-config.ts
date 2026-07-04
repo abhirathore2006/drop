@@ -22,6 +22,7 @@ export interface AppUse {
   bucket?: string; // (I1) a tenant bucket in the SAME org; deploy injects S3_* creds via the write-only secret path
   cache?: string; // (I2) a managed cache (Valkey) in the SAME org; deploy injects REDIS_URL via the write-only secret path
   auth?: string; // (K1) a managed auth resource in the SAME org; deploy injects AUTH_URL + AUTH_JWT_SECRET (write-only path)
+  app?: string; // (H3) another app in the SAME org + namespace (service discovery); deploy injects <KEY>_URL — a PLAIN, non-secret container env (see appUseUrl in kube/manifests.ts)
   via?: "pooler"; // (I3) database bindings ONLY: route the injected PGHOST at the CNPG Pooler service (needs the DB's pooler enabled)
 }
 // Readiness + liveness probes on the web container. All fields are RESOLVED seconds (the sanitizer
@@ -296,9 +297,11 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
   // binding: envFrom `<db>-app` Secret + cluster CA + PGSSLMODE=verify-full; an optional `via: "pooler"`
   // (I3) routes PGHOST at the CNPG Pooler service) OR (I1) `{ bucket: <name> }` (object storage: S3_*
   // creds injected via the write-only secret path at deploy) OR (I2) `{ cache: <name> }` (REDIS_URL
-  // injected via the write-only secret path). Same defensive posture as everything above: ignore
-  // non-array input and junk entries, require a valid workload name, collapse duplicates per kind, and
-  // cap the list. Round-trip safe — a sanitized entry re-sanitizes unchanged (CLI -> JSON -> API).
+  // injected via the write-only secret path) OR (H3) `{ app: <name> }` (service discovery: a PLAIN,
+  // non-secret `<KEY>_URL` env pointing at that app's in-cluster Service, or its wake host when it
+  // scales to zero — resolved at deploy). Same defensive posture as everything above: ignore non-array
+  // input and junk entries, require a valid workload name, collapse duplicates per kind, and cap the
+  // list. Round-trip safe — a sanitized entry re-sanitizes unchanged (CLI -> JSON -> API).
   if (Array.isArray(raw.uses)) {
     const uses: AppUse[] = [];
     const seen = new Set<string>();
@@ -307,6 +310,7 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
       const bucket = str(u?.bucket, 63);
       const cache = str(u?.cache, 63);
       const auth = str(u?.auth, 63);
+      const appDep = str(u?.app, 63);
       if (database) {
         if (validateName(database) !== null || seen.has(`d:${database}`)) continue;
         seen.add(`d:${database}`);
@@ -326,6 +330,12 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
         if (validateName(auth) !== null || seen.has(`a:${auth}`)) continue;
         seen.add(`a:${auth}`);
         uses.push({ auth });
+      } else if (appDep) {
+        // (H3) an app→app binding (service discovery): deploy injects a plain `<KEY>_URL` env. The
+        // target must be another app in the SAME org + namespace — enforced at deploy (server.ts), not here.
+        if (validateName(appDep) !== null || seen.has(`p:${appDep}`)) continue;
+        seen.add(`p:${appDep}`);
+        uses.push({ app: appDep });
       }
     }
     if (uses.length) cfg.uses = uses;

@@ -230,6 +230,40 @@ test("stack: auth resource (K1) + auth→db edge + app→auth `uses` edge", () =
   expect(validateStackEdges(wrongType)).toContain("not an auth resource");
 });
 
+test("stack: app→app `uses` edge (H3, service discovery)", () => {
+  // NB: a use TARGET must be a non-reserved DNS label (validateName), so the target resource is keyed
+  // "backend" (not "api"/"app", which are reserved) — a pre-existing constraint shared by every use kind.
+  const spec = sanitizeStackConfig({
+    name: "s",
+    resources: {
+      backend: { type: "app", image: "x:1" },
+      web: { type: "app", image: "y:1", uses: [{ app: "backend" }] },
+    },
+  })!;
+  expect(spec.resources.web!.uses).toEqual([{ app: "backend" }]);
+  expect(validateStackEdges(spec)).toBeNull();
+
+  // app uses an app KEY that isn't in the stack → rejected, naming the offender
+  const missing: StackSpec = { name: "s", resources: { web: { type: "app", image: "y:1", uses: [{ app: "ghost" }] } } };
+  expect(validateStackEdges(missing)).toContain("ghost");
+
+  // app uses a KEY that is a database, not an app → rejected
+  const wrongType: StackSpec = {
+    name: "s",
+    resources: { db: { type: "database" }, web: { type: "app", image: "y:1", uses: [{ app: "db" }] } },
+  };
+  expect(validateStackEdges(wrongType)).toContain("not an app");
+
+  // a static SITE has no runtime env — sanitizeSite drops `uses`, so a site→app-via-uses edge cannot
+  // even exist (site→app stays env_from only). The sanitized site carries no `uses`.
+  const siteUses = sanitizeStackConfig({
+    name: "s",
+    resources: { backend: { type: "app", image: "x:1" }, web: { type: "site", dir: "./w", uses: [{ app: "backend" }] } },
+  })!;
+  expect(siteUses.resources.web!.uses).toBeUndefined();
+  expect(validateStackEdges(siteUses)).toBeNull();
+});
+
 test("parseStackConfig: reads the top-level stack: section of a drop.yaml body", () => {
   const spec = parseStackConfig(
     yaml(`

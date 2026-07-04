@@ -40,16 +40,16 @@ const base = (): EditorSpec => ({
 });
 
 describe("legalEdges (the derived table)", () => {
-  test("app→{database,cache,bucket,auth} = uses; site→app = env_from; auth→database = db; else null", () => {
+  test("app→{database,cache,bucket,auth,app} = uses; site→app = env_from; auth→database = db; else null", () => {
     expect(legalEdges("app", "database")).toBe("uses");
     expect(legalEdges("app", "cache")).toBe("uses");
     expect(legalEdges("app", "bucket")).toBe("uses");
     expect(legalEdges("app", "auth")).toBe("uses"); // (K1)
+    expect(legalEdges("app", "app")).toBe("uses"); // (H3) service discovery
     expect(legalEdges("site", "app")).toBe("env_from");
     expect(legalEdges("auth", "database")).toBe("db"); // (K1) scalar required binding
     // illegal
     expect(legalEdges("database", "database")).toBeNull();
-    expect(legalEdges("app", "app")).toBeNull();
     expect(legalEdges("app", "site")).toBeNull();
     expect(legalEdges("site", "site")).toBeNull();
     expect(legalEdges("site", "database")).toBeNull();
@@ -62,6 +62,7 @@ describe("legalEdges (the derived table)", () => {
     expect(edgeSemantic("app", "cache")).toBe("injects REDIS_URL");
     expect(edgeSemantic("app", "bucket")).toBe("injects S3_*");
     expect(edgeSemantic("app", "auth")).toBe("injects AUTH_URL + AUTH_JWT_SECRET");
+    expect(edgeSemantic("app", "app")).toBe("injects <KEY>_URL"); // (H3)
     expect(edgeSemantic("site", "app", "API_URL")).toBe("injects API_URL");
     expect(edgeSemantic("auth", "database")).toBe("auth engine + users live here");
   });
@@ -226,6 +227,26 @@ describe("K1 auth edges (app→auth uses; auth→database db)", () => {
   test("deleting the bound database prunes the auth's db (server then 400s to reconnect)", () => {
     const spec = applyOps(withAuth(), [{ op: "removeResource", key: "db" }]);
     expect(spec.resources.auth!.db).toBeUndefined();
+  });
+});
+
+describe("H3 app→app edges (service discovery)", () => {
+  // a second app the consumer (`api`) can call
+  const withPeer = () => applyOps(base(), [{ op: "addResource", key: "backend", resource: { type: "app", image: "b:1" } }]);
+
+  test("app→app writes a uses:{app} slot; specEdges renders <KEY>_URL", () => {
+    const spec = applyOps(withPeer(), [{ op: "addEdge", from: "api", to: "backend", kind: "uses" }]);
+    expect(spec.resources.api!.uses).toContainEqual({ app: "backend" });
+    const edges = specEdges(spec);
+    expect(edges).toContainEqual({ from: "backend", to: "api", kind: "uses", label: "BACKEND_URL" });
+  });
+
+  test("validateOp accepts app→app uses; refuses self; refuses a mutual cycle", () => {
+    expect(validateOp(withPeer(), [], { op: "addEdge", from: "api", to: "backend", kind: "uses" })).toBeNull();
+    expect(validateOp(withPeer(), [], { op: "addEdge", from: "api", to: "api", kind: "uses" })).toMatch(/cannot connect to itself/);
+    // backend→api already, then api→backend closes the loop → refused as a cycle
+    const oneWay = applyOps(withPeer(), [{ op: "addEdge", from: "backend", to: "api", kind: "uses" }]);
+    expect(validateOp(oneWay, [], { op: "addEdge", from: "api", to: "backend", kind: "uses" })).toMatch(/cycle/);
   });
 });
 

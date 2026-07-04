@@ -36,15 +36,19 @@ export class StackCycleError extends Error {
   }
 }
 
-/** The keys a resource depends on (must be applied FIRST): an app depends on the databases it `uses`;
- *  a site depends on the apps it reads `env_from`. Only edges to keys present in `resources` count. */
+/** The keys a resource depends on (must be applied FIRST): an app depends on the databases/buckets/
+ *  caches/auth resources AND (H3) peer apps it `uses`; a site depends on the apps it reads `env_from`.
+ *  Only edges to keys present in `resources` count. */
 function dependencies(key: string, resources: Record<string, StackResource>): string[] {
   const res = resources[key];
   if (!res) return [];
   const out: string[] = [];
   if (res.type === "app")
     for (const u of res.uses ?? []) {
-      const dep = u.database ?? u.bucket ?? u.cache ?? u.auth; // an app depends on the databases, buckets, caches AND auth resources it `uses`
+      // an app depends on the databases, buckets, caches, auth resources AND (H3) peer apps it `uses`.
+      // Making app→app a dependency edge both orders the target's create BEFORE the consumer (so its
+      // `<KEY>_URL` resolves against a known target) and makes a mutual reference (a↔b) a StackCycleError.
+      const dep = u.database ?? u.bucket ?? u.cache ?? u.auth ?? u.app;
       if (dep && resources[dep]) out.push(dep);
     }
   // (K1) an auth resource depends on the database its engine + users live in (`db:`) — so the DB is

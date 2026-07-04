@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { appManifests, releaseJobManifest, tenantManifests, edgeTcpManifests } from "./manifests.ts";
+import { appManifests, releaseJobManifest, tenantManifests, edgeTcpManifests, appUseEnvName, appUseUrl } from "./manifests.ts";
 import type { AppConfig } from "../app-config.ts";
 import { sanitizeAppConfig } from "../app-config.ts";
 
@@ -38,6 +38,47 @@ test("appManifests builds Deployment + Service + HTTPScaledObject", () => {
   expect(h.spec.hosts).toEqual(["billing.drop.example.com"]);
   expect(h.spec.scaleTargetRef).toMatchObject({ name: "billing", kind: "Deployment", service: "billing", port: 80 });
   expect(h.spec.replicas).toEqual({ min: 0, max: 3 });
+});
+
+test("H3 appUseEnvName: <KEY>_URL, uppercased, non-alnum → _", () => {
+  expect(appUseEnvName("api")).toBe("API_URL");
+  expect(appUseEnvName("payments-api")).toBe("PAYMENTS_API_URL");
+  expect(appUseEnvName("Shop2")).toBe("SHOP2_URL");
+});
+
+test("H3 appUseUrl: always-on target → in-cluster Service URL; scale-to-zero → public wake host", () => {
+  // min ≥ 1: reachable directly at the Service (lowest latency, intra-namespace)
+  expect(appUseUrl({ targetName: "svc-api", namespace: "drop-acme", publicHost: "svc-api.drop.example.com", minReplicas: 1 })).toBe(
+    "http://svc-api.drop-acme.svc.cluster.local:80",
+  );
+  // min 0: no pod to dial → point at the public host so the call wakes it through the edge → interceptor
+  expect(appUseUrl({ targetName: "svc-api", namespace: "drop-acme", publicHost: "svc-api.drop.example.com", minReplicas: 0 })).toBe(
+    "https://svc-api.drop.example.com",
+  );
+});
+
+test("H3 appManifests injects resolved appUrlEnv as PLAIN container env on every process", () => {
+  const app: AppConfig = {
+    ...base,
+    processes: { web: { web: true }, worker: { command: "node worker.js" } },
+  };
+  const m = appManifests(app, {
+    name: "web",
+    namespace: "drop-acme",
+    host: "web.drop.example.com",
+    appUrlEnv: [
+      { name: "API_URL", value: "http://svc-api.drop-acme.svc.cluster.local:80" },
+      { name: "BILLING_URL", value: "https://svc-billing.drop.example.com" },
+    ],
+  });
+  const webCtr = (m.deployment as any).spec.template.spec.containers[0];
+  expect(webCtr.env).toEqual([
+    { name: "API_URL", value: "http://svc-api.drop-acme.svc.cluster.local:80" },
+    { name: "BILLING_URL", value: "https://svc-billing.drop.example.com" },
+  ]);
+  // shared with the worker process too (SEC-5: all processes carry identical env)
+  const workerCtr = (m.workers as any[])[0].deployment.spec.template.spec.containers[0];
+  expect(workerCtr.env).toEqual(webCtr.env);
 });
 
 test("appManifests sets an explicit imagePullPolicy by tag + imagePullSecrets only when given", () => {

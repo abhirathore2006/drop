@@ -235,8 +235,10 @@ export function sanitizeStackConfig(input: unknown): StackSpec | undefined {
 }
 
 /**
- * Validate the stack's edges STRUCTURALLY-across-resources: every app→database (`uses`) target and
- * site→app (`env_from`) target must be a resource KEY present in the same stack, of the correct type.
+ * Validate the stack's edges STRUCTURALLY-across-resources: every app→{database,bucket,cache,auth,app}
+ * (`uses`) target and site→app (`env_from`) target must be a resource KEY present in the same stack, of
+ * the correct type. (H3) app→app is a `uses` edge like the others (injects `<KEY>_URL`); a static site
+ * has no runtime env, so it carries NO `uses` (sanitizeSite drops it) — site→app stays `env_from` only.
  * Returns an error string (for a 400), or null when the edges are sound. Cycles are the planner's job.
  */
 export function validateStackEdges(spec: StackSpec): string | null {
@@ -259,6 +261,13 @@ export function validateStackEdges(spec: StackSpec): string | null {
           const t = spec.resources[u.auth];
           if (!t) return `app "${key}" uses auth "${u.auth}", which is not a resource in this stack`;
           if (t.type !== "auth") return `app "${key}" uses "${u.auth}", which is a ${t.type}, not an auth resource`;
+        } else if (u.app) {
+          // (H3) app→app service discovery: the target must be another app resource in the same stack.
+          // The consumer gets a `<KEY>_URL` env at reconcile (see applyAppResource). A cycle (a↔b) is the
+          // planner's job to reject (topoOrder), not this structural check.
+          const t = spec.resources[u.app];
+          if (!t) return `app "${key}" uses app "${u.app}", which is not a resource in this stack`;
+          if (t.type !== "app") return `app "${key}" uses "${u.app}", which is a ${t.type}, not an app`;
         }
       }
     } else if (res.type === "auth") {

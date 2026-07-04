@@ -29,6 +29,7 @@ export interface EditorUse {
   bucket?: string;
   cache?: string;
   auth?: string; // (K1) app→auth binding — injects AUTH_URL + AUTH_JWT_SECRET
+  app?: string; // (H3) app→app binding (service discovery) — injects <KEY>_URL
   via?: string;
 }
 export interface EditorEnvFrom {
@@ -73,6 +74,7 @@ export const RESOURCE_KINDS: ResourceKind[] = ["site", "app", "database", "cache
 //   (app  → cache)    uses      — app consumes a Valkey cache
 //   (app  → bucket)   uses      — app consumes an object bucket
 //   (app  → auth)     uses      — app consumes an auth engine (K1)
+//   (app  → app)      uses      — app calls a peer app; injects <KEY>_URL (H3, service discovery)
 //   (site → app)      env_from  — site substitutes the app's URL at publish time
 //   (auth → database) db        — auth engine's users live in that Postgres (K1; REQUIRED, scalar)
 // Everything else (db→db, app→site, site→site, cycles, self) is refused. This is the SINGLE table the
@@ -80,18 +82,19 @@ export const RESOURCE_KINDS: ResourceKind[] = ["site", "app", "database", "cache
 // modules (validateStackEdges + sanitizeStackConfig) and fails if this drifts (as it did when K1 added
 // `auth` mid-slice — that failure is what drove these two extra rows in).
 export function legalEdges(fromType: ResourceKind, toType: ResourceKind): EdgeKind | null {
-  if (fromType === "app" && (toType === "database" || toType === "cache" || toType === "bucket" || toType === "auth")) return "uses";
+  if (fromType === "app" && (toType === "database" || toType === "cache" || toType === "bucket" || toType === "auth" || toType === "app")) return "uses";
   if (fromType === "site" && toType === "app") return "env_from";
   if (fromType === "auth" && toType === "database") return "db";
   return null;
 }
 
-/** The `uses` slot name for a provider kind (how the server keys an app→provider binding). */
-function usesSlot(providerType: ResourceKind): "database" | "bucket" | "cache" | "auth" | null {
-  return providerType === "database" || providerType === "bucket" || providerType === "cache" || providerType === "auth" ? providerType : null;
+/** The `uses` slot name for a provider kind (how the server keys an app→provider binding). (H3) a peer
+ *  app is keyed by the `app` slot — same shape as the others. */
+function usesSlot(providerType: ResourceKind): "database" | "bucket" | "cache" | "auth" | "app" | null {
+  return providerType === "database" || providerType === "bucket" || providerType === "cache" || providerType === "auth" || providerType === "app" ? providerType : null;
 }
-/** The resource KEY a single `uses` entry targets (database, bucket, cache, or auth slot). */
-const useTarget = (u: EditorUse): string | undefined => u.database ?? u.bucket ?? u.cache ?? u.auth;
+/** The resource KEY a single `uses` entry targets (database, bucket, cache, auth, or (H3) app slot). */
+const useTarget = (u: EditorUse): string | undefined => u.database ?? u.bucket ?? u.cache ?? u.auth ?? u.app;
 const usesTargets = (u: EditorUse, key: string): boolean => useTarget(u) === key;
 
 /** The inline semantic label shown while a magnetic edge snaps (B1/K1 injection semantics). */
@@ -101,6 +104,7 @@ export function edgeSemantic(fromType: ResourceKind, toType: ResourceKind, as?: 
     if (toType === "cache") return "injects REDIS_URL";
     if (toType === "bucket") return "injects S3_*";
     if (toType === "auth") return "injects AUTH_URL + AUTH_JWT_SECRET";
+    if (toType === "app") return "injects <KEY>_URL"; // (H3) service discovery — the peer's key uppercased
   }
   if (fromType === "site" && toType === "app") return `injects ${as ? as : "${AS}"}`;
   if (fromType === "auth" && toType === "database") return "auth engine + users live here";
@@ -241,7 +245,8 @@ export function specEdges(spec: EditorSpec): EditorGraphEdge[] {
       for (const u of res.uses ?? []) {
         const target = useTarget(u);
         if (!target || !(target in spec.resources)) continue;
-        const label = u.database ? "PG* + CA" : u.bucket ? "S3_*" : u.cache ? "REDIS_URL" : "AUTH_*";
+        // (H3) app→app shows the concrete injected env var (<KEY>_URL, the peer key uppercased).
+        const label = u.database ? "PG* + CA" : u.bucket ? "S3_*" : u.cache ? "REDIS_URL" : u.auth ? "AUTH_*" : `${target.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_URL`;
         out.push({ from: target, to: key, kind: "uses", label });
       }
     if (res.type === "site")

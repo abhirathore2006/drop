@@ -192,7 +192,8 @@
     - { <span class="tok-k">database</span>: <span class="tok-s">tododb</span> }              <span class="tok-c"># a `drop db create tododb` in the same org</span>
     - { <span class="tok-k">database</span>: <span class="tok-s">tododb</span>, <span class="tok-k">via</span>: <span class="tok-s">pooler</span> } <span class="tok-c"># route PGHOST through the DB's connection pooler (see database: below)</span>
     - { <span class="tok-k">bucket</span>: <span class="tok-s">avatars</span> }            <span class="tok-c"># a bucket in the same org → S3_* env (see Buckets)</span>
-    - { <span class="tok-k">cache</span>: <span class="tok-s">sessions</span> }           <span class="tok-c"># a cache in the same org → REDIS_URL env (see Cache)</span></code></pre>
+    - { <span class="tok-k">cache</span>: <span class="tok-s">sessions</span> }           <span class="tok-c"># a cache in the same org → REDIS_URL env (see Cache)</span>
+    - { <span class="tok-k">app</span>: <span class="tok-s">backend</span> }             <span class="tok-c"># a peer app in the same org → BACKEND_URL env (service discovery, see Stacks)</span></code></pre>
 <p>For each bound database, Drop injects into the app's pod:</p>
 <ul>
   <li><code>envFrom</code> the CNPG-generated <code>&lt;db&gt;-app</code> Secret — so <code>PGHOST</code>/<code>PGUSER</code>/<code>PGPASSWORD</code>/<code>PGDATABASE</code> come straight from the database. The password is <strong>never</strong> copied into the app's own secret, so rotation just works (the pod re-reads on restart).</li>
@@ -201,6 +202,7 @@
   <li>with <code>via: pooler</code>, a <code>PGHOST</code> override pointing at the database's <a href="#pooler">connection pooler</a> Service (<code>&lt;db&gt;-pooler-rw</code>) instead of the primary. It's a container env var, so it wins over the <code>&lt;db&gt;-app</code> value; enable the pooler on the database first (<code>drop db pooler enable</code>).</li>
 </ul>
 <p><code>uses</code> also binds non-database resources: <code>bucket:</code> injects <code>S3_*</code> credentials (see <a href="buckets.html">Buckets</a>), <code>cache:</code> injects <code>REDIS_URL</code> (see <a href="cache.html">Cache</a>), and <code>auth:</code> injects <code>AUTH_URL</code> + <code>AUTH_JWT_SECRET</code> (see <a href="auth.html">Auth</a>) — all through the write-only secret path, all same-org-only. Multiple bindings of a kind get resource-name-prefixed variables.</p>
+<p>Finally, <code>app:</code> is <strong>service discovery</strong> between apps — a peer app in the same org gets a plain (non-secret) <code>&lt;NAME&gt;_URL</code> env pointing at its in-cluster Service, or at its public wake host when it scales to zero. It's the same edge you draw in a <a href="stacks.html#app-app">stack</a>; a cross-org target is refused with a <code>400</code>. See <a href="stacks.html#app-app">Stacks → app → app</a> for the full URL-resolution + latency notes.</p>
 <div class="note tip"><span class="lbl">Tip</span><p><code>uses</code> replaces the manual <code>PG*</code> + <code>drop db password … --set-secret</code> wiring shown in example 4 below. Pass individual <code>PG*</code> only to <em>override</em> a specific value; prefer discrete <code>PG*</code> over a single <code>DATABASE_URL</code>, which some drivers silently prefer even when stale.</p></div>
 
 <h3>database:</h3>

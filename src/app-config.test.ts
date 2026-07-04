@@ -147,6 +147,23 @@ test("sanitizeAppConfig parses uses:[{auth}] (K1) alongside other kinds; dedupes
   expect(twice.uses).toEqual([{ database: "maindb" }, { auth: "login" }]);
 });
 
+test("sanitizeAppConfig parses uses:[{app}] (H3, service discovery) alongside other kinds; dedupes; round-trips", () => {
+  const c = sanitizeAppConfig({
+    image: "x:1",
+    uses: [
+      { database: "maindb" },
+      { app: "backend" },
+      { app: "backend" }, // duplicate app → collapsed
+      { app: "Bad_Name" }, // fails validateName → dropped
+      { app: "api" }, // reserved word → dropped (validateName)
+      { app: 9 }, // non-string → dropped
+    ],
+  })!;
+  expect(c.uses).toEqual([{ database: "maindb" }, { app: "backend" }]);
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(c)))!;
+  expect(twice.uses).toEqual([{ database: "maindb" }, { app: "backend" }]);
+});
+
 test("sanitizeAppConfig uses is round-trip safe (CLI sanitizes -> JSON -> API re-sanitizes)", () => {
   const once = sanitizeAppConfig({ image: "x:1", uses: [{ database: "tododb" }] })!;
   const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!; // feed the sanitized object back in

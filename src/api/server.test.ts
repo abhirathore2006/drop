@@ -735,6 +735,40 @@ test("deploy cannot bind a database in a DIFFERENT org → 400", async () => {
   await db.destroy();
 });
 
+test("H3 deploy uses:[{app}]: always-on target → in-cluster Service URL; scale-to-zero target → public wake host", async () => {
+  const { app, kube, meta, db } = await mk();
+  // an always-on peer (min ≥ 1) and a scale-to-zero peer (default min 0), both alice's (same ns)
+  expect((await call(app, "POST", "/v1/apps/backend", "alice", { image: "b:1", scale: { min: 1, max: 2 } })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/coldsvc", "alice", { image: "c:1" })).status).toBe(200); // default scale {min:0}
+  const res = await call(app, "POST", "/v1/apps/frontend", "alice", { image: "f:1", uses: [{ app: "backend" }, { app: "coldsvc" }] });
+  expect(res.status).toBe(200);
+  const ns = (await meta.getSitePlain("frontend"))!.namespace;
+  const ctr = (kube.applies.find((a) => a.name === "frontend")!.manifests.deployment as any).spec.template.spec.containers[0];
+  // BACKEND is always-on → dial its Service directly (lowest latency); COLDSVC scales to zero → its
+  // public host, which wakes it through the edge → KEDA interceptor (documented added latency).
+  expect(ctr.env).toContainEqual({ name: "BACKEND_URL", value: `http://backend.${ns}.svc.cluster.local:80` });
+  expect(ctr.env).toContainEqual({ name: "COLDSVC_URL", value: "https://coldsvc.drop.example.com" });
+  await db.destroy();
+});
+
+test("H3 deploy uses:[{app}] refuses a missing target, a cross-org target, and self-reference", async () => {
+  const { app, db } = await mk();
+  // missing
+  const missing = await call(app, "POST", "/v1/apps/f1", "alice", { image: "x:1", uses: [{ app: "ghostapp" }] });
+  expect(missing.status).toBe(400);
+  expect((await missing.json()).error).toContain("ghostapp");
+  // cross-org: bob (his own personal org) tries to use alice's app
+  expect((await call(app, "POST", "/v1/apps/aliceapp", "alice", { image: "x:1" })).status).toBe(200);
+  const cross = await call(app, "POST", "/v1/apps/bobapp", "bob", { image: "x:1", uses: [{ app: "aliceapp" }] });
+  expect(cross.status).toBe(400);
+  expect((await cross.json()).error).toContain("different organisation");
+  // self-reference
+  const self = await call(app, "POST", "/v1/apps/loopapp", "alice", { image: "x:1", uses: [{ app: "loopapp" }] });
+  expect(self.status).toBe(400);
+  expect((await self.json()).error).toContain("cannot use itself");
+  await db.destroy();
+});
+
 test("app secrets: write-only set/list/delete (owner), value NEVER returned; deploy reconciles the binding", async () => {
   const { app, secrets, db } = await mk();
   await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
@@ -1718,6 +1752,35 @@ test("stack up creates a db + app + site, wires the uses edge, and re-runs as al
   const body2 = await res2.json();
   expect(body2.plan.every((s: any) => s.action === "noop")).toBe(true);
   expect(body2.specVersion).toBe(2);
+  await db.destroy();
+});
+
+test("H3 stack up: app→app uses injects <KEY>_URL (svc for always-on, public host for scale-to-zero); ordered target-first", async () => {
+  const { app, kube, meta, db } = await mk();
+  const spec = {
+    name: "svc",
+    resources: {
+      hot: { type: "app", scale: { min: 1, max: 3 } }, // always-on target
+      cold: { type: "app" }, // default scale {min:0} → scale-to-zero target
+      web: { type: "app", uses: [{ app: "hot" }, { app: "cold" }] },
+    },
+  };
+  const res = await call(app, "POST", "/v1/stacks/svc/up", "alice", {
+    spec,
+    resolved: { hot: { image: "h:1" }, cold: { image: "c:1" }, web: { image: "w:1" } },
+  });
+  expect(res.status).toBe(200);
+  // web depends on both peers → they are created BEFORE it (topo order)
+  const order = (await res.json()).plan.map((s: any) => s.key);
+  expect(order.indexOf("web")).toBeGreaterThan(order.indexOf("hot"));
+  expect(order.indexOf("web")).toBeGreaterThan(order.indexOf("cold"));
+  const ns = (await meta.getSitePlain("svc-web"))!.namespace;
+  const ctr = (kube.applies.find((a) => a.name === "svc-web")!.manifests.deployment as any).spec.template.spec.containers[0];
+  expect(ctr.env).toContainEqual({ name: "HOT_URL", value: `http://svc-hot.${ns}.svc.cluster.local:80` });
+  expect(ctr.env).toContainEqual({ name: "COLD_URL", value: "https://svc-cold.drop.example.com" });
+  // the graph edge is rendered with the concrete injected env var
+  const graph = await (await call(app, "GET", "/v1/stacks/svc/graph", "alice")).json();
+  expect(graph.edges).toContainEqual({ from: "hot", to: "web", kind: "uses", label: "injects HOT_URL" });
   await db.destroy();
 });
 

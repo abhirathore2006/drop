@@ -23,7 +23,7 @@ import { OrgStore, validateOrgSlug, type Org } from "../orgs/store.ts";
 import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
-import { sanitizeAppConfig, assertHttpOnly, assertProcesses, type AppConfig } from "../app-config.ts";
+import { sanitizeAppConfig, assertHttpOnly, assertProcesses, expandProcesses, type AppConfig, type AppUse } from "../app-config.ts";
 import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword, validateDbStorage, validateDbExtensions, storageToBytes } from "../db-config.ts";
 import { sanitizeCacheConfig, validateCacheMemory, cacheMemoryToBytes, type CacheConfig } from "../cache-config.ts";
 import type { BucketStore } from "../buckets/types.ts";
@@ -36,7 +36,7 @@ import { TemplateStore, validateTemplateSlug } from "../templates/store.ts";
 import type { TemplateVisibility } from "../db/schema.ts";
 import { substituteTemplate, sanitizeVariables } from "../templates/vars.ts";
 import { stripStackSpec } from "../templates/strip.ts";
-import { appManifests, releaseJobManifest, tenantManifests, type ExposedWorkload } from "../kube/manifests.ts";
+import { appManifests, releaseJobManifest, tenantManifests, appUseEnvName, appUseUrl, type ExposedWorkload } from "../kube/manifests.ts";
 import { TcpEndpointStore, PortPoolExhaustedError, type TcpEndpoint } from "../edge-tcp/store.ts";
 import { PreviewStore, validatePreviewLabel } from "../previews/store.ts";
 import { databaseManifests, poolerManifest, poolerName, type PoolerMode } from "../kube/cnpg.ts";
@@ -490,6 +490,29 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!site.currentVersion) return undefined;
     const cur = (await d.meta.listVersions(site.name)).find((v) => v.id === site.currentVersion);
     return cur?.config as AppConfig | undefined;
+  };
+  // (H3) The web process's replica floor for an app's stored config — decides whether a peer reaches it
+  // directly in-cluster (min ≥ 1) or must wake it through the edge (min 0 / not yet deployed → 0).
+  const webMinReplicas = (cfg: AppConfig | undefined): number => {
+    if (!cfg) return 0; // never deployed → no pods → route through the wake path
+    return expandProcesses(cfg, "x").find((p) => p.web)?.scale.min ?? 0;
+  };
+  // (H3) Resolve the `<KEY>_URL` service-discovery env a DIRECT-DEPLOY (or rollback) app's `{app}` uses
+  // inject. Unlike bucket/cache/auth creds this is NON-secret (a Service URL), so it is NOT persisted to
+  // the write-only secret store — it is recomputed on every deploy AND rollback from the LIVE target (its
+  // current scale decides direct-svc vs wake-via-edge). `u.app` is the target app NAME; a bound target is
+  // same-namespace (enforced at deploy), so `namespace` is the consumer's own ns. A gone/mistyped target
+  // is skipped here (the deploy-time validation loop is the gate that 400s it).
+  const resolveAppUsesEnv = async (uses: AppUse[] | undefined, namespace: string): Promise<{ name: string; value: string }[]> => {
+    const out: { name: string; value: string }[] = [];
+    for (const u of uses ?? []) {
+      if (!u.app) continue;
+      const tSite = await d.meta.getSitePlain(u.app);
+      if (!tSite || tSite.type !== "app") continue;
+      const min = webMinReplicas(await currentAppConfig(tSite));
+      out.push({ name: appUseEnvName(u.app), value: appUseUrl({ targetName: u.app, namespace, publicHost: `${u.app}.${d.cfg.baseDomain}`, minReplicas: min }) });
+    }
+    return out;
   };
   // The sni-mode connect PORT for a protocol: postgres rides the shared PG port; other TLS-SNI
   // protocols ride the first tls-sni shared port. Falls back to 5432 (the default shared port).
@@ -962,6 +985,21 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         if (aSite.orgId !== site.orgId) {
           return c.json({ error: `auth "${u.auth}" belongs to a different organisation and cannot be bound` }, 400);
         }
+      } else if (u.app) {
+        // (H3) app→app service discovery: the target must be another app in the SAME org AND namespace.
+        // Cross-org/cross-namespace is refused (400) — the isolation model is the product, not a hole to
+        // punch casually; within an org all resources share the namespace, so same-org ⇒ same-namespace.
+        if (u.app === name) return c.json({ error: `app "${name}" cannot use itself` }, 400);
+        const pSite = await d.meta.getSitePlain(u.app);
+        if (!pSite || pSite.type !== "app") {
+          return c.json({ error: `app uses app "${u.app}", which does not exist` }, 400);
+        }
+        if (pSite.orgId !== site.orgId) {
+          return c.json({ error: `app "${u.app}" belongs to a different organisation and cannot be bound` }, 400);
+        }
+        if (pSite.namespace !== site.namespace) {
+          return c.json({ error: `app "${u.app}" is in a different namespace and cannot be bound (cross-namespace service discovery is refused)` }, 400);
+        }
       }
     }
 
@@ -972,10 +1010,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await applyTenantWithExposed(kube, ns); // namespace + NetworkPolicy + quota + LimitRange (+ A2b edge-tcp allow policies)
     const sandbox = !appCfg.trusted;
     const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
+    // (H3) Resolve `<KEY>_URL` service-discovery env for each `{app}` use (a non-secret plain container
+    // env — see resolveAppUsesEnv). Passed into the manifest context, not the write-only secret path.
+    const appUrlEnv = await resolveAppUsesEnv(appCfg.uses, ns);
     // versionId (H1): stamps `drop.dev/version` on the pod template so THIS deploy always rolls
     // pods, even when the image tag is unchanged from the previous version. tcpExposed (A2b) lets the
     // manifest layer accept a `protocol: tcp` service for an exposed app.
-    const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId, tcpExposed: !!exposeRow });
+    const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId, tcpExposed: !!exposeRow, ...(appUrlEnv.length ? { appUrlEnv } : {}) });
     // A stopped deploy (--no-start / already-stopped) rolls out nothing yet, so it also SKIPS the
     // release phase — the point of --no-start is to configure secrets first, and the release command
     // (which needs those secrets/the DB) would otherwise fail against an unconfigured app.
@@ -2004,10 +2045,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       await locks.withLock(`deploy:${name}`, DEPLOY_LOCK_TTL_MS, async () => {
         const sandbox = !appCfg.trusted;
         const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
+        // (H3) app→app `<KEY>_URL` env is a plain container env, NOT persisted to the secret store, so it
+        // must be RE-RESOLVED on rollback too (from the stored config's `{app}` uses against the target's
+        // CURRENT live scale) — otherwise the rolled-back pods would come back missing their peer URLs.
+        const appUrlEnv = await resolveAppUsesEnv(appCfg.uses, ns);
         // Same context construction as deploy (sandbox/imagePullSecret/host); versionId stamps the
         // pod-template annotation so a rollback to a version with the SAME image tag as what's
         // currently running still rolls the pods.
-        const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: target, tcpExposed: rollbackExposed });
+        const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: target, tcpExposed: rollbackExposed, ...(appUrlEnv.length ? { appUrlEnv } : {}) });
         // Rollback re-applies a KNOWN-good, previously-deployed version — the release phase is
         // intentionally SKIPPED here (unlike a fresh deploy): re-running a migration command against
         // a database that has already moved past it (or moved differently since) would be wrong, not
@@ -2870,7 +2915,20 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // (A2b) A stack resource may already be TCP-exposed (via `drop expose`); preserve the tcp-service
     // allowance. Stack-DRIVEN expose (the spec's `expose:` key, parsed+stored today) lands in a later slice.
     const stackExposed = !!(await tcp.get(site.name));
-    const manifests = appManifests(appCfg, { name: site.name, namespace: ns, host: `${site.name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId, tcpExposed: stackExposed });
+    // (H3) app→app edges: inject `<KEY>_URL` (KEY = the used resource key) for each `{app}` use. Non-
+    // secret plain container env resolved here (all stack resources share `ns`; the target's spec scale
+    // floor decides direct-svc vs wake-via-edge). NOT added to `appCfg.uses` — it needs no envFrom/secret
+    // wiring, only a container env — so appBinding never sees it; the edge itself lives in the stored spec.
+    const appUrlEnv = (res.uses ?? [])
+      .filter((u) => u.app)
+      .map((u) => {
+        const targetSite = siteNameForKey(spec, mapping, u.app!);
+        return {
+          name: appUseEnvName(u.app!),
+          value: appUseUrl({ targetName: targetSite, namespace: ns, publicHost: `${targetSite}.${d.cfg.baseDomain}`, minReplicas: spec.resources[u.app!]?.scale?.min ?? 0 }),
+        };
+      });
+    const manifests = appManifests(appCfg, { name: site.name, namespace: ns, host: `${site.name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId, tcpExposed: stackExposed, ...(appUrlEnv.length ? { appUrlEnv } : {}) });
     await d.kube!.applyApp(ns, site.name, manifests);
     const secretKeys = (await d.meta.listSecretKeys(site.name)).map((k) => k.key);
     await d.secrets.ensureBinding({ owner: site.owner, app: site.name, namespace: ns }, secretKeys);
@@ -3264,12 +3322,12 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     for (const [key, res] of Object.entries(spec.resources)) {
       if (res.type === "app")
         for (const u of res.uses ?? []) {
-          const targetKey = u.database ?? u.bucket ?? u.cache;
+          const targetKey = u.database ?? u.bucket ?? u.cache ?? u.app; // (H3) app→app is a `uses` edge too
           if (!targetKey) continue;
           const target = spec.resources[targetKey];
           if (!target) continue;
           const tSite = mapping[targetKey] ?? resolveResourceName(spec.name, targetKey, target);
-          const label = u.database ? `PG* via ${tSite}-app` : u.bucket ? `S3_* via ${tSite}` : `REDIS_URL via ${tSite}`;
+          const label = u.database ? `PG* via ${tSite}-app` : u.bucket ? `S3_* via ${tSite}` : u.cache ? `REDIS_URL via ${tSite}` : `injects ${appUseEnvName(targetKey)}`;
           edges.push({ from: targetKey, to: key, kind: "uses", label });
         }
       if (res.type === "site")
