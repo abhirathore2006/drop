@@ -45,6 +45,10 @@ export function mirrorNormalizeStatus(input: Omit<DeriveStatusInput, "status">):
     return { status: "running", reason: "serving" };
   }
 
+  if (input.type === "bucket") {
+    return { status: "running", reason: "ready" };
+  }
+
   if (input.type === "app") {
     if (input.runtimeState === "stopped") return { status: "stopped", reason: "stopped" };
     const st = input.appStatus;

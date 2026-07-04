@@ -139,6 +139,26 @@ export function buildMcp(): McpServer {
     async ({ name }) => run(() => getClient().then((c) => c.dbWake(name))),
   );
 
+  // tenant object storage (buckets, I1)
+  server.registerTool(
+    "bucket_create",
+    {
+      description: "Create a tenant object-storage bucket. Returns the S3 endpoint/bucket/prefix + access credentials ONCE (they are never stored or returned again — bind the bucket to an app with `uses: [{ bucket: <name> }]` to inject them automatically).",
+      inputSchema: { name: z.string().describe("bucket name (DNS-safe; globally unique)"), org: z.string().optional().describe("organisation slug (default: your personal org)") },
+    },
+    async ({ name, org }) => run(() => getClient().then((c) => c.bucketCreate(name, org))),
+  );
+  server.registerTool(
+    "bucket_status",
+    { description: "Show a bucket's endpoint/bucket/prefix + size (bytes) and object count. Never returns credentials.", inputSchema: { name: z.string() } },
+    async ({ name }) => run(() => getClient().then((c) => c.info(name))),
+  );
+  server.registerTool(
+    "bucket_rotate",
+    { description: "Re-mint a bucket's access credentials (owner only). Returns the new credentials ONCE.", inputSchema: { name: z.string() } },
+    async ({ name }) => run(() => getClient().then((c) => c.bucketRotate(name))),
+  );
+
   server.registerTool(
     "list_sites",
     { description: "List sites you own or collaborate on.", inputSchema: {} },

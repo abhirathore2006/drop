@@ -17,7 +17,10 @@ export interface UsersTable {
 }
 
 export type Visibility = "public" | "private" | "password";
-export type WorkloadType = "site" | "app" | "database";
+// The `sites` discriminator. `bucket` (I1) is tenant object storage — a prefix in the platform S3
+// bucket (local) or a per-tenant prefix + scoped IAM policy (prod). It reuses the shared name
+// namespace, org ownership, roles, and audit like every other type. (cache/auth land later.)
+export type WorkloadType = "site" | "app" | "database" | "bucket";
 
 export interface SitesTable {
   name: string;
@@ -138,6 +141,18 @@ export interface StackResourcesTable {
   site_name: string;
 }
 
+/** Per-org quota OVERRIDES (Future.md item 10). One row per (org, key); the value is stored as text
+ *  (a k8s quantity like "5Gi", or an integer as a string) and parsed at the enforcement point. An
+ *  absent row means "use the platform default" (config / MAX_DB_STORAGE). Keys v1: `max_workloads`,
+ *  `max_db_storage` (per-database PVC cap), `storage_budget_bytes` (org-wide storage budget). */
+export interface OrgQuotasTable {
+  org_id: string;
+  key: string;
+  value: string;
+  updated_by: string;
+  updated_at: Generated<Ts>;
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -151,4 +166,5 @@ export interface Database {
   locks: LocksTable;
   stacks: StacksTable;
   stack_resources: StackResourcesTable;
+  org_quotas: OrgQuotasTable;
 }

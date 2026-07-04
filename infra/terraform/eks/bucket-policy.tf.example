@@ -1,0 +1,79 @@
+# ============================================================================================
+# Tenant object storage (Drop "buckets", Plan-v5 slice I1) — per-tenant, prefix-scoped IAM policy
+# ============================================================================================
+#
+# WHAT THIS IS
+# ------------
+# Locally, a Drop bucket is just a PREFIX inside the platform's own S3 bucket, and every tenant
+# shares the platform's test S3 credentials (see src/buckets/floci.ts — LOCAL ONLY). That is NOT
+# safe in production: a tenant handed shared creds could read another tenant's prefix.
+#
+# In production the `BucketStore` port must be backed by an `aws-iam` implementation that, per
+# bucket, mints a scoped credential (an IAM user access key, or preferably a short-lived STS
+# session from `sts:AssumeRole` / `AssumeRoleWithWebIdentity`) whose permissions are LIMITED to the
+# one tenant prefix `buckets/<tenant-namespace>/<bucket-name>/`. This file is the TEMPLATE for that
+# scoped policy. It is a `.tf.example` (not applied automatically): copy it, template the variables
+# from your bucket provisioner, and wire it into the aws-iam store when that store is built (v1
+# ships the floci store only — the aws-iam store is a named follow-up).
+#
+# ISOLATION INVARIANT (the property the table-test in src/buckets/types.test.ts pins)
+# -----------------------------------------------------------------------------------
+# The pure function `prefixScopedPolicy(bucket, prefix)` in src/buckets/types.ts renders EXACTLY the
+# JSON below. Because the prefix embeds the tenant namespace (`bucketPrefix()`), two tenants get
+# disjoint object-access ARNs AND disjoint `s3:prefix` list conditions — so tenant A's credential
+# can neither read/write nor even ENUMERATE tenant B's keys. Keep this template and that function in
+# lockstep; the function is the source of truth the test asserts against.
+#
+# The `Resource` for object access is `arn:aws:s3:::<bucket>/<prefix>*` and the `s3:ListBucket` grant
+# is on the bucket ARN but CONDITIONED to `s3:prefix = <prefix>*` — listing is scoped, not global.
+
+variable "platform_bucket" {
+  type        = string
+  description = "The shared platform S3 bucket that holds all tenant prefixes."
+}
+
+variable "tenant_namespace" {
+  type        = string
+  description = "The tenant's k8s namespace — the first path segment of the prefix (isolation key)."
+}
+
+variable "bucket_name" {
+  type        = string
+  description = "The Drop bucket resource name (globally unique) — the second path segment."
+}
+
+locals {
+  # MUST match src/buckets/types.ts `bucketPrefix(namespace, name)` exactly.
+  tenant_prefix = "buckets/${var.tenant_namespace}/${var.bucket_name}/"
+}
+
+# The prefix-scoped policy document. Renders identically to prefixScopedPolicy() in TS.
+data "aws_iam_policy_document" "tenant_bucket" {
+  statement {
+    sid       = "TenantObjectAccess"
+    effect    = "Allow"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["arn:aws:s3:::${var.platform_bucket}/${local.tenant_prefix}*"]
+  }
+
+  statement {
+    sid       = "TenantListScoped"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::${var.platform_bucket}"]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["${local.tenant_prefix}*"]
+    }
+  }
+}
+
+# Example attachment surface. A real aws-iam BucketStore would create ONE of these per bucket (an IAM
+# user + access key it stores in a platform secret so provision() stays idempotent), OR — preferred —
+# a role the tenant assumes for short-lived STS creds. Shown as an IAM policy here for clarity.
+resource "aws_iam_policy" "tenant_bucket" {
+  name   = "drop-bucket-${var.tenant_namespace}-${var.bucket_name}"
+  policy = data.aws_iam_policy_document.tenant_bucket.json
+}

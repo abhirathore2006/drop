@@ -28,7 +28,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 6b | M0.5 Drop zone publish | done | a2ef18f | USTAR writer lockstep-tested vs archive.ts; fflate lazy chunk; + status field wired into site detail |
 | 7 | C1 Read-only canvas | done | 4506133 | graph endpoint w/ aggregated ns status lists; xyflow lazy chunk; CSP unchanged |
 | 8 | I1 Buckets (+FM item 10 quotas) | todo | | |
-| 9 | A2 L4 plane: NLB + TCP router | todo | | |
+| 9 | A2 L4 plane: NLB + TCP router | in-progress | a477b9c | A2a router core done (SNI/PG-preamble/splice/caps); A2b = registry+expose API+manifests/Helm/TF |
 | 10 | J1 Service accounts / CI tokens | todo | | |
 | 11 | D1 Template registry | todo | | |
 | 12 | E1 Static previews · H2 cron | todo | | |

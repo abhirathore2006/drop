@@ -96,6 +96,23 @@ test("sanitizeAppConfig omits uses when absent / not an array / all-invalid; cap
   expect(sanitizeAppConfig({ image: "x:1", uses: many })!.uses!.length).toBe(8); // capped
 });
 
+test("sanitizeAppConfig parses uses:[{bucket}] (I1) alongside {database}; dedupes per kind; round-trips", () => {
+  const c = sanitizeAppConfig({
+    image: "x:1",
+    uses: [
+      { database: "tododb" },
+      { bucket: "avatars" },
+      { bucket: "avatars" }, // duplicate bucket → collapsed
+      { bucket: "Bad_Name" }, // fails validateName → dropped
+      { bucket: 42 }, // non-string → dropped
+    ],
+  })!;
+  expect(c.uses).toEqual([{ database: "tododb" }, { bucket: "avatars" }]);
+  // round-trip safe
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(c)))!;
+  expect(twice.uses).toEqual([{ database: "tododb" }, { bucket: "avatars" }]);
+});
+
 test("sanitizeAppConfig uses is round-trip safe (CLI sanitizes -> JSON -> API re-sanitizes)", () => {
   const once = sanitizeAppConfig({ image: "x:1", uses: [{ database: "tododb" }] })!;
   const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!; // feed the sanitized object back in
@@ -227,4 +244,88 @@ test("expandProcesses: worker-only app has no web process", () => {
   expect(procs.some((p) => p.web)).toBe(false);
   expect(procs).toHaveLength(1);
   expect(procs[0]!.name).toBe("batch-worker");
+});
+
+// ---- H2: schedule (cron) ----
+
+test("sanitizeAppConfig schedule: accepts numbers/ranges/steps/lists/*, normalizes whitespace", () => {
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *" })!.schedule).toBe("0 3 * * *");
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "*/15 * * * *" })!.schedule).toBe("*/15 * * * *"); // step on *
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 0,12 * * *" })!.schedule).toBe("0 0,12 * * *"); // list
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 9-17 * * 1-5" })!.schedule).toBe("0 9-17 * * 1-5"); // range
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0-30/10 * * * *" })!.schedule).toBe("0-30/10 * * * *"); // range + step
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 0 * * 7" })!.schedule).toBe("0 0 * * 7"); // 7 = Sunday, accepted
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "  0   3  *  *  * " })!.schedule).toBe("0 3 * * *"); // whitespace normalized
+});
+
+test("sanitizeAppConfig schedule: junk is dropped (key absent), never throws", () => {
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "not a cron" })!.schedule).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * *" })!.schedule).toBeUndefined(); // 4 fields
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * * *" })!.schedule).toBeUndefined(); // 6 fields
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "60 3 * * *" })!.schedule).toBeUndefined(); // minute out of range
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 24 * * *" })!.schedule).toBeUndefined(); // hour out of range
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 3 0 * *" })!.schedule).toBeUndefined(); // day-of-month 0 (1-31 only)
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * 13 *" })!.schedule).toBeUndefined(); // month out of range
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * 8" })!.schedule).toBeUndefined(); // dow out of range
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "-1 3 * * *" })!.schedule).toBeUndefined(); // negative
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "5-1 3 * * *" })!.schedule).toBeUndefined(); // inverted range
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "*/0 * * * *" })!.schedule).toBeUndefined(); // step 0
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "soon" })!.schedule).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", schedule: "" })!.schedule).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", schedule: 123 })!.schedule).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1" })!.schedule).toBeUndefined();
+});
+
+test("sanitizeAppConfig schedule is round-trip safe (CLI sanitizes -> JSON -> API re-sanitizes)", () => {
+  const once = sanitizeAppConfig({ image: "x:1", schedule: "*/5 * * * *" })!;
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!;
+  expect(twice.schedule).toBe("*/5 * * * *");
+});
+
+test("sanitizeAppConfig command: string -> shell form, array -> exec form, junk dropped", () => {
+  expect(sanitizeAppConfig({ image: "x:1", command: "python run.py" })!.command).toBe("python run.py");
+  expect(sanitizeAppConfig({ image: "x:1", command: ["python", "run.py"] })!.command).toEqual(["python", "run.py"]);
+  expect(sanitizeAppConfig({ image: "x:1", command: "" })!.command).toBeUndefined(); // empty string
+  expect(sanitizeAppConfig({ image: "x:1", command: [] })!.command).toBeUndefined(); // empty array
+  expect(sanitizeAppConfig({ image: "x:1", command: [123, "ok"] })!.command).toEqual(["ok"]); // non-string entries dropped
+  expect(sanitizeAppConfig({ image: "x:1", command: 42 })!.command).toBeUndefined(); // wrong type
+  expect(sanitizeAppConfig({ image: "x:1" })!.command).toBeUndefined(); // absent
+});
+
+test("sanitizeAppConfig command is round-trip safe", () => {
+  const once = sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", command: ["node", "job.js"] })!;
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!;
+  expect(twice.schedule).toBe("0 3 * * *");
+  expect(twice.command).toEqual(["node", "job.js"]);
+});
+
+test("assertProcesses: schedule is mutually exclusive with processes", () => {
+  const app = sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", processes: { worker: { command: "w" } } })!;
+  expect(() => assertProcesses(app)).toThrow(/schedule.*processes|processes.*schedule/i);
+});
+
+test("assertProcesses: schedule is mutually exclusive with an explicitly-declared services", () => {
+  const app = sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", services: [{ internal_port: 9090, protocol: "http" }] })!;
+  expect(() => assertProcesses(app)).toThrow(/schedule.*services|services.*schedule/i);
+});
+
+test("assertProcesses: schedule is mutually exclusive with healthcheck", () => {
+  const app = sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", healthcheck: { path: "/healthz" } })!;
+  expect(() => assertProcesses(app)).toThrow(/schedule.*healthcheck|healthcheck.*schedule/i);
+});
+
+test("assertProcesses: schedule + the implicit default service (no services declared) is ACCEPTED", () => {
+  const app = sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *" })!;
+  expect(app.services).toEqual([{ internalPort: 8080, protocol: "http" }]); // still defaulted by the sanitizer
+  expect(() => assertProcesses(app)).not.toThrow();
+});
+
+test("assertProcesses: schedule + services explicitly re-stating the default shape is ALSO accepted (documented tradeoff)", () => {
+  const app = sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", services: [{ internal_port: 8080, protocol: "http" }] })!;
+  expect(() => assertProcesses(app)).not.toThrow();
+});
+
+test("assertProcesses: schedule + release is fine (release is unaffected by H2)", () => {
+  const app = sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", release: "npm run migrate" })!;
+  expect(() => assertProcesses(app)).not.toThrow();
 });

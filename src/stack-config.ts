@@ -22,7 +22,7 @@ import {
 } from "./app-config.ts";
 import { sanitizeDatabaseConfig, type Hibernation } from "./db-config.ts";
 
-export type StackResourceKind = "site" | "app" | "database";
+export type StackResourceKind = "site" | "app" | "database" | "bucket";
 
 /** A2 opt-in TCP exposure, carried in the spec (parsed + stored now; enforced by A2 later). */
 export interface StackExpose {
@@ -127,6 +127,15 @@ function sanitizeDb(sub: Record<string, unknown>): StackResource | undefined {
   return res;
 }
 
+/** Sanitize a `bucket`-typed stack resource (I1). A bucket carries no content — only an optional
+ *  explicit name override; its prefix + creds are provisioned server-side and bound via `uses`. */
+function sanitizeBucket(sub: Record<string, unknown>): StackResource {
+  const res: StackResource = { type: "bucket" };
+  const name = str(sub.name, 63);
+  if (name && validateName(name) === null) res.name = name;
+  return res;
+}
+
 /** Sanitize a `site`-typed stack resource. Site routing config (redirects/headers/…) lives in the
  *  published bundle's OWN drop.yaml `site:` section — the stack spec carries only wiring: the build
  *  context (`dir`), a static `env`, and `env_from` edges (publish-time substitution from an app). */
@@ -174,6 +183,7 @@ export function sanitizeStackConfig(input: unknown): StackSpec | undefined {
     let res: StackResource | undefined;
     if (type === "app") res = sanitizeApp(sub);
     else if (type === "database") res = sanitizeDb(sub);
+    else if (type === "bucket") res = sanitizeBucket(sub);
     else if (type === "site") res = sanitizeSite(sub);
     else continue; // unknown/absent type → ignore the entry
     if (res) resources[key] = res;
@@ -191,9 +201,15 @@ export function validateStackEdges(spec: StackSpec): string | null {
   for (const [key, res] of Object.entries(spec.resources)) {
     if (res.type === "app") {
       for (const u of res.uses ?? []) {
-        const t = spec.resources[u.database];
-        if (!t) return `app "${key}" uses database "${u.database}", which is not a resource in this stack`;
-        if (t.type !== "database") return `app "${key}" uses "${u.database}", which is a ${t.type}, not a database`;
+        if (u.database) {
+          const t = spec.resources[u.database];
+          if (!t) return `app "${key}" uses database "${u.database}", which is not a resource in this stack`;
+          if (t.type !== "database") return `app "${key}" uses "${u.database}", which is a ${t.type}, not a database`;
+        } else if (u.bucket) {
+          const t = spec.resources[u.bucket];
+          if (!t) return `app "${key}" uses bucket "${u.bucket}", which is not a resource in this stack`;
+          if (t.type !== "bucket") return `app "${key}" uses "${u.bucket}", which is a ${t.type}, not a bucket`;
+        }
       }
     } else if (res.type === "site") {
       for (const e of res.env_from ?? []) {

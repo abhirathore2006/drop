@@ -15,6 +15,8 @@ import { createApp } from "../src/api/server.ts";
 import { KubeApiClient } from "../src/kube/client.ts";
 import { makeSecretStore } from "../src/secrets/factory.ts";
 import { makeImageStore } from "../src/images/factory.ts";
+import { makeBucketStore } from "../src/buckets/factory.ts";
+import { QuotaStore } from "../src/quotas/store.ts";
 import type { Verifier } from "../src/auth/types.ts";
 import type { KubeClient } from "../src/kube/types.ts";
 
@@ -87,7 +89,9 @@ const orgs = new OrgStore(db);
 const audit = new AuditStore(db);
 const locks = new LockStore(db);
 const stacks = new StackStore(db);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks });
+const bucket = makeBucketStore(cfg); // (I1) tenant object storage (floci-prefix locally)
+const quotas = new QuotaStore(db); // (item 10) per-org quota overrides
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });

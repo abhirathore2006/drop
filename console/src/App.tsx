@@ -84,6 +84,7 @@ export function App() {
             <Route path="/site/:name">{(p) => <WorkloadDetailPage key={p.name} name={dec(p.name)} me={me} />}</Route>
             <Route path="/app/:name">{(p) => <WorkloadDetailPage key={p.name} name={dec(p.name)} me={me} />}</Route>
             <Route path="/database/:name">{(p) => <WorkloadDetailPage key={p.name} name={dec(p.name)} me={me} />}</Route>
+            <Route path="/bucket/:name">{(p) => <WorkloadDetailPage key={p.name} name={dec(p.name)} me={me} />}</Route>
             <Route path="/stack/:name">{(p) => <StackPage key={p.name} name={dec(p.name)} />}</Route>
             <Route>
               <WorkloadsPage />

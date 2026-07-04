@@ -21,7 +21,7 @@ const SITES = {
 };
 const USAGE = {
   org: { slug: "acme", name: "Acme", kind: "team" },
-  workloads: { site: 0, app: 1, database: 1, total: 2 },
+  workloads: { site: 0, app: 1, database: 1, bucket: 2, total: 4 },
   cap: 5,
   quota: null,
 };
@@ -64,7 +64,7 @@ describe("WorkloadsPage", () => {
     // version chip shortened, usage summary rendered from the org usage endpoint
     expect(r.getByText("#abc123")).toBeTruthy();
     expect(await r.findByText("Usage")).toBeTruthy();
-    expect(r.getByText(/1 apps · 1 dbs · 0 sites/)).toBeTruthy();
+    expect(r.getByText(/1 apps · 1 dbs · 2 buckets · 0 sites/)).toBeTruthy();
   });
 
   test("renders the CLI empty state when there are no workloads", async () => {

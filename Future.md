@@ -206,6 +206,20 @@ is the foundation). Heavier than a flag — sequence after item 1 so the app re-
 
 ## 10. Storage quotas: per-app + per-tenant, admin-adjustable
 
+> **Status (2026-07-04):** SHIPPED (API level, alongside slice I1 buckets; admin UI lands in M2).
+> Migration 0008 adds `org_quotas(org_id, key, value, updated_by, updated_at)` with per-org override
+> keys `max_workloads`, `max_db_storage` (per-database PVC cap) and `storage_budget_bytes` (org-wide).
+> `src/quotas/store.ts` resolves each override over its platform default (`maxWorkloadsPerOrg`,
+> `MAX_DB_STORAGE`). Enforcement: the workload-cap check (`resolveCreateOrg`) and the db-create path
+> read the overrides — `validateDbStorage`/`sanitizeDatabaseConfig` gained an optional cap param
+> (back-compatible, defaults to the flat 1Gi); bucket-create + db-create consult `storage_budget_bytes`
+> and reject over-budget requests (429). `GET /v1/orgs/:slug/usage` gained a `storage` section
+> (`{ databases: {count, requestedBytes}, buckets: {count, bytes}, budget }`) — an approximate,
+> eventually-consistent computation (database PVC *requests* + a bucket object-size sweep). Admin API:
+> `GET/PUT /v1/admin/orgs/:slug/quotas` (admin-only, audited `quota.set`). **Not yet done:** the
+> per-app ephemeral-storage `LimitRange` dim and folding storage/`count/persistentvolumeclaims` into the
+> tenant `ResourceQuota` (the item's parts 1–2 at the manifest level), and the admin console editor (M2).
+
 > **Interim shipped:** a **hard per-database storage cap of `1Gi`** (`MAX_DB_STORAGE` in
 > `db-config.ts`), enforced at the control plane — `POST /v1/databases/:name` returns `400` when the
 > requested `storage` exceeds it, and the CLI/MCP reject up front (`parseDatabaseConfig` throws). The

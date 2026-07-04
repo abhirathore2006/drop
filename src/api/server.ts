@@ -22,7 +22,10 @@ import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
 import { sanitizeAppConfig, assertHttpOnly, assertProcesses, type AppConfig } from "../app-config.ts";
-import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword, validateDbStorage } from "../db-config.ts";
+import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword, validateDbStorage, storageToBytes } from "../db-config.ts";
+import type { BucketStore } from "../buckets/types.ts";
+import { makeBucketStore } from "../buckets/factory.ts";
+import { QuotaStore, validateQuota, QUOTA_KEYS } from "../quotas/store.ts";
 import { sanitizeStackConfig, validateStackEdges, resolveResourceName, type StackSpec, type StackResource } from "../stack-config.ts";
 import { planStack, StackCycleError, type LivePresence, type PlanStep } from "../stacks/plan.ts";
 import { StackStore } from "../stacks/store.ts";
@@ -50,6 +53,8 @@ export interface Deps {
   images: ImageStore; // image-push backend (containerd-import locally, registry/ECR in prod)
   orgs: OrgStore; // organisations (resource grouping + org-level permissions)
   audit: AuditStore; // append-only trail of mutating/admin actions
+  bucket?: BucketStore; // (I1) tenant object storage; defaults to makeBucketStore(cfg)
+  quotas?: QuotaStore; // (item 10) per-org quota overrides; defaults over `db`
   locks?: LockStore; // lease-based advisory locks (serialize deploy/release per app); defaults over `db`
   stacks?: StackStore; // stack metadata + resource mapping (B2); defaults over `db`
   now?: () => Date;
@@ -66,6 +71,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const now = d.now ?? (() => new Date());
   const locks = d.locks ?? new LockStore(d.db); // serialize deploy/release per app
   const stacks = d.stacks ?? new StackStore(d.db); // stack metadata + resource mapping
+  const buckets = d.bucket ?? makeBucketStore(d.cfg); // (I1) tenant object storage (floci-prefix locally)
+  const quotas = d.quotas ?? new QuotaStore(d.db); // (item 10) per-org quota overrides
 
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
   const app = new Hono<AuthEnv>();
@@ -89,6 +96,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.get("/app/:name", shell);
   app.get("/database/:name", shell);
   app.get("/site/:name", shell);
+  app.get("/bucket/:name", shell); // I1: bucket detail page
   app.get("/stack/:name", shell); // C1: the read-only stack canvas
 
   // Public docs site — the same static files GitHub Pages serves (docs/), now
@@ -174,13 +182,75 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       if (!canCreateInOrg(role, platformRole)) return { err: c.json({ error: `not a member of org ${orgSlug} with create rights` }, 403) };
       org = found;
     }
-    // Per-org workload cap (DROP_MAX_WORKLOADS_PER_ORG; 0 = unlimited). Only the CREATE path passes
-    // through here — re-deploys of an existing workload don't claim a new name, so they're never capped.
-    const cap = d.cfg.maxWorkloadsPerOrg;
+    // Per-org workload cap (item 10 override → DROP_MAX_WORKLOADS_PER_ORG default; 0 = unlimited). Only
+    // the CREATE path passes through here — re-deploys of an existing workload don't claim a new name.
+    const cap = await quotas.resolvedMaxWorkloads(org.id, d.cfg.maxWorkloadsPerOrg);
     if (cap > 0 && (await d.meta.countSitesInOrg(org.id)) >= cap) {
       return { err: c.json({ error: `workload cap reached for this org (${cap}) — delete one or ask an admin to raise the limit` }, 429) };
     }
     return { org };
+  };
+
+  // ---- storage quota (item 10) — approximate, documented org storage accounting ----
+  // Sum of database PVC REQUESTS (not live disk use) + bucket object bytes. Eventually-consistent:
+  // a bucket sweep totals object sizes; a database contributes its requested PVC size. Fine for a budget.
+  const orgStorageUsage = async (orgId: string, ns: string) => {
+    const dbReqs = await d.meta.orgDatabaseStorageRequests(orgId);
+    let dbBytes = 0;
+    for (const s of dbReqs) dbBytes += storageToBytes(s) ?? 0;
+    const bucketNames = await d.meta.orgSiteNames(orgId, "bucket");
+    let bucketBytes = 0;
+    for (const bn of bucketNames) {
+      const u = await buckets.usage({ name: bn, namespace: ns, org: orgId }).catch(() => ({ bytes: 0, objects: 0 }));
+      bucketBytes += u.bytes;
+    }
+    return { dbBytes, dbCount: dbReqs.length, bucketBytes, bucketCount: bucketNames.length };
+  };
+  // Returns an error string when adding `addBytes` would exceed the org's storage budget (when set), else null.
+  const checkStorageBudget = async (orgId: string, ns: string, addBytes: number): Promise<string | null> => {
+    const budget = await quotas.resolvedStorageBudgetBytes(orgId);
+    if (budget == null) return null; // no budget configured → unlimited
+    const cur = await orgStorageUsage(orgId, ns);
+    const total = cur.dbBytes + cur.bucketBytes + addBytes;
+    if (total > budget) {
+      return `org storage budget exceeded: ${total} bytes would be used > ${budget} byte budget (databases ${cur.dbBytes} + buckets ${cur.bucketBytes} + new ${addBytes})`;
+    }
+    return null;
+  };
+
+  // ---- bucket binding (I1) — inject S3_* creds into an app's write-only secret so they never appear
+  // in a manifest. Single binding → unprefixed keys; multiple → `<LABEL>_`-prefixed (label = the bucket
+  // name for a direct deploy, the stack resource key for a stack). provision() is idempotent, so this is
+  // re-run safe at every deploy. Writes through d.secrets.setSecret + records the key in the registry so
+  // the ESO binding (external backends) syncs them; kube backend envFroms `<app>-secret` directly. ----
+  const bucketEnvKeys = (label: string, multiple: boolean) => {
+    const p = multiple ? label.toUpperCase().replace(/[^A-Z0-9]/g, "_") + "_" : "";
+    return { endpoint: `${p}S3_ENDPOINT`, bucket: `${p}S3_BUCKET`, prefix: `${p}S3_PREFIX`, keyId: `${p}S3_ACCESS_KEY_ID`, secret: `${p}S3_SECRET_ACCESS_KEY` };
+  };
+  const writeBucketBindings = async (
+    entries: { bucketName: string; envLabel: string }[],
+    site: Site,
+    actorEmail: string,
+  ): Promise<void> => {
+    if (entries.length === 0) return;
+    const multiple = entries.length > 1;
+    const scope = { owner: site.owner, app: site.name, namespace: site.namespace };
+    for (const e of entries) {
+      const creds = await buckets.provision({ name: e.bucketName, namespace: site.namespace, org: site.orgId ?? "" });
+      const keys = bucketEnvKeys(e.envLabel, multiple);
+      const pairs: [string, string][] = [
+        [keys.endpoint, creds.endpoint],
+        [keys.bucket, creds.bucket],
+        [keys.prefix, creds.prefix],
+        [keys.keyId, creds.keyId],
+        [keys.secret, creds.secret],
+      ];
+      for (const [k, v] of pairs) {
+        if (k.endsWith("S3_ENDPOINT") && v === "") continue; // prod real-S3 default → no explicit endpoint
+        await d.secrets.setSecret(scope, k, v);
+        await d.meta.upsertSecretKey(site.name, k, fingerprint(v), actorEmail);
+      }
+    }
   };
   const isPlatformAdmin = async (email: string) => (await d.users.getUser(email))?.role === "admin";
   // Append an audit event WITHOUT ever failing the action it records: a broken audit write must
@@ -254,11 +324,29 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         /* leave quota null */
       }
     }
+    // (item 10) storage section: database PVC requests + bucket object bytes vs the org budget (null =
+    // unset). Approximate + eventually-consistent; best-effort so a bucket-sweep error never 500s usage.
+    let storage: {
+      databases: { count: number; requestedBytes: number };
+      buckets: { count: number; bytes: number };
+      budget: number | null;
+    };
+    try {
+      const use = await orgStorageUsage(r.org.id, r.org.namespace);
+      storage = {
+        databases: { count: use.dbCount, requestedBytes: use.dbBytes },
+        buckets: { count: use.bucketCount, bytes: use.bucketBytes },
+        budget: await quotas.resolvedStorageBudgetBytes(r.org.id),
+      };
+    } catch {
+      storage = { databases: { count: 0, requestedBytes: 0 }, buckets: { count: 0, bytes: 0 }, budget: null };
+    }
     return c.json({
       org: { slug: r.org.slug, name: r.org.name, kind: r.org.kind },
       workloads,
-      cap: d.cfg.maxWorkloadsPerOrg, // 0 = unlimited
+      cap: await quotas.resolvedMaxWorkloads(r.org.id, d.cfg.maxWorkloadsPerOrg), // 0 = unlimited (override-aware)
       quota, // { hard, used } | null
+      storage,
     });
   });
 
@@ -408,16 +496,27 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const actor = await actorFor(email, site);
     if (!can(actor, "deploy")) return c.json({ error: `app is owned by ${site.owner}` }, 403);
 
-    // Resolve declared DB bindings (app.uses): each must be an existing database in the SAME org.
-    // The CNPG `<db>-app`/`<db>-ca` Secrets the binding wires are namespace-scoped, so a cross-org
-    // database is both unauthorized and unreachable — reject with a named 400 before touching kube.
+    // Resolve declared bindings (app.uses): each must be an existing resource in the SAME org.
+    // DB bindings wire the namespace-scoped CNPG `<db>-app`/`<db>-ca` Secrets; bucket bindings (I1)
+    // inject S3_* creds through the write-only secret path. A cross-org target is both unauthorized
+    // and unreachable — reject with a named 400 before touching kube.
     for (const u of appCfg.uses ?? []) {
-      const dbSite = await d.meta.getSitePlain(u.database);
-      if (!dbSite || dbSite.type !== "database") {
-        return c.json({ error: `app uses database "${u.database}", which does not exist` }, 400);
-      }
-      if (dbSite.orgId !== site.orgId) {
-        return c.json({ error: `database "${u.database}" belongs to a different organisation and cannot be bound` }, 400);
+      if (u.database) {
+        const dbSite = await d.meta.getSitePlain(u.database);
+        if (!dbSite || dbSite.type !== "database") {
+          return c.json({ error: `app uses database "${u.database}", which does not exist` }, 400);
+        }
+        if (dbSite.orgId !== site.orgId) {
+          return c.json({ error: `database "${u.database}" belongs to a different organisation and cannot be bound` }, 400);
+        }
+      } else if (u.bucket) {
+        const bSite = await d.meta.getSitePlain(u.bucket);
+        if (!bSite || bSite.type !== "bucket") {
+          return c.json({ error: `app uses bucket "${u.bucket}", which does not exist` }, 400);
+        }
+        if (bSite.orgId !== site.orgId) {
+          return c.json({ error: `bucket "${u.bucket}" belongs to a different organisation and cannot be bound` }, 400);
+        }
       }
     }
 
@@ -441,6 +540,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     let result: { halt: true; reason: string; logs: string } | { halt: false; stopped: boolean };
     try {
       result = await locks.withLock(`deploy:${name}`, DEPLOY_LOCK_TTL_MS, async () => {
+        // (I1) Bucket bindings: provision creds and write them to the app's write-only secret BEFORE
+        // the release Job / rollout, so both see the S3_* env. Idempotent (provision is), so a redeploy
+        // just re-writes the same values. For a direct deploy the env-key label is the bucket name.
+        await writeBucketBindings(
+          (appCfg.uses ?? []).filter((u) => u.bucket).map((u) => ({ bucketName: u.bucket!, envLabel: u.bucket! })),
+          theSite,
+          email,
+        );
         // Release phase: run a Job (same image/env/bindings/secrets) BEFORE applying the new
         // manifests. On failure the deploy HALTS — the old Deployment/HSO is untouched, so the old
         // version keeps serving. GC prior release Jobs first; a deterministic version-named Job
@@ -640,24 +747,40 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     } catch {
       return c.json({ error: "invalid JSON body" }, 400);
     }
-    // Enforce the per-database storage cap on the control plane (rejects raw API/MCP callers with a
-    // clear error; the CLI already rejects up front). sanitize would otherwise silently clamp it.
-    const storageErr = validateDbStorage(body);
+    // Resolve the owning org FIRST (without claiming yet) so the per-database storage cap can reflect
+    // the org's item-10 override, not just the flat 1Gi default. For a create this is the target org;
+    // for a re-apply it's the existing resource's org.
+    let site = await d.meta.getSitePlain(name);
+    const isCreate = !site; // first claim → generate the app password; a re-apply must NOT rotate it
+    let org: { id: string; namespace: string };
+    if (!site) {
+      await ensureUser(email);
+      const orgRes = await resolveCreateOrg(c, email);
+      if ("err" in orgRes) return orgRes.err;
+      org = { id: orgRes.org.id, namespace: orgRes.org.namespace };
+    } else {
+      org = { id: site.orgId ?? "", namespace: site.namespace };
+    }
+
+    // Per-org storage cap override (item 10): validate + sanitize against the resolved cap (falls back
+    // to the 1Gi platform ceiling). Enforced on the control plane so raw API/MCP callers are rejected
+    // with a clear error; sanitize would otherwise silently clamp.
+    const cap = await quotas.resolvedMaxDbStorage(org.id);
+    const storageErr = validateDbStorage(body, cap.bytes, cap.label);
     if (storageErr) return c.json({ error: storageErr }, 400);
-    const dbCfg = sanitizeDatabaseConfig(body);
+    const dbCfg = sanitizeDatabaseConfig(body, cap.bytes);
     if (!dbCfg) return c.json({ error: "invalid database config" }, 400);
     if (dbCfg.name && dbCfg.name !== name) {
       return c.json({ error: `database name "${dbCfg.name}" does not match target "${name}"` }, 400);
     }
 
-    // resolve or claim — databases share the one name namespace with sites/apps
-    let site = await d.meta.getSitePlain(name);
-    const isCreate = !site; // first claim → generate the app password; a re-apply must NOT rotate it
-    if (!site) {
-      await ensureUser(email);
-      const orgRes = await resolveCreateOrg(c, email);
-      if ("err" in orgRes) return orgRes.err;
-      const claimed = await d.meta.claimSite(name, email, "database", { id: orgRes.org.id, namespace: orgRes.org.namespace });
+    // Org storage budget (item 10): a NEW database's PVC request must fit the remaining budget (when
+    // one is set). Approximate + documented — computed from DB requests + bucket bytes. Rejects at claim
+    // time (no name is taken on rejection). Re-applies don't re-check (the storage is already counted).
+    if (isCreate) {
+      const budgetErr = await checkStorageBudget(org.id, org.namespace, storageToBytes(dbCfg.storage) ?? 0);
+      if (budgetErr) return c.json({ error: budgetErr }, 429);
+      const claimed = await d.meta.claimSite(name, email, "database", org);
       site = claimed ?? (await d.meta.getSitePlain(name));
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
@@ -697,7 +820,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     });
     await d.kube.applyDatabase(ns, name, manifests);
 
-    await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0 });
+    // Persist the DatabaseConfig on the version row (item 10) so the org storage budget can read the
+    // requested PVC size back; also the natural home for future db rollback/inspection.
+    await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0, config: dbCfg });
     await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
     // Connection reference — NEVER the password. CNPG creates the `<name>-rw` primary
     // Service and a `<name>-app` Secret (user/db "app") in the tenant namespace; the app
@@ -857,6 +982,82 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.post("/v1/databases/:name/hibernate", dbHibernation("hibernate"));
   app.post("/v1/databases/:name/wake", dbHibernation("wake"));
 
+  // ---- tenant object storage (buckets, I1) ----
+  // Buckets are S3-side: no compute plane required (never gated on d.kube). Create/rotate reveal the
+  // access credentials ONCE (RevealOnce posture) and never store them in the metastore; the detail
+  // route (GET /v1/sites/:name) surfaces endpoint/bucket/prefix + usage but NEVER the creds.
+  const bucketCredsResponse = (name: string, creds: { endpoint: string; bucket: string; prefix: string; keyId: string; secret: string }) => ({
+    name,
+    endpoint: creds.endpoint,
+    bucket: creds.bucket,
+    prefix: creds.prefix,
+    accessKeyId: creds.keyId,
+    secretAccessKey: creds.secret, // returned ONCE — never persisted, never returned again
+  });
+
+  // Create (claim + provision). Credentials come back once. Counts toward the org workload cap +
+  // storage budget (a fresh bucket is empty, but a create is refused if the org is already over budget).
+  app.post("/v1/buckets/:name", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const nameErr = validateName(name);
+    if (nameErr) return c.json({ error: nameErr }, 400);
+
+    let site = await d.meta.getSitePlain(name);
+    if (!site) {
+      await ensureUser(email);
+      const orgRes = await resolveCreateOrg(c, email); // workload cap (override-aware)
+      if ("err" in orgRes) return orgRes.err;
+      const budgetErr = await checkStorageBudget(orgRes.org.id, orgRes.org.namespace, 0);
+      if (budgetErr) return c.json({ error: budgetErr }, 429);
+      const claimed = await d.meta.claimSite(name, email, "bucket", { id: orgRes.org.id, namespace: orgRes.org.namespace });
+      site = claimed ?? (await d.meta.getSitePlain(name));
+    }
+    if (!site) return c.json({ error: "claim failed" }, 500);
+    if (site.type !== "bucket") return c.json({ error: `name "${name}" is a ${site.type}, not a bucket` }, 409);
+    const actor = await actorFor(email, site);
+    if (!can(actor, "db:create")) return c.json({ error: `bucket is owned by ${site.owner}` }, 403); // create-tier (editor+), like db:create
+
+    const creds = await buckets.provision({ name, namespace: site.namespace, org: site.orgId ?? "" });
+    await audit({ actor: email, action: "bucket.create", target: name, targetType: "bucket", orgId: site.orgId, detail: { prefix: creds.prefix } });
+    return c.json(bucketCredsResponse(name, creds));
+  });
+
+  // Rotate credentials (owner/admin — like db password). Returns the new creds once.
+  app.post("/v1/buckets/:name/rotate", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such bucket" }, 404);
+    if (site.type !== "bucket") return c.json({ error: `name "${name}" is a ${site.type}, not a bucket` }, 409);
+    if (!can(await actorFor(email, site), "configure")) return c.json({ error: "owner only" }, 403);
+    const creds = await buckets.rotate({ name, namespace: site.namespace, org: site.orgId ?? "" });
+    await audit({ actor: email, action: "bucket.rotate", target: name, targetType: "bucket", orgId: site.orgId, detail: {} });
+    return c.json(bucketCredsResponse(name, creds));
+  });
+
+  // List the caller's buckets (optionally scoped to one org). No creds — just name/owner/org.
+  app.get("/v1/buckets", async (c) => {
+    const email = c.get("identity").email;
+    const orgSlug = c.req.query("org");
+    let orgFilterId: string | null = null;
+    if (orgSlug) {
+      const org = await d.orgs.getOrgBySlug(orgSlug);
+      if (!org) return c.json({ error: `no such org: ${orgSlug}` }, 404);
+      if (!(await d.orgs.roleOf(org.id, email)) && !(await isPlatformAdmin(email))) return c.json({ error: `not a member of org ${orgSlug}` }, 403);
+      orgFilterId = org.id;
+    }
+    const names = await d.meta.listUserSites(email);
+    const out: unknown[] = [];
+    for (const name of names) {
+      const s = await d.meta.getSitePlain(name);
+      if (!s || s.type !== "bucket") continue;
+      if (orgFilterId && s.orgId !== orgFilterId) continue;
+      out.push({ name: s.name, type: s.type, owner: s.owner, org: await orgOf(s.orgId) });
+    }
+    return c.json({ buckets: out });
+  });
+
   // ---- rollback ----
   // Static sites flip the version pointer (bytes for every version already exist in blob storage).
   // Apps (H1) re-apply the target version's STORED config as a fresh manifest set — see below.
@@ -979,6 +1180,23 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         /* leave status null */
       }
       out.database = dbInfo;
+    } else if (site.type === "bucket") {
+      // (I1) Bucket detail: endpoint/bucket/prefix + a size sweep. NO credentials — those are revealed
+      // once at create/rotate only. Best-effort: an S3 read failure degrades to zeros, never 500s.
+      const ctx = { name, namespace: site.namespace, org: site.orgId ?? "" };
+      const b: Record<string, unknown> = { endpoint: "", bucket: "", prefix: "", bytes: 0, objects: 0 };
+      try {
+        const info = await buckets.provision(ctx); // idempotent; we surface only non-secret fields
+        b.endpoint = info.endpoint;
+        b.bucket = info.bucket;
+        b.prefix = info.prefix;
+        const u = await buckets.usage(ctx);
+        b.bytes = u.bytes;
+        b.objects = u.objects;
+      } catch {
+        /* leave endpoint/bucket/prefix empty + zero usage */
+      }
+      out.bucket = b;
     }
     // Normalized status contract (M0): ONE server-side mapping from the raw signals to the
     // console/CLI enum — the client trusts this field and only falls back to mirroring it
@@ -1096,9 +1314,22 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         .destroy({ owner: site.owner, app: name, namespace: site.namespace })
         .catch((e) => console.error(`delete ${name}: images.destroy failed (possible orphaned image): ${(e as Error).message}`));
     } else if (site.type === "database" && d.kube) await d.kube.deleteDatabase(site.namespace, name);
+    else if (site.type === "bucket") {
+      // (I1) A non-empty bucket refuses deletion without ?force=1 (409), so its contents can't be
+      // wiped by accident. With force (or when empty), destroy() prunes every object under the prefix.
+      const ctx = { name, namespace: site.namespace, org: site.orgId ?? "" };
+      const usage = await buckets.usage(ctx).catch(() => ({ bytes: 0, objects: 0 }));
+      const force = c.req.query("force") === "1" || c.req.query("force") === "true";
+      if (usage.objects > 0 && !force) {
+        return c.json({ error: `bucket "${name}" holds ${usage.objects} object(s) — pass ?force=1 to delete it and its contents` }, 409);
+      }
+      await buckets
+        .destroy(ctx)
+        .catch((e) => console.error(`delete ${name}: bucket destroy failed (possible orphaned objects): ${(e as Error).message}`));
+    }
     await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);
-    await audit({ actor: email, action: "site.delete", target: name, targetType: site.type, orgId: site.orgId, detail: { owner: site.owner } });
+    await audit({ actor: email, action: site.type === "bucket" ? "bucket.delete" : "site.delete", target: name, targetType: site.type, orgId: site.orgId, detail: { owner: site.owner } });
     return c.json({ deleted: name });
   });
 
@@ -1134,7 +1365,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const prefix = c.req.query("prefix") || undefined;
     const owner = c.req.query("owner")?.toLowerCase() || undefined;
     const typeQ = c.req.query("type");
-    const type = typeQ === "site" || typeQ === "app" || typeQ === "database" ? typeQ : undefined;
+    const type = typeQ === "site" || typeQ === "app" || typeQ === "database" || typeQ === "bucket" ? typeQ : undefined;
     // Optional ?org=<slug> filter — scope the browse to one org (an unknown slug → empty page).
     const orgSlug = c.req.query("org");
     let orgId: string | undefined;
@@ -1222,6 +1453,47 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const target = c.req.query("target") || undefined;
     const action = c.req.query("action") || undefined;
     return c.json(await d.audit.list({ cursor, limit, actor: actorQ, target, action }));
+  });
+
+  // ---- admin: per-org quota overrides (item 10; platform admins only) ----
+  // GET returns the raw overrides + the EFFECTIVE values (override folded over the platform default),
+  // so the admin console can show both. PUT sets one or more override keys (validated, audited).
+  app.get("/v1/admin/orgs/:slug/quotas", async (c) => {
+    const email = c.get("identity").email;
+    if (!(await isPlatformAdmin(email))) return c.json({ error: "admin only" }, 403);
+    const org = await d.orgs.getOrgBySlug(c.req.param("slug"));
+    if (!org) return c.json({ error: "no such org" }, 404);
+    const [overrides, maxWorkloads, maxDbStorage, budget] = await Promise.all([
+      quotas.list(org.id),
+      quotas.resolvedMaxWorkloads(org.id, d.cfg.maxWorkloadsPerOrg),
+      quotas.resolvedMaxDbStorage(org.id),
+      quotas.resolvedStorageBudgetBytes(org.id),
+    ]);
+    return c.json({
+      org: { slug: org.slug, name: org.name },
+      keys: QUOTA_KEYS,
+      overrides,
+      effective: { max_workloads: maxWorkloads, max_db_storage: maxDbStorage.label, storage_budget_bytes: budget },
+    });
+  });
+
+  app.put("/v1/admin/orgs/:slug/quotas", async (c) => {
+    const email = c.get("identity").email;
+    if (!(await isPlatformAdmin(email))) return c.json({ error: "admin only" }, 403);
+    const org = await d.orgs.getOrgBySlug(c.req.param("slug"));
+    if (!org) return c.json({ error: "no such org" }, 404);
+    const body = (await c.req.json().catch(() => ({}))) as { quotas?: Record<string, unknown> };
+    const entries = body.quotas && typeof body.quotas === "object" ? Object.entries(body.quotas) : [];
+    if (entries.length === 0) return c.json({ error: "body.quotas must be a non-empty object of key→value" }, 400);
+    for (const [key, value] of entries) {
+      const err = validateQuota(key, value);
+      if (err) return c.json({ error: err }, 400);
+    }
+    for (const [key, value] of entries) {
+      await quotas.set(org.id, key, String(value), email);
+      await audit({ actor: email, action: "quota.set", target: org.slug, targetType: "org", orgId: org.id, detail: { key, value: String(value) } });
+    }
+    return c.json({ org: org.slug, set: Object.fromEntries(entries.map(([k, v]) => [k, String(v)])) });
   });
 
   // ---- collaborators ----
@@ -1337,7 +1609,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
   // Claim the site row for a resource if it doesn't exist yet (apps/sites/databases share the name
   // namespace). ensureUser must have run first (owner membership FKs to users).
-  const claimResource = async (siteName: string, type: "site" | "app" | "database", org: Org, email: string): Promise<Site> => {
+  const claimResource = async (siteName: string, type: "site" | "app" | "database" | "bucket", org: Org, email: string): Promise<Site> => {
     let site = await d.meta.getSitePlain(siteName);
     if (!site) {
       const claimed = await d.meta.claimSite(siteName, email, type, { id: org.id, namespace: org.namespace });
@@ -1383,8 +1655,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // POST /v1/apps/:name (manifests + apply + secret binding). The release phase is intentionally NOT
   // run in the stack path v1 (migrations stay on `drop deploy`); noted as a deliberate deviation.
   const applyAppResource = async (spec: StackSpec, mapping: Record<string, string>, res: StackResource, site: Site, image: string): Promise<void> => {
-    // Resolve `uses` edges: each references a resource KEY in this stack → its materialized DB name.
-    const uses = (res.uses ?? []).map((u) => ({ database: siteNameForKey(spec, mapping, u.database) }));
+    // Resolve `uses` edges: each references a resource KEY in this stack → its materialized site name.
+    // DB edges wire the manifest (envFrom); bucket edges (I1) inject S3_* creds via the secret path,
+    // labelled by the stack RESOURCE KEY so multiple buckets get distinct `<KEY>_`-prefixed env vars.
+    const uses = (res.uses ?? []).filter((u) => u.database).map((u) => ({ database: siteNameForKey(spec, mapping, u.database!) }));
+    const bucketEntries = (res.uses ?? [])
+      .filter((u) => u.bucket)
+      .map((u) => ({ bucketName: siteNameForKey(spec, mapping, u.bucket!), envLabel: u.bucket! }));
     const appCfg: AppConfig = {
       image,
       services: res.services ?? [{ internalPort: 8080, protocol: "http" }],
@@ -1398,6 +1675,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     };
     const ns = site.namespace;
     await ensureTenant(ns);
+    await writeBucketBindings(bucketEntries, site, "stack"); // provision + write S3_* secrets before rollout
     const sandbox = !appCfg.trusted;
     const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
     const verId = newVersionId(now()); // minted up front so it can stamp the pod-template annotation (H1)
@@ -1456,7 +1734,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   };
 
   // The per-resource action a caller must hold to reconcile an EXISTING resource of this kind.
-  const actionForKind = (kind: "site" | "app" | "database"): Action => (kind === "site" ? "publish" : kind === "app" ? "deploy" : "db:create");
+  const actionForKind = (kind: "site" | "app" | "database" | "bucket"): Action => (kind === "site" ? "publish" : kind === "app" ? "deploy" : "db:create"); // bucket reconcile is create-tier (db:create)
 
   // ---- POST /v1/stacks/:name/up : reconcile the desired spec (plan + execute; ?dry_run=1 = plan) ----
   app.post("/v1/stacks/:name/up", async (c) => {
@@ -1595,6 +1873,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
             } else if (res.type === "app") {
               const image = body.resolved?.[step.key]?.image ?? res.image;
               if (image) await applyAppResource(spec, mapping, res, site, image); // else: row claimed, awaits CLI image (in `needs`)
+            } else if (res.type === "bucket") {
+              await buckets.provision({ name: step.siteName, namespace: site.namespace, org: org.id }); // (I1) idempotent — ensures the prefix/creds exist for binders
             } // site: the row is claimed; bytes come from the CLI publish (in `needs`)
             await stacks.setResource(stackRow.id, step.key, step.siteName);
             applied.push(step);
@@ -1737,10 +2017,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     for (const [key, res] of Object.entries(spec.resources)) {
       if (res.type === "app")
         for (const u of res.uses ?? []) {
-          const target = spec.resources[u.database];
+          const targetKey = u.database ?? u.bucket;
+          if (!targetKey) continue;
+          const target = spec.resources[targetKey];
           if (!target) continue;
-          const dbSite = mapping[u.database] ?? resolveResourceName(spec.name, u.database, target);
-          edges.push({ from: u.database, to: key, kind: "uses", label: `PG* via ${dbSite}-app` });
+          const tSite = mapping[targetKey] ?? resolveResourceName(spec.name, targetKey, target);
+          const label = u.database ? `PG* via ${tSite}-app` : `S3_* via ${tSite}`;
+          edges.push({ from: targetKey, to: key, kind: "uses", label });
         }
       if (res.type === "site")
         for (const e of res.env_from ?? []) {

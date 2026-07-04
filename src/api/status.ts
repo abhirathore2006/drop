@@ -12,7 +12,7 @@ export interface NormalizedStatus {
 }
 
 export interface NormalizeStatusInput {
-  type: "site" | "app" | "database";
+  type: "site" | "app" | "database" | "bucket";
   /** App on/off switch persisted in the metastore ("running" | "stopped"). */
   runtimeState?: "running" | "stopped" | null;
   /** Live app status from the Deployment + pods, or null/undefined when unavailable. */
@@ -30,6 +30,11 @@ export function normalizeStatus(input: NormalizeStatusInput): NormalizedStatus {
   if (input.type === "site") {
     // Static sites are always-on: served by the edge from the object store, no pods.
     return { status: "running", reason: "serving" };
+  }
+
+  if (input.type === "bucket") {
+    // Buckets are S3-side: no pods, no cluster state — always ready once claimed.
+    return { status: "running", reason: "ready" };
   }
 
   if (input.type === "app") {

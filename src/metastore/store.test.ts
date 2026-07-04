@@ -142,10 +142,10 @@ test("countSitesInOrg + orgWorkloadCounts by type", async () => {
   await claim({ meta, orgs }, "a2", "alice@x.com", "app");
   await claim({ meta, orgs }, "d1", "alice@x.com", "database");
   expect(await meta.countSitesInOrg(o.id)).toBe(4);
-  expect(await meta.orgWorkloadCounts(o.id)).toEqual({ site: 1, app: 2, database: 1, total: 4 });
+  expect(await meta.orgWorkloadCounts(o.id)).toEqual({ site: 1, app: 2, database: 1, bucket: 0, total: 4 });
   // a different org with nothing in it
   const empty = await orgs.ensurePersonalOrg("bob@x.com");
   expect(await meta.countSitesInOrg(empty.id)).toBe(0);
-  expect(await meta.orgWorkloadCounts(empty.id)).toEqual({ site: 0, app: 0, database: 0, total: 0 });
+  expect(await meta.orgWorkloadCounts(empty.id)).toEqual({ site: 0, app: 0, database: 0, bucket: 0, total: 0 });
   await db.destroy();
 });

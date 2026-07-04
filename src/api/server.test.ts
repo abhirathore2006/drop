@@ -7,6 +7,8 @@ import { FakeBlob } from "../blob/fake.ts";
 import { FakeKube } from "../kube/fake.ts";
 import { FakeSecretStore } from "../secrets/fake.ts";
 import { FakeImageStore } from "../images/fake.ts";
+import { FakeBucketStore } from "../buckets/fake.ts";
+import { QuotaStore } from "../quotas/store.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { LockStore } from "../metastore/lock.ts";
 import { StackStore } from "../stacks/store.ts";
@@ -47,7 +49,9 @@ async function mk(opts: { admins?: string[] } = {}) {
   const images = new FakeImageStore();
   const audit = new AuditStore(db);
   const locks = new LockStore(db);
-  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks }), meta, blob, kube, secrets, images, orgs, audit, locks, db, users };
+  const bucket = new FakeBucketStore();
+  const quotas = new QuotaStore(db);
+  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, bucket, quotas }), meta, blob, kube, secrets, images, orgs, audit, locks, bucket, quotas, db, users };
 }
 
 const pub = (app: any, tok: string, name: string, body: Buffer) =>
@@ -1343,7 +1347,7 @@ test("usage: workload counts + cap + cluster quota for an org", async () => {
   await call(app, "POST", "/v1/databases/pg1", "alice", {}); // database
   const slug = await personalSlug(app, "alice");
   const u = await (await call(app, "GET", `/v1/orgs/${slug}/usage`, "alice")).json();
-  expect(u.workloads).toEqual({ site: 1, app: 1, database: 1, total: 3 });
+  expect(u.workloads).toEqual({ site: 1, app: 1, database: 1, bucket: 0, total: 3 });
   expect(u.cap).toBe(0); // unlimited by default
   expect(u.quota.hard["count/pods"]).toBe("20"); // FakeKube default quota
   await db.destroy();
@@ -1696,5 +1700,150 @@ test("stack graph: compute-off degrades statuses to the no-status outputs (endpo
   expect(byKey.api.status).toEqual({ status: "progressing", reason: "status unavailable" });
   expect(byKey.db.status).toEqual({ status: "progressing", reason: "status unavailable" });
   expect(byKey.web.status).toEqual({ status: "running", reason: "serving" }); // sites never depend on kube
+  await db.destroy();
+});
+
+// ============================ I1: buckets + item 10 quotas ============================
+
+test("bucket create returns creds ONCE; detail exposes usage but NEVER creds; audited", async () => {
+  const { app, audit, db } = await mk();
+  const res = await call(app, "POST", "/v1/buckets/avatars", "alice");
+  expect(res.status).toBe(200);
+  const created = await res.json();
+  expect(created.name).toBe("avatars");
+  expect(created.prefix).toMatch(/^buckets\/.+\/avatars\/$/);
+  expect(created.accessKeyId).toBeTruthy();
+  expect(created.secretAccessKey).toBe("secret-avatars-0"); // FakeBucketStore's creds — revealed once
+
+  // detail folds bucket usage in, but carries NO credentials
+  const detail = await (await call(app, "GET", "/v1/sites/avatars", "alice")).json();
+  expect(detail.type).toBe("bucket");
+  expect(detail.bucket).toEqual({ endpoint: "http://fake-s3.local", bucket: "platform-bucket", prefix: created.prefix, bytes: 0, objects: 0 });
+  expect(detail.status).toEqual({ status: "running", reason: "ready" });
+  expect(JSON.stringify(detail)).not.toContain("secret-avatars"); // the secret never appears in detail
+  expect(JSON.stringify(detail)).not.toContain("accessKeyId");
+
+  const trail = await audit.list({ action: "bucket.create" });
+  expect(trail.entries.map((e: any) => e.target)).toContain("avatars");
+  await db.destroy();
+});
+
+test("bucket rotate re-mints creds (once) and is audited", async () => {
+  const { app, audit, bucket, db } = await mk();
+  await call(app, "POST", "/v1/buckets/uploads", "alice");
+  const r = await call(app, "POST", "/v1/buckets/uploads/rotate", "alice");
+  expect(r.status).toBe(200);
+  const body = await r.json();
+  expect(body.secretAccessKey).toBe("secret-uploads-1"); // bumped by rotate
+  expect(bucket.rotations.length).toBe(1);
+  const trail = await audit.list({ action: "bucket.rotate" });
+  expect(trail.entries.map((e: any) => e.target)).toContain("uploads");
+  await db.destroy();
+});
+
+test("bucket delete requires ?force=1 when non-empty (409), else tears down", async () => {
+  const { app, meta, bucket, audit, db } = await mk();
+  await call(app, "POST", "/v1/buckets/data", "alice");
+  const site = (await meta.getSitePlain("data"))!;
+  bucket.usageByKey.set(`${site.namespace}/data`, { bytes: 1024, objects: 2 }); // simulate a non-empty bucket
+
+  const refused = await call(app, "DELETE", "/v1/sites/data", "alice");
+  expect(refused.status).toBe(409);
+  expect((await refused.json()).error).toMatch(/object\(s\)/);
+
+  const forced = await call(app, "DELETE", "/v1/sites/data?force=1", "alice");
+  expect(forced.status).toBe(200);
+  expect(bucket.destroyed).toContain(`${site.namespace}/data`);
+  expect(await meta.getSitePlain("data")).toBeNull();
+  const trail = await audit.list({ action: "bucket.delete" });
+  expect(trail.entries.map((e: any) => e.target)).toContain("data");
+  await db.destroy();
+});
+
+test("bucket binding writes S3_* creds into the app's write-only secret (unprefixed for a single bind)", async () => {
+  const { app, secrets, db } = await mk();
+  await call(app, "POST", "/v1/buckets/media", "alice");
+  const deploy = await call(app, "POST", "/v1/apps/gallery", "alice", { image: "x:1", uses: [{ bucket: "media" }] });
+  expect(deploy.status).toBe(200);
+  // The five S3_* keys landed in SOME app secret bag, with the derived values (never in the manifest).
+  const bags = [...secrets.values.values()];
+  const bag = bags.find((m) => m.get("S3_BUCKET") === "platform-bucket")!;
+  expect(bag).toBeTruthy();
+  expect(bag.get("S3_ENDPOINT")).toBe("http://fake-s3.local");
+  expect(bag.get("S3_PREFIX")).toMatch(/^buckets\/.+\/media\/$/);
+  expect(bag.get("S3_ACCESS_KEY_ID")).toBe("AKIA-media");
+  expect(bag.get("S3_SECRET_ACCESS_KEY")).toBe("secret-media-0");
+  await db.destroy();
+});
+
+test("cross-org bucket binding is refused (400)", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/buckets/alicebucket", "alice"); // alice's personal org
+  const res = await call(app, "POST", "/v1/apps/bobapp", "bob", { image: "x:1", uses: [{ bucket: "alicebucket" }] });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error).toMatch(/different organisation/);
+  await db.destroy();
+});
+
+test("quota override: per-org max_db_storage raises the db-create cap", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "team", name: "Team" });
+
+  // default cap (1Gi) rejects a 2Gi request
+  expect((await call(app, "POST", "/v1/databases/big?org=team", "alice", { storage: "2Gi" })).status).toBe(400);
+
+  // raise the cap for the org, then the same request succeeds
+  const put = await call(app, "PUT", "/v1/admin/orgs/team/quotas", "alice", { quotas: { max_db_storage: "5Gi" } });
+  expect(put.status).toBe(200);
+  const ok = await call(app, "POST", "/v1/databases/big?org=team", "alice", { storage: "2Gi" });
+  expect(ok.status).toBe(200);
+
+  // and the override is audited
+  const trail = await (await call(app, "GET", "/v1/admin/audit?action=quota.set", "alice")).json();
+  expect(trail.entries.map((e: any) => e.detail?.key)).toContain("max_db_storage");
+  await db.destroy();
+});
+
+test("storage budget: a new database request that exceeds the org budget is rejected (429)", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "team", name: "Team" });
+  await call(app, "PUT", "/v1/admin/orgs/team/quotas", "alice", { quotas: { storage_budget_bytes: "512Mi" } });
+  const res = await call(app, "POST", "/v1/databases/db1?org=team", "alice", { storage: "1Gi" });
+  expect(res.status).toBe(429);
+  expect((await res.json()).error).toMatch(/storage budget exceeded/);
+  await db.destroy();
+});
+
+test("org usage gains a storage section (databases + buckets + budget)", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "team", name: "Team" });
+  await call(app, "POST", "/v1/databases/d1?org=team", "alice", { storage: "1Gi" });
+  await call(app, "POST", "/v1/buckets/b1?org=team", "alice");
+
+  const usage = await (await call(app, "GET", "/v1/orgs/team/usage", "alice")).json();
+  expect(usage.workloads.database).toBe(1);
+  expect(usage.workloads.bucket).toBe(1);
+  expect(usage.storage.databases).toEqual({ count: 1, requestedBytes: 2 ** 30 });
+  expect(usage.storage.buckets.count).toBe(1);
+  expect(usage.storage.budget).toBeNull(); // no budget set
+
+  // once a budget is set it surfaces in usage
+  await call(app, "PUT", "/v1/admin/orgs/team/quotas", "alice", { quotas: { storage_budget_bytes: "10Gi" } });
+  const usage2 = await (await call(app, "GET", "/v1/orgs/team/usage", "alice")).json();
+  expect(usage2.storage.budget).toBe(10 * 2 ** 30);
+  await db.destroy();
+});
+
+test("admin quota routes are admin-only; PUT validates keys", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "team", name: "Team" });
+  // bob is not an admin
+  expect((await call(app, "GET", "/v1/admin/orgs/team/quotas", "bob")).status).toBe(403);
+  // unknown key rejected
+  expect((await call(app, "PUT", "/v1/admin/orgs/team/quotas", "alice", { quotas: { bogus: "1" } })).status).toBe(400);
+  // GET returns effective values folded over defaults
+  const q = await (await call(app, "GET", "/v1/admin/orgs/team/quotas", "alice")).json();
+  expect(q.effective.max_db_storage).toBe("1Gi");
+  expect(q.effective.storage_budget_bytes).toBeNull();
   await db.destroy();
 });

@@ -142,6 +142,7 @@ export class KubeApiClient implements KubeClient {
   private scheduledBackupPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/scheduledbackups/${n}`;
   private backupPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/backups/${n}`;
   private jobPath = (ns: string, n: string) => `/apis/batch/v1/namespaces/${ns}/jobs/${n}`;
+  private cronJobPath = (ns: string, n: string) => `/apis/batch/v1/namespaces/${ns}/cronjobs/${n}`; // (H2)
   private scaledObjectPath = (ns: string, n: string) => `/apis/keda.sh/v1alpha1/namespaces/${ns}/scaledobjects/${n}`;
   private objName = (o: Record<string, unknown>) => (o.metadata as { name: string }).name;
 
@@ -179,6 +180,42 @@ export class KubeApiClient implements KubeClient {
     // last deploy (SSA can't prune an object that's no longer in the manifest list).
     for (const w of m.workers ?? []) await this.apply(this.deploymentPath(namespace, w.name), w.deployment as Record<string, unknown>);
     await this.pruneWorkers(namespace, name, new Set((m.workers ?? []).map((w) => w.name)));
+
+    // (H2) `schedule` → a CronJob instead of the whole web/worker shape (assertProcesses already
+    // refused schedule alongside processes/an explicit services/healthcheck, so m.cronJob and
+    // m.deployment are never BOTH set). An app CAN toggle `schedule` on/off across deploys though, so
+    // when the CURRENT manifests carry a CronJob, also tear down any Deployment/Service/HSO left from
+    // a PRIOR non-cron deploy of the same app name — SSA can't prune a shape that isn't in this
+    // manifest set at all. DELETE is idempotent/404-safe either way.
+    if (m.cronJob) {
+      if (!m.deployment) {
+        await this.call("DELETE", this.hsoPath(namespace, name));
+        await this.call("DELETE", this.netpolPath(namespace, `${name}-allow-interceptor`));
+        await this.call("DELETE", this.servicePath(namespace, name));
+        await this.call("DELETE", this.deploymentPath(namespace, name));
+        await this.pruneWorkers(namespace, name, new Set());
+      }
+      await this.apply(this.cronJobPath(namespace, name), m.cronJob as Record<string, unknown>);
+    } else {
+      await this.deleteCronJob(namespace, name); // toggled OFF `schedule` — reap the stale CronJob (+ its Jobs)
+    }
+  }
+
+  private cronJobSelector = (name: string) => encodeURIComponent(`drop.dev/workload=${name},drop.dev/kind=cron`);
+
+  /** Delete the CronJob object AND its spawned Jobs (found by label — a run's Job name isn't
+   *  predictable). The CronJob controller sets ownerReferences on those Jobs, so background GC would
+   *  eventually reap them too, but doing it explicitly (same pattern as deleteReleaseJobs) means
+   *  teardown doesn't leave retained run history (successfulJobsHistoryLimit/failedJobsHistoryLimit)
+   *  lingering. Safe if the app was never a cron app (every DELETE 404s harmlessly). */
+  private async deleteCronJob(namespace: string, name: string): Promise<void> {
+    await this.call("DELETE", this.cronJobPath(namespace, name));
+    const r = await this.call("GET", `/apis/batch/v1/namespaces/${namespace}/jobs?labelSelector=${this.cronJobSelector(name)}`);
+    if (r.status >= 300) return;
+    for (const j of (JSON.parse(r.body).items ?? []) as any[]) {
+      const jn = j.metadata?.name as string | undefined;
+      if (jn) await this.call("DELETE", `${this.jobPath(namespace, jn)}?propagationPolicy=Foreground`);
+    }
   }
 
   /** Delete worker Deployments for an app that aren't in `keep` (label drop.dev/process distinguishes
@@ -201,6 +238,7 @@ export class KubeApiClient implements KubeClient {
     await this.call("DELETE", this.deploymentPath(namespace, name));
     await this.pruneWorkers(namespace, name, new Set()); // tear down every worker Deployment too
     await this.deleteReleaseJobs(namespace, name); // and any release Jobs left for log retrieval
+    await this.deleteCronJob(namespace, name); // (H2) and the CronJob (+ its spawned Jobs), if this was a cron app
   }
 
   async applyDatabase(namespace: string, name: string, m: DatabaseManifests): Promise<void> {
@@ -293,6 +331,12 @@ export class KubeApiClient implements KubeClient {
   private podsPath = (ns: string, n: string) =>
     `/api/v1/namespaces/${ns}/pods?labelSelector=${encodeURIComponent(`app.kubernetes.io/name=${n}`)}`;
 
+  // G2: a `schedule` (cron) app has NO Deployment, so this — and listNamespaceAppStatuses /
+  // listAppProcesses, all Deployment-keyed — degrade to null/empty for it (never throw); the API's
+  // normalizeStatus turns a null AppStatus into {status:"progressing", reason:"status unavailable"},
+  // which is an honest v1 read for a workload whose "runs" are point-in-time Jobs, not a steady-state
+  // Deployment. Surfacing actual cron RUN history (last N fires, success/failure, duration) is a
+  // metrics-slice concern, deferred.
   async getAppStatus(namespace: string, name: string): Promise<AppStatus | null> {
     const r = await this.call("GET", this.deploymentPath(namespace, name));
     if (r.status === 404) return null;
@@ -596,6 +640,17 @@ export class KubeApiClient implements KubeClient {
   }
 
   async stopApp(namespace: string, name: string): Promise<void> {
+    // (H2) A cron app has no Deployment/KEDA ScaledObject to pause — "stopped" means SUSPENDING the
+    // CronJob instead (no new Job runs fire; a run already in flight is untouched). Try this FIRST:
+    // a 404 means there's no CronJob by this name, i.e. it's an ordinary app — fall through to the
+    // existing Deployment/KEDA path below.
+    const cj = await this.call("PATCH", this.cronJobPath(namespace, name), {
+      body: JSON.stringify({ spec: { suspend: true } }),
+      contentType: "application/merge-patch+json",
+    });
+    if (cj.status < 300) return;
+    if (cj.status !== 404) throw new Error(`stopApp ${name}: suspend cron -> ${cj.status}`);
+
     // Pause KEDA: paused-replicas:0 pins the workload at 0 AND makes KEDA ignore the HTTP scaler,
     // so traffic to the interceptor can't wake it — true offline. KEDA creates the ScaledObject
     // asynchronously from the HTTPScaledObject, so on a (re)deploy it may not exist yet — retry
@@ -621,6 +676,14 @@ export class KubeApiClient implements KubeClient {
   }
 
   async startApp(namespace: string, name: string): Promise<void> {
+    // (H2) Mirror stopApp: try un-suspending a CronJob first; a 404 means it's an ordinary app.
+    const cj = await this.call("PATCH", this.cronJobPath(namespace, name), {
+      body: JSON.stringify({ spec: { suspend: false } }),
+      contentType: "application/merge-patch+json",
+    });
+    if (cj.status < 300) return;
+    if (cj.status !== 404) throw new Error(`startApp ${name}: unsuspend cron -> ${cj.status}`);
+
     // Remove the pause annotation → KEDA resumes scaling per the HTTPScaledObject (0..max on traffic).
     const so = await this.call("PATCH", this.scaledObjectPath(namespace, name), {
       body: JSON.stringify({ metadata: { annotations: { "autoscaling.keda.sh/paused-replicas": null } } }),

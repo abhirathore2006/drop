@@ -242,6 +242,26 @@ const m0007_stacks: Migration = {
   },
 };
 
+// Per-org quota overrides (Future.md item 10, API level). One row per (org, key); value is text
+// (a k8s quantity or an integer string) parsed at the enforcement point. Absent → platform default.
+// Keys v1: max_workloads, max_db_storage (per-database cap), storage_budget_bytes (org-wide budget).
+const m0008_org_quotas: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("org_quotas")
+      .addColumn("org_id", "text", (c) => c.notNull().references("organisations.id").onDelete("cascade"))
+      .addColumn("key", "text", (c) => c.notNull())
+      .addColumn("value", "text", (c) => c.notNull())
+      .addColumn("updated_by", "text", (c) => c.notNull())
+      .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addPrimaryKeyConstraint("org_quotas_pk", ["org_id", "key"])
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -253,6 +273,7 @@ export class InlineMigrations implements MigrationProvider {
       "0005_audit_log": m0005_audit_log,
       "0006_locks": m0006_locks,
       "0007_stacks": m0007_stacks,
+      "0008_org_quotas": m0008_org_quotas,
     };
   }
 }

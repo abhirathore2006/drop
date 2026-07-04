@@ -102,6 +102,19 @@ export class Client {
   dbWake(name: string) {
     return this.req("POST", `/v1/databases/${name}/wake`);
   }
+  // tenant object storage (buckets, I1) — create/rotate return the access creds ONCE
+  bucketCreate(name: string, org?: string) {
+    return this.req("POST", `/v1/buckets/${name}${this.orgQ(org)}`, { contentType: "application/json", body: "{}" });
+  }
+  bucketList(org?: string) {
+    return this.req("GET", `/v1/buckets${this.orgQ(org)}`);
+  }
+  bucketRotate(name: string) {
+    return this.req("POST", `/v1/buckets/${name}/rotate`, { contentType: "application/json", body: "{}" });
+  }
+  bucketRemove(name: string, force?: boolean) {
+    return this.req("DELETE", `/v1/sites/${name}${force ? "?force=1" : ""}`);
+  }
   setSecret(app: string, key: string, value: string) {
     return this.req("PUT", `/v1/apps/${app}/secrets/${encodeURIComponent(key)}`, {
       contentType: "application/json",

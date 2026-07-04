@@ -23,6 +23,7 @@ export interface Config {
   dbBackupRoleArn?: string; // prod: IRSA role for CNPG database backups to S3 (omit locally — Floci uses static creds)
   dbBackupEndpoint?: string; // in-cluster S3 endpoint for CNPG backups (e.g. local Floci on the pod network). Distinct from s3Endpoint, which is the API's host-side view. Unset in prod → real AWS S3.
   dbBackupEgressCidr?: string; // CIDR the DB pod may egress to for the object store on its (non-443) port (local only; prod S3 is 443, already allowed by the tenant policy)
+  bucketAppEndpoint?: string; // I1: in-cluster S3 endpoint injected into apps bound to a bucket (reachable from a tenant pod). Falls back to dbBackupEndpoint ?? s3Endpoint; unset in prod → real AWS S3.
   edgeDiskCacheDir?: string; // edge: where to cache asset bytes on disk (off if unset)
   edgeDiskCacheBytes: number; // edge: disk cache budget
   interceptorUrl?: string; // edge: KEDA HTTP interceptor base URL — type=app hostnames proxy here (off if unset)
@@ -100,6 +101,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     dbBackupRoleArn: env.DROP_DB_BACKUP_ROLE_ARN || undefined,
     dbBackupEndpoint: env.DROP_DB_BACKUP_S3_ENDPOINT || undefined,
     dbBackupEgressCidr: env.DROP_DB_BACKUP_S3_EGRESS_CIDR || undefined,
+    bucketAppEndpoint: env.DROP_BUCKET_S3_ENDPOINT || undefined,
     docsDir: env.DROP_DOCS_DIR ?? "docs",
     cliDir: env.DROP_CLI_DIR ?? "dist",
     secretBackend: env.DROP_SECRET_BACKEND === "aws" ? "aws" : "kube",

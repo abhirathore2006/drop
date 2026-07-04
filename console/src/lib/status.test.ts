@@ -34,7 +34,7 @@ const dbPhases = [
 ];
 
 function sweep(): NormalizeStatusInput[] {
-  const inputs: NormalizeStatusInput[] = [{ type: "site" }];
+  const inputs: NormalizeStatusInput[] = [{ type: "site" }, { type: "bucket" }];
   for (const runtimeState of ["running", "stopped", undefined] as const) {
     inputs.push({ type: "app", runtimeState, appStatus: null });
     for (const reason of appReasons) {

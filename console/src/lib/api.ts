@@ -2,7 +2,7 @@
 // Errors are thrown as ApiError so callers (and the query layer's 401 interceptor) can
 // branch on status.
 
-export type WorkloadType = "site" | "app" | "database";
+export type WorkloadType = "site" | "app" | "database" | "bucket";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -34,9 +34,14 @@ export interface AdminOrg {
 
 export interface OrgUsage {
   org: { slug: string; name: string; kind: string };
-  workloads: { site: number; app: number; database: number; total: number };
+  workloads: { site: number; app: number; database: number; bucket: number; total: number };
   cap: number; // 0 = unlimited
   quota: { hard: Record<string, string>; used: Record<string, string> } | null;
+  storage?: {
+    databases: { count: number; requestedBytes: number };
+    buckets: { count: number; bytes: number };
+    budget: number | null; // null = no budget configured
+  };
 }
 
 export interface AuditRecord {
@@ -95,6 +100,13 @@ export interface BackupInfo {
   stoppedAt: string | null;
   error: string | null;
 }
+export interface BucketInfo {
+  endpoint: string;
+  bucket: string;
+  prefix: string;
+  bytes: number;
+  objects: number;
+}
 export interface Version {
   id: string;
   publishedBy: string;
@@ -135,6 +147,7 @@ export interface Detail {
     credentialsSecret: string;
     status: DatabaseStatus | null;
   };
+  bucket?: BucketInfo;
 }
 
 // ---- Stacks (B2/C1) ----
@@ -210,10 +223,12 @@ export const api = {
   triggerDbBackup: (name: string) => req<{ backup: string }>("POST", `/v1/databases/${name}/backups`, {}),
   hibernateDb: (name: string) => req("POST", `/v1/databases/${name}/hibernate`, {}),
   wakeDb: (name: string) => req("POST", `/v1/databases/${name}/wake`, {}),
+  rotateBucket: (name: string) =>
+    req<{ name: string; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretAccessKey: string }>("POST", `/v1/buckets/${name}/rotate`, {}),
   addCollaborator: (name: string, email: string) => req("POST", `/v1/sites/${name}/collaborators`, { email }),
   removeCollaborator: (name: string, email: string) => req("DELETE", `/v1/sites/${name}/collaborators/${encodeURIComponent(email)}`),
   transfer: (name: string, email: string) => req("POST", `/v1/sites/${name}/transfer`, { email }),
-  remove: (name: string) => req("DELETE", `/v1/sites/${name}`),
+  remove: (name: string, force?: boolean) => req("DELETE", `/v1/sites/${name}${force ? "?force=1" : ""}`),
   setUserStatus: (email: string, status: "active" | "suspended") =>
     req("POST", `/v1/admin/users/${encodeURIComponent(email)}/status`, { status }),
   adminUsers: () => req<{ users: AdminUser[] }>("GET", "/v1/admin/users"),

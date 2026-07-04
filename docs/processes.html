@@ -36,7 +36,7 @@
   <main class="content"><article>
 <p class="crumbs">Guides</p>
 <h1>Processes, health &amp; releases</h1>
-<p class="lead">Three additions to the <a href="configuration.html#app"><code>app:</code></a> section of <code>drop.yaml</code>, designed together: <code>healthcheck:</code> (readiness/liveness probes), <code>release:</code> (a migration Job that gates the rollout), and <code>processes:</code> (a web process plus long-running workers). All three are optional — an app that declares none behaves exactly as before.</p>
+<p class="lead">Additions to the <a href="configuration.html#app"><code>app:</code></a> section of <code>drop.yaml</code>, designed together: <code>healthcheck:</code> (readiness/liveness probes), <code>release:</code> (a migration Job that gates the rollout), <code>processes:</code> (a web process plus long-running workers), and <code>schedule:</code> (a CronJob instead of a web app). All are optional — an app that declares none behaves exactly as before.</p>
 
 <h2>How they fit together</h2>
 <p>At <code>drop deploy</code> the API, in order: runs the <code>release</code> Job (if any) and <strong>halts on failure</strong>, then applies the Deployment(s) with the <code>healthcheck</code> probes attached to the web container, wiring one Service + KEDA <code>HTTPScaledObject</code> for the <code>web</code> process and a plain Deployment for each worker. The release + rollout are serialized per app under an advisory lock, so two overlapping deploys can't interleave migrations — the second returns <code>409</code>.</p>
@@ -100,6 +100,28 @@
   <li><strong>Workers are <code>min ≥ 1</code>.</strong> A scale-to-zero worker has no wake source (nothing routes traffic to it), so it would never run; Drop enforces at least one replica. A <code>web</code> process may still scale to zero.</li>
   <li><strong>Zero migration.</strong> Omit <code>processes:</code> entirely and the app is exactly one web process — identical to before.</li>
 </ul></div>
+
+<h3 id="schedule">schedule:</h3>
+<p>A 5-field cron expression that turns the app into a Kubernetes <strong>CronJob</strong> instead of a Deployment + Service + KEDA <code>HTTPScaledObject</code> — no listener, no host, just a container that runs to completion on a schedule.</p>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">image</span>: <span class="tok-s">myjob:1</span>
+  <span class="tok-k">schedule</span>: <span class="tok-s">"0 3 * * *"</span>                    <span class="tok-c"># every day at 03:00 UTC</span>
+  <span class="tok-k">command</span>: <span class="tok-s">"python nightly_report.py"</span>  <span class="tok-c"># optional; omit to use the image's entrypoint</span></code></pre>
+<table class="tbl">
+<thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>schedule</code></td><td>string</td><td><strong>Required</strong> to opt in. A standard 5-field cron expression (<code>minute hour day-of-month month day-of-week</code>) — numbers, ranges (<code>1-5</code>), steps (<code>*/15</code>), lists (<code>0,12</code>), and <code>*</code> are all accepted per field. An invalid expression is dropped silently (the app deploys as an ordinary web app instead), so double-check it round-trips through <code>drop deploy</code> before relying on it.</td></tr>
+<tr><td><code>command</code></td><td>string / array</td><td>What the Job runs. Same convention as a process's <code>command</code>: a <strong>string</strong> runs in shell form, an <strong>array</strong> is exec-form passthrough. Omit to use the image's own entrypoint.</td></tr>
+</tbody>
+</table>
+<div class="note warn"><span class="lbl">Mutually exclusive</span><p><code>schedule</code> cannot be combined with <code>processes</code>, an <strong>explicitly-declared</strong> <code>services</code>, or <code>healthcheck</code> — a CronJob has no web/worker processes, no listener, and no probes to attach. (Simply omitting <code>services</code> is fine — Drop's own default single-port service doesn't count as a declaration.) Combining any of these returns a <code>400</code> at deploy.</p></div>
+<ul>
+  <li><strong>One run at a time.</strong> <code>concurrencyPolicy: Forbid</code> — if a run is still in flight when the next fire comes around, the next one is skipped rather than piling up.</li>
+  <li><strong>History.</strong> The last 3 successful and 3 failed Jobs are kept for inspection; older ones are garbage-collected automatically.</li>
+  <li><strong><code>release:</code> is unaffected.</strong> It still runs once per <code>drop deploy</code> of the CronJob object itself — not before every scheduled fire.</li>
+  <li><strong>Stop/start.</strong> <code>drop stop &lt;app&gt;</code> suspends the CronJob (<code>spec.suspend: true</code>) — no new runs fire, though one already in flight finishes; <code>drop start</code> unsuspends it.</li>
+</ul>
+<div class="note tip"><span class="lbl">Tip</span><p>Before <code>schedule:</code> existed, the only way to run something on a timer was a worker process that polled forever — sometimes fronted by a dummy HTTP server just to satisfy the "must be a web app" assumption. <code>schedule:</code> ends that workaround: declare the cron expression and let Kubernetes own the timing.</p></div>
 
 <h2>Observing it</h2>
 <p><code>drop ps &lt;app&gt;</code> shows one row per process — its <code>ready/replicas</code>, restart count, and state — aggregated across the web + worker Deployments:</p>

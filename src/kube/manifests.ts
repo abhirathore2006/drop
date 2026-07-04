@@ -32,6 +32,12 @@ export interface AppManifests {
   ingressPolicy?: Record<string, unknown>; // let the KEDA interceptor reach the web pods
   secret?: Record<string, unknown>; // env (omitted when the app has no env) — shared by every process
   workers?: WorkerManifests[]; // extra worker Deployments (omitted when the app is web-only)
+  // (H2) `schedule` → a CronJob instead of everything above: when set, deployment/service/
+  // httpScaledObject/ingressPolicy/workers are ALL absent (a cron app has no web/worker processes —
+  // assertProcesses refuses schedule alongside processes/an explicit services/healthcheck before we
+  // ever get here). `secret` (the shared `<name>-env` config Secret) is unaffected — it's still
+  // emitted when the app has env, same as the web/worker shape.
+  cronJob?: Record<string, unknown>;
 }
 export interface TenantManifests {
   namespace: Record<string, unknown>;
@@ -245,12 +251,57 @@ function podTemplateMeta(labels: Record<string, string>, ctx: ManifestContext): 
   return { labels, ...(ctx.versionId ? { annotations: { "drop.dev/version": ctx.versionId } } : {}) };
 }
 
+// (H2) A scheduled app's ENTIRE manifest set: a CronJob (no Deployment/Service/HTTPScaledObject —
+// there is no listener to route to) + the shared `<name>-env` config Secret (unchanged from the
+// web/worker shape). `drop.dev/kind: cron` (alongside the usual `drop.dev/workload`) lets teardown /
+// stop-start select this object distinctly from a Deployment. The container is built the SAME way as
+// the web container (image, uses-bindings + write-only secret envFrom, CA volumes, resources,
+// securityContext, the drop.dev/version annotation) — just with `app.command` and no probes/port
+// (assertProcesses already refused a `healthcheck` alongside `schedule`).
+function cronAppManifests(app: AppConfig, ctx: ManifestContext, binding: AppBinding, hasEnv: boolean): AppManifests {
+  const labels = { "app.kubernetes.io/name": ctx.name, "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name, "drop.dev/kind": "cron" };
+  const container = buildContainer({ name: ctx.name, image: app.image, binding, command: app.command, resources: app.resources });
+  const out: AppManifests = {
+    cronJob: {
+      apiVersion: "batch/v1",
+      kind: "CronJob",
+      metadata: { name: ctx.name, namespace: ctx.namespace, labels },
+      spec: {
+        schedule: app.schedule,
+        concurrencyPolicy: "Forbid", // never let two runs of the same job overlap
+        successfulJobsHistoryLimit: 3,
+        failedJobsHistoryLimit: 3,
+        startingDeadlineSeconds: 120, // a fire missed by more than this (e.g. control-plane hiccup) is just skipped, not queued
+        jobTemplate: {
+          metadata: { labels },
+          spec: {
+            backoffLimit: 1, // one retry — a scheduled job that keeps failing shouldn't hammer forever
+            template: { metadata: podTemplateMeta(labels, ctx), spec: podSpec(ctx, container, binding, { restartPolicy: "Never" }) },
+          },
+        },
+      },
+    },
+  };
+  if (hasEnv) {
+    const envLabels = { "app.kubernetes.io/name": ctx.name, "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name };
+    out.secret = { apiVersion: "v1", kind: "Secret", metadata: { name: `${ctx.name}-env`, namespace: ctx.namespace, labels: envLabels }, stringData: app.env };
+  }
+  return out;
+}
+
 export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests {
   assertHttpOnly(app); // v1 guard: exactly one HTTP service
-  assertProcesses(app); // at most one web process
-  const containerPort = app.services[0]!.internalPort;
+  assertProcesses(app); // at most one web process; schedule's exclusivity with processes/services/healthcheck (H2)
   const binding = appBinding(app, ctx.name);
   const hasEnv = !!app.env && Object.keys(app.env).length > 0;
+
+  // (H2) `schedule` replaces the ENTIRE web/worker surface with a single CronJob — no Deployment,
+  // Service, or HTTPScaledObject is ever emitted for a scheduled app (assertProcesses already refused
+  // schedule alongside processes/an explicit services/healthcheck, so there's no web process to build
+  // anyway). `scale` is deliberately ignored here: a CronJob has no HPA/KEDA target to size.
+  if (app.schedule) return cronAppManifests(app, ctx, binding, hasEnv);
+
+  const containerPort = app.services[0]!.internalPort;
   const processes = expandProcesses(app, ctx.name);
 
   const out: AppManifests = {};

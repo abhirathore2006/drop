@@ -32,14 +32,17 @@ export function storageToBytes(s: string): number | null {
 }
 
 /** Validate an explicitly-requested database storage size against the per-database cap. Returns an
- *  error string, or null when acceptable (including when no storage is requested → default applies). */
-export function validateDbStorage(input: unknown): string | null {
+ *  error string, or null when acceptable (including when no storage is requested → default applies).
+ *  The cap defaults to the platform `MAX_DB_STORAGE` (1Gi); callers with a per-org override (Future.md
+ *  item 10) pass `capBytes`/`capLabel` to raise or lower it. Back-compatible: one-arg calls keep the
+ *  1Gi behavior exactly. */
+export function validateDbStorage(input: unknown, capBytes: number = MAX_DB_STORAGE_BYTES, capLabel: string = MAX_DB_STORAGE): string | null {
   if (input == null || typeof input !== "object") return null;
   const s = (input as Record<string, unknown>).storage;
   if (s == null) return null; // not requested → server default (within the cap)
   if (typeof s !== "string" || !STORAGE_RE.test(s)) return `invalid storage ${JSON.stringify(s)} — use a k8s quantity like 512Mi or 1Gi`;
   const bytes = storageToBytes(s);
-  if (bytes != null && bytes > MAX_DB_STORAGE_BYTES) return `database storage ${s} exceeds the ${MAX_DB_STORAGE} per-database limit`;
+  if (bytes != null && bytes > capBytes) return `database storage ${s} exceeds the ${capLabel} per-database limit`;
   return null;
 }
 
@@ -53,7 +56,7 @@ function str(v: unknown, max = 2048): string | undefined {
  * no required field — sensible defaults stand in). The "is there a database section?"
  * decision lives in parseDatabaseConfig (key presence).
  */
-export function sanitizeDatabaseConfig(input: unknown): DatabaseConfig | undefined {
+export function sanitizeDatabaseConfig(input: unknown, capBytes: number = MAX_DB_STORAGE_BYTES): DatabaseConfig | undefined {
   if (input != null && typeof input !== "object") return undefined;
   const raw = (input ?? {}) as Record<string, unknown>;
 
@@ -65,10 +68,11 @@ export function sanitizeDatabaseConfig(input: unknown): DatabaseConfig | undefin
   // Accept the requested size only if well-formed AND within the cap; otherwise keep the default.
   // (The loud rejection with a clear error is validateDbStorage, run at the CLI + control-plane
   // boundaries; this is the belt-and-suspenders that guarantees no over-cap PVC is ever emitted.)
+  // `capBytes` defaults to the 1Gi platform ceiling; a per-org override (item 10) may raise it.
   const storage = str(raw.storage, 32);
   if (storage && STORAGE_RE.test(storage)) {
     const b = storageToBytes(storage);
-    if (b != null && b <= MAX_DB_STORAGE_BYTES) cfg.storage = storage;
+    if (b != null && b <= capBytes) cfg.storage = storage;
   }
 
   if (raw.hibernation === "scheduled") cfg.hibernation = "scheduled";

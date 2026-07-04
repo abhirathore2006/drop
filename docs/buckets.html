@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Buckets (object storage) · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="buckets.html" class="active">Buckets (object storage)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Buckets — tenant object storage</h1>
+<p class="lead">Apps need somewhere to put uploads, exports and artifacts. A <strong>bucket</strong> is a managed S3-compatible object store, isolated per tenant, that you create in one command and bind to an app so its credentials arrive as environment variables — never in <code>drop.yaml</code>, never in a manifest, never in a response body after the one time they are shown.</p>
+
+<div class="note"><span class="lbl">A bucket is a workload type</span><p>Like a site, an app or a database, a bucket is a row in the shared resource namespace with an owner, an org, roles and an audit trail. It shows up in <code>drop ls</code>, the console groups it under <strong>Buckets</strong>, and it is deleted the same way. There is no object browser in the console — reading and writing objects is your app's job, not the platform's.</p></div>
+
+<h2 id="create">Create a bucket</h2>
+<pre><code>drop bucket create avatars
+<span class="tok-c">#   ▸ creating bucket avatars…</span>
+<span class="tok-c">#   ✓ bucket avatars ready</span>
+<span class="tok-c">#      endpoint: http://…  bucket: …  prefix: buckets/&lt;tenant&gt;/avatars/</span>
+<span class="tok-c">#   ✓ credentials — shown once, store them now:</span>
+<span class="tok-c">#      S3_ACCESS_KEY_ID=…</span>
+<span class="tok-c">#      S3_SECRET_ACCESS_KEY=…</span></code></pre>
+<p>Add <code>--org &lt;slug&gt;</code> to create it in a team org (defaults to your personal org). The <strong>credentials are printed exactly once</strong> — the platform never stores them and never returns them again. In practice you rarely copy them by hand: bind the bucket to an app (below) and Drop injects them for you.</p>
+
+<div class="note warn"><span class="lbl">RevealOnce credentials</span><p>Create and <a href="#rotate">rotate</a> reveal the access key <strong>one time</strong>. If you lose it, rotate to mint a fresh one — you can't ask for the old one back. This mirrors <code>drop db password</code>.</p></div>
+
+<h2 id="bind">Bind a bucket to an app</h2>
+<p>Declare the dependency in your app's <code>drop.yaml</code> with a <code>uses</code> edge — the same mechanism that binds a database:</p>
+<pre><code><span class="tok-k">app:</span>
+  <span class="tok-k">image:</span> my-org/gallery:1
+  <span class="tok-k">uses:</span>
+    - <span class="tok-k">bucket:</span> avatars        <span class="tok-c"># a bucket in the SAME org</span></code></pre>
+<p>On deploy, Drop resolves the bucket (it must be in the same org — a cross-org bind is refused with a <code>400</code>), provisions its credentials, and writes them straight into the app's <strong>write-only secret</strong>, so the pod boots with these environment variables:</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><code>S3_ENDPOINT</code></td><td>The S3 endpoint reachable from your pod (omitted in prod → your SDK uses the AWS default for the region).</td></tr>
+<tr><td><code>S3_BUCKET</code></td><td>The bucket name to address.</td></tr>
+<tr><td><code>S3_PREFIX</code></td><td>Your tenant's key prefix — <strong>prepend it to every object key</strong>. This is the isolation boundary.</td></tr>
+<tr><td><code>S3_ACCESS_KEY_ID</code> / <code>S3_SECRET_ACCESS_KEY</code></td><td>The access credentials.</td></tr>
+</tbody>
+</table>
+<p>Point your S3 client at <code>S3_ENDPOINT</code>/<code>S3_BUCKET</code> and write keys under <code>S3_PREFIX</code>. Because the creds ride the write-only secret path, they never appear in the manifest, the deploy response, or the console.</p>
+
+<div class="note"><span class="lbl">Multiple buckets</span><p>Bind more than one and each set of variables is prefixed with the resource name so they don't collide — e.g. <code>AVATARS_S3_BUCKET</code>, <code>EXPORTS_S3_BUCKET</code>. A single binding is unprefixed (<code>S3_BUCKET</code>). Inside a <a href="stacks.html">stack</a>, the prefix is the resource key.</p></div>
+
+<h2 id="isolation">The isolation model</h2>
+<p>Every bucket maps to a prefix <code>buckets/&lt;tenant-namespace&gt;/&lt;name&gt;/</code>. Because the prefix leads with the tenant's namespace, two tenants' prefixes <strong>can never overlap</strong> — one tenant can neither read/write nor even <em>enumerate</em> another's keys. In production this is enforced by a per-tenant, prefix-scoped IAM policy (the template lives at <code>infra/terraform/eks/bucket-policy.tf.example</code>): the object grant is limited to <code>arn:aws:s3:::&lt;bucket&gt;/&lt;prefix&gt;*</code> and the <code>ListBucket</code> grant is conditioned to <code>s3:prefix = &lt;prefix&gt;*</code>.</p>
+
+<div class="note warn"><span class="lbl">Local vs production credentials</span><p><strong>Locally</strong> (Floci/MinIO), a bucket is just a prefix inside the platform's own S3 bucket, and the credentials Drop hands you are the platform's shared test keys — they are <em>not</em> prefix-scoped, which is fine for dev where every tenant shares one key pair anyway. <strong>In production</strong> those shared keys are unsafe: the <code>BucketStore</code> port must be backed by an implementation that mints a <em>per-tenant, prefix-scoped</em> IAM/STS credential from the Terraform policy template above. The platform default (v1) is the local prefix store; the production key-minting store is a named follow-up, and the port comment points at the template.</p></div>
+
+<h2 id="rotate">Rotate credentials</h2>
+<pre><code>drop bucket rotate avatars      <span class="tok-c"># owner only; the new key is printed once</span></code></pre>
+<p>Rotation re-mints the access credentials. Apps that were bound to the bucket keep using their injected copy until you <strong>redeploy</strong> them (which re-reads the fresh credentials). In the console, the bucket's detail page has a <em>rotate credentials</em> button that reveals the new key once.</p>
+
+<h2 id="usage-delete">Usage &amp; deletion</h2>
+<p>The bucket detail page (and <code>drop bucket ls</code> / MCP <code>bucket_status</code>) surfaces the endpoint, bucket, prefix, total size and object count — never the credentials. Size is an eventually-consistent sweep of object sizes under the prefix.</p>
+<pre><code>drop bucket rm avatars           <span class="tok-c"># refuses (409) if the bucket holds objects</span>
+drop bucket rm avatars --force   <span class="tok-c"># deletes it AND wipes its contents (audited)</span></code></pre>
+<p>Deleting a non-empty bucket requires <code>--force</code> so its contents can't be wiped by accident; the console danger zone shows the object count and asks you to type the name to confirm.</p>
+
+<h2 id="quota">Quota</h2>
+<p>Buckets count toward two org limits. They occupy a slot against the <strong>per-org workload cap</strong>, and their object bytes count toward the org's <strong>storage budget</strong> (when one is set) alongside database PVC requests — see <code>GET /v1/orgs/&lt;slug&gt;/usage</code>, which now reports a <code>storage</code> section (<code>{ databases: {count, requestedBytes}, buckets: {count, bytes}, budget }</code>). The budget and the per-database storage cap are admin-adjustable per org via <code>GET/PUT /v1/admin/orgs/&lt;slug&gt;/quotas</code>; the storage figure is an approximate, eventually-consistent computation and is documented as such.</p>
+
+<div class="note"><span class="lbl">Audit</span><p><code>bucket.create</code>, <code>bucket.rotate</code> and <code>bucket.delete</code> are recorded in the audit trail; the credentials themselves are never logged.</p></div>
+
+<div class="next">
+  <a href="stacks.html"><div class="d">← Back</div><div class="t">Stacks</div></a>
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

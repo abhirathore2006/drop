@@ -155,6 +155,30 @@ test("validateStackEdges: accepts sound edges; names the offender otherwise", ()
   expect(validateStackEdges(badEnvFrom)).toContain("not an app");
 });
 
+test("stack: bucket resource + app→bucket `uses` edge (I1)", () => {
+  const spec = sanitizeStackConfig({
+    name: "s",
+    resources: {
+      files: { type: "bucket" },
+      api: { type: "app", image: "x:1", uses: [{ bucket: "files" }] },
+    },
+  })!;
+  expect(spec.resources.files).toEqual({ type: "bucket" });
+  expect(spec.resources.api!.uses).toEqual([{ bucket: "files" }]);
+  expect(validateStackEdges(spec)).toBeNull();
+
+  // app uses a bucket KEY that isn't in the stack
+  const missing: StackSpec = { name: "s", resources: { api: { type: "app", image: "x:1", uses: [{ bucket: "ghost" }] } } };
+  expect(validateStackEdges(missing)).toContain("ghost");
+
+  // app uses a KEY that is a database, not a bucket
+  const wrongType: StackSpec = {
+    name: "s",
+    resources: { db: { type: "database" }, api: { type: "app", image: "x:1", uses: [{ bucket: "db" }] } },
+  };
+  expect(validateStackEdges(wrongType)).toContain("not a bucket");
+});
+
 test("parseStackConfig: reads the top-level stack: section of a drop.yaml body", () => {
   const spec = parseStackConfig(
     yaml(`

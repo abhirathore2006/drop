@@ -296,6 +296,45 @@ export function buildProgram(): Command {
       console.log(`  ✓ ${name} waking`);
     });
 
+  // ---- buckets (tenant object storage, I1) ----
+  const bucket = program.command("bucket").description("Manage object-storage buckets (create / ls / rotate / rm)");
+  const printBucketCreds = (res: { name: string; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretAccessKey: string }) => {
+    console.log(`  ✓ bucket ${res.name} ready`);
+    console.log(`     endpoint: ${res.endpoint || "(AWS default)"}  bucket: ${res.bucket}  prefix: ${res.prefix}`);
+    console.log(`  ✓ credentials — shown once, store them now (bind with \`uses: [{ bucket: ${res.name} }]\` to inject them automatically):`);
+    console.log(`     S3_ACCESS_KEY_ID=${res.accessKeyId}`);
+    console.log(`     S3_SECRET_ACCESS_KEY=${res.secretAccessKey}`);
+  };
+  bucket
+    .command("create <name>")
+    .description("Create a tenant object-storage bucket (credentials are printed once)")
+    .option("--org <slug>", "create in this organisation (default: your personal org)")
+    .action(async (name: string, opts: { org?: string }) => {
+      const err = validateName(name);
+      if (err) throw new Error(err);
+      console.log(`  ▸ creating bucket ${name}…`);
+      printBucketCreds(await (await client()).bucketCreate(name, opts.org));
+    });
+  bucket
+    .command("ls")
+    .description("List your buckets")
+    .option("--org <slug>", "show only buckets in this organisation")
+    .action(async (opts: { org?: string }) => show(await (await client()).bucketList(opts.org)));
+  bucket
+    .command("rotate <name>")
+    .description("Re-mint a bucket's access credentials (owner only; printed once)")
+    .action(async (name: string) => {
+      const err = validateName(name);
+      if (err) throw new Error(err);
+      console.log(`  ▸ rotating credentials for ${name}…`);
+      printBucketCreds(await (await client()).bucketRotate(name));
+    });
+  bucket
+    .command("rm <name>")
+    .description("Delete a bucket (use --force to delete a non-empty one and its contents)")
+    .option("--force", "delete even when the bucket holds objects (wipes its contents)")
+    .action(async (name: string, opts: { force?: boolean }) => show(await (await client()).bucketRemove(name, opts.force)));
+
   const org = program.command("org").description("Manage organisations (group resources + org-level permissions)");
   org
     .command("create <slug> [name]")

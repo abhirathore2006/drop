@@ -61,6 +61,55 @@ test("getWorkloadLogsStream: aborting the signal destroys a keepOpen stream and 
   expect(stream!.destroyed).toBe(true);
 });
 
+// ---- H2: schedule (cron) ----
+
+test("FakeKube: deleteApp removes a cron app's manifests (including the cronJob)", async () => {
+  const k = new FakeKube();
+  const m = appManifests({ image: "cron:1", services: [{ internalPort: 8080, protocol: "http" }], schedule: "0 3 * * *" }, {
+    name: "nightly",
+    namespace: "drop-acme",
+    host: "nightly.drop.example.com",
+  });
+  expect(m.cronJob).toBeDefined();
+  expect(m.deployment).toBeUndefined();
+
+  await k.applyApp("drop-acme", "nightly", m);
+  expect((await k.getApp("drop-acme", "nightly"))?.cronJob).toEqual(m.cronJob); // bookkeeping carries the cronjob manifest
+
+  await k.deleteApp("drop-acme", "nightly");
+  expect(await k.getApp("drop-acme", "nightly")).toBeNull(); // cronJob gone along with everything else
+  expect(k.deletes).toEqual([{ namespace: "drop-acme", name: "nightly" }]);
+});
+
+test("FakeKube: stopApp suspends a cron app's CronJob; startApp unsuspends it", async () => {
+  const k = new FakeKube();
+  const m = appManifests({ image: "cron:1", services: [{ internalPort: 8080, protocol: "http" }], schedule: "0 3 * * *" }, {
+    name: "nightly",
+    namespace: "drop-acme",
+    host: "h",
+  });
+  await k.applyApp("drop-acme", "nightly", m);
+  expect((m.cronJob as any).spec.suspend).toBeUndefined();
+
+  await k.stopApp("drop-acme", "nightly");
+  expect(k.stopped.has("drop-acme/nightly")).toBe(true); // generic bookkeeping, same as any app
+  expect(((await k.getApp("drop-acme", "nightly"))!.cronJob as any).spec.suspend).toBe(true);
+
+  await k.startApp("drop-acme", "nightly");
+  expect(k.stopped.has("drop-acme/nightly")).toBe(false);
+  expect(((await k.getApp("drop-acme", "nightly"))!.cronJob as any).spec.suspend).toBe(false);
+});
+
+test("FakeKube: stopApp/startApp on a NON-cron app never touch a cronJob field (there isn't one)", async () => {
+  const k = new FakeKube();
+  const m = appManifests({ image: "x:1", services: [{ internalPort: 8080, protocol: "http" }] }, { name: "billing", namespace: "ns", host: "h" });
+  await k.applyApp("ns", "billing", m);
+  await k.stopApp("ns", "billing"); // must not throw despite no cronJob present
+  expect(k.stopped.has("ns/billing")).toBe(true);
+  await k.startApp("ns", "billing");
+  expect(k.stopped.has("ns/billing")).toBe(false);
+});
+
 // ---- C1: aggregated namespace status lists ----
 
 test("listNamespace{App,Database}Statuses: scoped to the namespace, honor overrides", async () => {

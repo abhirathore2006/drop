@@ -201,9 +201,15 @@ export class FakeKube implements KubeClient {
   }
   async stopApp(namespace: string, name: string): Promise<void> {
     this.stopped.add(this.key(namespace, name));
+    // (H2) Mirror the real client: stopping a cron app suspends its CronJob (spec.suspend), not just
+    // the generic `stopped` bookkeeping — so a test can assert on the manifest directly.
+    const cronJob = this.apps.get(this.key(namespace, name))?.cronJob as { spec?: { suspend?: boolean } } | undefined;
+    if (cronJob) (cronJob.spec ??= {}).suspend = true;
   }
   async startApp(namespace: string, name: string): Promise<void> {
     this.stopped.delete(this.key(namespace, name));
+    const cronJob = this.apps.get(this.key(namespace, name))?.cronJob as { spec?: { suspend?: boolean } } | undefined;
+    if (cronJob) (cronJob.spec ??= {}).suspend = false;
   }
 
   // Tests can preset a usage report per namespace; otherwise a namespace that has had a tenant

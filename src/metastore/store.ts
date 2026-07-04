@@ -1,6 +1,7 @@
 import { sql } from "kysely";
 import type { Db } from "../db/db.ts";
 import type { SiteConfig } from "../site-config.ts";
+import { MAX_DB_STORAGE } from "../db-config.ts";
 import { tenantNamespace } from "../api/tenant.ts";
 import {
   type Member,
@@ -317,19 +318,48 @@ export class MetaStore {
   }
 
   /** Workload counts by type for an org (usage reporting). */
-  async orgWorkloadCounts(orgId: string): Promise<{ site: number; app: number; database: number; total: number }> {
+  async orgWorkloadCounts(orgId: string): Promise<{ site: number; app: number; database: number; bucket: number; total: number }> {
     const rows = await this.db
       .selectFrom("sites")
       .select(["type", (eb) => eb.fn.countAll().as("n")])
       .where("org_id", "=", orgId)
       .groupBy("type")
       .execute();
-    const out = { site: 0, app: 0, database: 0, total: 0 };
+    const out = { site: 0, app: 0, database: 0, bucket: 0, total: 0 };
     for (const r of rows) {
       const n = Number(r.n);
       out[(r.type as WorkloadType) ?? "site"] += n;
       out.total += n;
     }
     return out;
+  }
+
+  /** Names of an org's resources of one type (small lists: buckets/databases). Sorted. */
+  async orgSiteNames(orgId: string, type: WorkloadType): Promise<string[]> {
+    const rows = await this.db
+      .selectFrom("sites")
+      .select("name")
+      .where("org_id", "=", orgId)
+      .where("type", "=", type)
+      .orderBy("name")
+      .execute();
+    return rows.map((r) => r.name);
+  }
+
+  /** The requested PVC storage of every database in an org (its current version's DatabaseConfig,
+   *  defaulting to the platform default when a pre-item-10 row stored no config). Feeds the org
+   *  storage-budget computation — approximate by design (it's the REQUEST, not live disk use). */
+  async orgDatabaseStorageRequests(orgId: string): Promise<string[]> {
+    const rows = await this.db
+      .selectFrom("sites")
+      .leftJoin("versions", (j) => j.onRef("versions.site_name", "=", "sites.name").onRef("versions.id", "=", "sites.current_version"))
+      .select(["sites.name as name", "versions.config as vconfig"])
+      .where("sites.org_id", "=", orgId)
+      .where("sites.type", "=", "database")
+      .execute();
+    return rows.map((r) => {
+      const cfg = parseVersionCfg((r as Record<string, unknown>).vconfig) as { storage?: string } | undefined;
+      return cfg && typeof cfg.storage === "string" ? cfg.storage : MAX_DB_STORAGE;
+    });
   }
 }

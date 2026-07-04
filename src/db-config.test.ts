@@ -63,6 +63,19 @@ test("validateDbStorage: caps requests at 1Gi with a clear error; absent/within-
   expect(validateDbStorage({ storage: 5 })).toMatch(/invalid storage/); // non-string
 });
 
+test("validateDbStorage + sanitizeDatabaseConfig honor an optional per-org cap (item 10 override)", () => {
+  const cap5Gi = 5 * 2 ** 30;
+  // A raised cap lets a larger request through (and names the new cap in the error).
+  expect(validateDbStorage({ storage: "2Gi" }, cap5Gi, "5Gi")).toBeNull();
+  expect(validateDbStorage({ storage: "5Gi" }, cap5Gi, "5Gi")).toBeNull();
+  expect(validateDbStorage({ storage: "6Gi" }, cap5Gi, "5Gi")).toMatch(/exceeds the 5Gi/);
+  // Sanitize keeps a value within the raised cap (default would have clamped it to 1Gi).
+  expect(sanitizeDatabaseConfig({ storage: "5Gi" }, cap5Gi)!.storage).toBe("5Gi");
+  expect(sanitizeDatabaseConfig({ storage: "5Gi" })!.storage).toBe("1Gi"); // default cap still clamps
+  // A lowered cap rejects a normally-fine request.
+  expect(validateDbStorage({ storage: "1Gi" }, 512 * 2 ** 20, "512Mi")).toMatch(/exceeds the 512Mi/);
+});
+
 test("sanitizeDatabaseConfig: pins engine to postgres-18 (v1 only supports it)", () => {
   expect(sanitizeDatabaseConfig({ engine: "postgres-16" })!.engine).toBe("postgres-18");
   expect(sanitizeDatabaseConfig({ engine: "mysql" })!.engine).toBe("postgres-18");

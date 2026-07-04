@@ -18,7 +18,8 @@ export interface AppScale {
   max: number; // KEDA maxReplicaCount
 }
 export interface AppUse {
-  database: string; // a managed database in the SAME org; deploy wires envFrom <db>-app + CA + verify-full
+  database?: string; // a managed database in the SAME org; deploy wires envFrom <db>-app + CA + verify-full
+  bucket?: string; // (I1) a tenant bucket in the SAME org; deploy injects S3_* creds via the write-only secret path
 }
 // Readiness + liveness probes on the web container. All fields are RESOLVED seconds (the sanitizer
 // parses "10s"/"2m" durations, applies defaults, and clamps to bounds) so the manifest layer just
@@ -57,6 +58,18 @@ export interface AppConfig {
   healthcheck?: AppHealthcheck; // readiness/liveness probes on the web container (omitted → default TCP readiness)
   release?: AppRelease; // pre-rollout migration Job (omitted → no release phase)
   processes?: Record<string, AppProcess>; // multi-process apps (omitted → today's implicit single web process)
+  // (H2) A 5-field cron expression ("min hour dom month dow") turning this app into a CronJob instead
+  // of a Deployment+HTTPScaledObject — ends the "worker fronted by HTTP just to keep it alive" hack.
+  // Mutually exclusive with `processes`, an explicitly-declared `services`, and `healthcheck` (probes
+  // are meaningless on a one-shot Job) — enforced in assertProcesses, not here. `scale` is ignored: a
+  // CronJob has no HPA/KEDA target. `release:` is UNAFFECTED — it still runs, unchanged, before every
+  // deploy of the CronJob object (not before each scheduled fire).
+  schedule?: string;
+  // (H2) The CronJob's command: a string runs in shell form (["/bin/sh","-c",cmd]); an array is
+  // exec-form passthrough — same convention as AppProcess.command. Omitted → the image's own
+  // entrypoint. Only meaningful when `schedule` is set; sanitized unconditionally regardless (a
+  // harmless no-op field otherwise).
+  command?: string | string[];
 }
 
 const DEFAULT_SERVICE: AppService = { internalPort: 8080, protocol: "http" };
@@ -86,6 +99,63 @@ function boundedSeconds(v: unknown, min: number, max: number, def: number): numb
   const s = parseSeconds(v);
   if (s === undefined) return def;
   return Math.min(max, Math.max(min, s));
+}
+
+// (H2) Cron field bounds, in field order (minute, hour, day-of-month, month, day-of-week). Both 0
+// and 7 mean Sunday in day-of-week — accepting both matches every mainstream cron implementation.
+const CRON_FIELD_BOUNDS: readonly [number, number][] = [
+  [0, 59],
+  [0, 23],
+  [1, 31],
+  [1, 12],
+  [0, 7],
+];
+
+/** One comma-separated cron field: `*`, `N`, `N-M`, optionally with a `/STEP` — any of those,
+ *  comma-listed (e.g. "1,5-10,*\/15"). Defensive: a negative/out-of-range/inverted/non-numeric part
+ *  fails the WHOLE field (the caller drops the whole `schedule` rather than accept a mangled one). */
+function validCronField(field: string, min: number, max: number): boolean {
+  if (!field) return false;
+  for (const part of field.split(",")) {
+    const m = /^(\*|\d+(?:-\d+)?)(\/(\d+))?$/.exec(part);
+    if (!m) return false;
+    if (m[3] !== undefined && parseInt(m[3], 10) < 1) return false; // step 0 (or junk) is meaningless
+    if (m[1] === "*") continue;
+    const rm = /^(\d+)(?:-(\d+))?$/.exec(m[1]!)!;
+    const lo = parseInt(rm[1]!, 10);
+    const hi = rm[2] !== undefined ? parseInt(rm[2]!, 10) : lo;
+    if (lo < min || hi > max || hi < lo) return false;
+  }
+  return true;
+}
+
+/** Sanitize a 5-field cron expression ("min hour dom month dow"); junk (wrong field count,
+ *  out-of-range/negative numbers, garbage characters) drops the key entirely rather than accepting a
+ *  mangled schedule. Whitespace is normalized to single spaces, so it re-sanitizes unchanged
+ *  (round-trip safe: CLI -> JSON -> API). */
+function sanitizeSchedule(v: unknown): string | undefined {
+  const s = str(v, 128);
+  if (!s) return undefined;
+  const fields = s.trim().split(/\s+/);
+  if (fields.length !== 5) return undefined;
+  for (let i = 0; i < 5; i++) {
+    const [min, max] = CRON_FIELD_BOUNDS[i]!;
+    if (!validCronField(fields[i]!, min, max)) return undefined;
+  }
+  return fields.join(" ");
+}
+
+// (H2) `command` at the app level (the CronJob's command): string → shell-form, array → exec-form —
+// same convention as AppProcess.command (see the `processes` block below), just not tied to a process
+// key. Kept as a small standalone helper (not shared with the `processes` loop) to avoid touching that
+// block for an unrelated feature.
+function sanitizeCommand(v: unknown): string | string[] | undefined {
+  if (typeof v === "string" && v.length > 0 && v.length <= 4096) return v;
+  if (Array.isArray(v)) {
+    const arr = (v as unknown[]).filter((x): x is string => typeof x === "string" && x.length > 0 && x.length <= 4096);
+    return arr.length ? arr : undefined;
+  }
+  return undefined;
 }
 
 function sanitizeScale(v: unknown): AppScale | undefined {
@@ -138,20 +208,27 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
 
   cfg.scale = sanitizeScale(raw.scale);
 
-  // `uses` declares dependencies on managed resources (v1: databases). Each entry is
-  // `{ database: <name> }`; the deploy path resolves the name to a same-org database and
-  // wires the app to its CNPG `<db>-app` Secret + cluster CA + PGSSLMODE=verify-full. Same
-  // defensive posture as everything above: ignore non-array input and junk entries, require a
-  // valid workload name, collapse duplicates, and cap the list. Round-trip safe — the sanitized
-  // shape `{ database: <name> }` re-sanitizes unchanged (CLI -> JSON -> API).
+  // `uses` declares dependencies on managed resources. Each entry is `{ database: <name> }` (CNPG
+  // binding: envFrom `<db>-app` Secret + cluster CA + PGSSLMODE=verify-full) OR (I1) `{ bucket: <name> }`
+  // (object storage: S3_* creds injected via the write-only secret path at deploy). Same defensive
+  // posture as everything above: ignore non-array input and junk entries, require a valid workload
+  // name, collapse duplicates per kind, and cap the list. Round-trip safe — a sanitized `{ database }`
+  // or `{ bucket }` entry re-sanitizes unchanged (CLI -> JSON -> API).
   if (Array.isArray(raw.uses)) {
     const uses: AppUse[] = [];
     const seen = new Set<string>();
     for (const u of (raw.uses as any[]).slice(0, 8)) {
       const database = str(u?.database, 63);
-      if (!database || validateName(database) !== null || seen.has(database)) continue;
-      seen.add(database);
-      uses.push({ database });
+      const bucket = str(u?.bucket, 63);
+      if (database) {
+        if (validateName(database) !== null || seen.has(`d:${database}`)) continue;
+        seen.add(`d:${database}`);
+        uses.push({ database });
+      } else if (bucket) {
+        if (validateName(bucket) !== null || seen.has(`b:${bucket}`)) continue;
+        seen.add(`b:${bucket}`);
+        uses.push({ bucket });
+      }
     }
     if (uses.length) cfg.uses = uses;
   }
@@ -219,7 +296,30 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
     if (Object.keys(procs).length) cfg.processes = procs;
   }
 
+  // `schedule` (H2) → a 5-field cron expression; junk drops the key (see sanitizeSchedule). Exclusivity
+  // with `processes`/an explicit `services`/`healthcheck` is enforced at deploy via assertProcesses,
+  // not here — sanitizing is purely syntactic.
+  const schedule = sanitizeSchedule(raw.schedule);
+  if (schedule) cfg.schedule = schedule;
+
+  // `command` (H2) → the CronJob's command. Same string/array convention as a process's `command`.
+  // Sanitized unconditionally (a harmless, ignored field on a non-`schedule` app).
+  const command = sanitizeCommand(raw.command);
+  if (command !== undefined) cfg.command = command;
+
   return cfg;
+}
+
+// (H2) The single default service (see DEFAULT_SERVICE above) isn't a real declaration — it's what
+// `services` defaults to when the input has none. Compared by VALUE, not by how it arrived: an
+// AppConfig round-tripped through JSON (CLI -> API) rebuilds `services` fresh each time, so there is
+// no reliable way to remember "the input had no `services` key" past one sanitize call — comparing
+// against the default's SHAPE is round-trip safe where a presence flag would not be. The practical
+// consequence: a user who explicitly writes exactly `services: [{internal_port: 8080, protocol: http}]`
+// alongside `schedule` is indistinguishable from one who wrote neither, and is allowed — a deliberate,
+// documented tradeoff (see assertProcesses).
+function isDefaultServices(services: AppService[]): boolean {
+  return services.length === 1 && services[0]!.internalPort === DEFAULT_SERVICE.internalPort && services[0]!.protocol === DEFAULT_SERVICE.protocol;
 }
 
 /** A process is the "web" process (Service + HTTPScaledObject) iff its key is `web` (unless
@@ -232,8 +332,21 @@ export function isWebProcess(key: string, p: AppProcess): boolean {
  * At most one web process is allowed (which one gets the Service/host must be unambiguous). Absent
  * `processes:` is always fine (an implicit single web). More than one web → deploy 400s — the loud,
  * defensive option over silently dropping a process the author declared.
+ *
+ * (H2) `schedule` turns the app into a CronJob, which has no web/worker processes, no listener, and
+ * no probes — so it's rejected outright alongside `processes`, an explicitly-declared `services`
+ * (the sanitizer's implicit default single service doesn't count — see isDefaultServices), and
+ * `healthcheck`. These checks run BEFORE the web-uniqueness check below (schedule+processes should
+ * name schedule as the conflict, not "two web processes").
  */
 export function assertProcesses(app: AppConfig): void {
+  if (app.schedule) {
+    if (app.processes) throw new Error(`"schedule" and "processes" are mutually exclusive — a CronJob has no web/worker processes`);
+    if (app.healthcheck) throw new Error(`"schedule" and "healthcheck" are mutually exclusive — probes are meaningless on a CronJob`);
+    if (!isDefaultServices(app.services)) {
+      throw new Error(`"schedule" and an explicitly-declared "services" are mutually exclusive — a CronJob has no listener`);
+    }
+  }
   if (!app.processes) return;
   const webs = Object.entries(app.processes).filter(([k, p]) => isWebProcess(k, p));
   if (webs.length > 1) {

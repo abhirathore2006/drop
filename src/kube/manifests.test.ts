@@ -304,3 +304,75 @@ test("appManifests: shared config Secret + DB binding reach every process (web +
   expect(workerEnvFrom).toEqual(webEnvFrom); // identical secrets/bindings across processes
   expect((m.secret as any).stringData.LOG_LEVEL).toBe("info"); // one shared <name>-env Secret
 });
+
+// ---- H2: schedule (cron) ----
+
+test("appManifests: schedule → a CronJob (batch/v1), Forbid concurrency, history limits, one retry, Never restart", () => {
+  const app = sanitizeAppConfig({ image: "cron:1", schedule: "0 3 * * *" })!;
+  const m = appManifests(app, { name: "nightly", namespace: "drop-acme", host: "nightly.drop.example.com" });
+  const cj = m.cronJob as any;
+  expect(cj.apiVersion).toBe("batch/v1");
+  expect(cj.kind).toBe("CronJob");
+  expect(cj.metadata).toMatchObject({ name: "nightly", namespace: "drop-acme" });
+  expect(cj.metadata.labels["drop.dev/kind"]).toBe("cron"); // distinguishes it from a Deployment for teardown/stop-start
+  expect(cj.metadata.labels["drop.dev/workload"]).toBe("nightly");
+  expect(cj.spec.schedule).toBe("0 3 * * *");
+  expect(cj.spec.concurrencyPolicy).toBe("Forbid");
+  expect(cj.spec.successfulJobsHistoryLimit).toBe(3);
+  expect(cj.spec.failedJobsHistoryLimit).toBe(3);
+  expect(cj.spec.startingDeadlineSeconds).toBe(120);
+  expect(cj.spec.jobTemplate.spec.backoffLimit).toBe(1);
+  expect(cj.spec.jobTemplate.spec.template.spec.restartPolicy).toBe("Never");
+});
+
+test("appManifests: schedule → NO Deployment/Service/HTTPScaledObject/ingressPolicy/workers", () => {
+  const app = sanitizeAppConfig({ image: "cron:1", schedule: "0 3 * * *" })!;
+  const m = appManifests(app, { name: "nightly", namespace: "ns", host: "h" });
+  expect(m.deployment).toBeUndefined();
+  expect(m.service).toBeUndefined();
+  expect(m.httpScaledObject).toBeUndefined();
+  expect(m.ingressPolicy).toBeUndefined();
+  expect(m.workers).toBeUndefined();
+  expect(m.cronJob).toBeDefined();
+});
+
+test("appManifests: cron container parity with the web path — image, uses+CA, write-only secret, resources, securityContext", () => {
+  const shared = { image: "cron:1", env: { LOG_LEVEL: "info" }, uses: [{ database: "tododb" }], resources: { cpu: "0.5", memory: "512Mi" } };
+  const cronApp = sanitizeAppConfig({ ...shared, schedule: "0 3 * * *", command: "python job.py" })!;
+  const webApp = sanitizeAppConfig(shared)!;
+  const cronCtr = (appManifests(cronApp, { name: "nightly", namespace: "drop-acme", host: "h" }).cronJob as any).spec.jobTemplate.spec.template.spec.containers[0];
+  const webCtr = (appManifests(webApp, { name: "nightly", namespace: "drop-acme", host: "h" }).deployment as any).spec.template.spec.containers[0];
+  expect(cronCtr.image).toBe(webCtr.image);
+  expect(cronCtr.envFrom).toEqual(webCtr.envFrom); // tododb-app, nightly-env, nightly-secret (optional)
+  expect(cronCtr.env).toEqual(webCtr.env); // PGSSLMODE/PGSSLROOTCERT, identical to the web container
+  expect(cronCtr.resources).toEqual(webCtr.resources);
+  expect(cronCtr.securityContext).toEqual(webCtr.securityContext);
+  expect(cronCtr.command).toEqual(["/bin/sh", "-c", "python job.py"]); // app.command, shell-form
+  expect(cronCtr.ports).toBeUndefined(); // a CronJob isn't routed
+  expect(cronCtr.readinessProbe).toBeUndefined(); // schedule+healthcheck is rejected at assertProcesses
+  const cronPod = (appManifests(cronApp, { name: "nightly", namespace: "drop-acme", host: "h" }).cronJob as any).spec.jobTemplate.spec.template.spec;
+  expect(cronPod.volumes).toEqual([{ name: "db-ca-tododb", secret: { secretName: "tododb-ca", items: [{ key: "ca.crt", path: "ca.crt" }] } }]);
+});
+
+test("appManifests: schedule keeps the shared <name>-env config Secret", () => {
+  const app = sanitizeAppConfig({ image: "cron:1", schedule: "0 3 * * *", env: { LOG_LEVEL: "info" } })!;
+  const m = appManifests(app, { name: "nightly", namespace: "ns", host: "h" });
+  expect((m.secret as any).stringData.LOG_LEVEL).toBe("info");
+});
+
+test("appManifests: schedule stamps drop.dev/version on the CronJob's pod template (same rollout-forcing mechanism as the web path)", () => {
+  const app = sanitizeAppConfig({ image: "cron:1", schedule: "0 3 * * *" })!;
+  const noVersion = appManifests(app, { name: "nightly", namespace: "ns", host: "h" });
+  expect((noVersion.cronJob as any).spec.jobTemplate.spec.template.metadata.annotations).toBeUndefined();
+  const versioned = appManifests(app, { name: "nightly", namespace: "ns", host: "h", versionId: "v_1" });
+  expect((versioned.cronJob as any).spec.jobTemplate.spec.template.metadata.annotations).toEqual({ "drop.dev/version": "v_1" });
+});
+
+test("appManifests: schedule + processes/explicit non-default services/healthcheck throw (exclusivity re-enforced at the manifest layer)", () => {
+  const ctx = { name: "x", namespace: "ns", host: "h" };
+  expect(() => appManifests(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", processes: { worker: { command: "w" } } })!, ctx)).toThrow(/schedule/i);
+  expect(() => appManifests(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", services: [{ internal_port: 9090 }] })!, ctx)).toThrow(/schedule/i);
+  expect(() => appManifests(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", healthcheck: { path: "/h" } })!, ctx)).toThrow(/schedule/i);
+  // implicit default service alongside schedule is fine (no explicit services declared)
+  expect(() => appManifests(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *" })!, ctx)).not.toThrow();
+});
