@@ -4,16 +4,19 @@
 // immediately (and keeps the page usable before the canvas chunk loads / on unsupported browsers). The
 // ?include_plan overlay surfaces out-of-band drift as a "pending changes" drawer + per-node badges.
 import { useQuery } from "@tanstack/react-query";
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useState } from "react";
 import { Link } from "wouter";
+import { Button } from "../components/Button.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { ErrorBoundary } from "../components/ErrorBoundary.tsx";
 import { Skeleton } from "../components/Skeleton.tsx";
 import { TypeBadge } from "../components/badges.tsx";
-import { api, orgLabel, stackNodePath, type GraphPlanStep } from "../lib/api.ts";
+import { api, orgLabel, stackNodePath, type GraphPlanStep, type StackGraph } from "../lib/api.ts";
 import { hasPending, nodeDotClass, pendingByKey } from "../lib/graph.ts";
 import { POLL_DETAIL_MS } from "../lib/query.ts";
 import { deriveStatus } from "../lib/status.ts";
+import { StackEditor } from "../canvas/StackEditor.tsx";
+// M4: canvas + edit-mode user docs land with the stack-page composition writeup in M4 (none this slice).
 
 // The xyflow canvas lives in its OWN chunk (verified separate in the build output) — loaded on demand.
 const StackCanvas = lazy(() => import("../canvas/StackCanvas.tsx"));
@@ -43,9 +46,32 @@ export function StackPage({ name }: { name: string }) {
   );
 }
 
-function StackView({ graph }: { graph: Awaited<ReturnType<typeof api.stackGraph>> }) {
+function StackView({ graph }: { graph: StackGraph }) {
   const pending = pendingByKey(graph.plan);
   const showPending = hasPending(graph.plan);
+  // Edit mode (C2). The "Edit" toggle is shown UNCONDITIONALLY and the server is the authority: the `up`
+  // route enforces a per-resource verb (site→publish, app→deploy, database/bucket/cache→db:create) plus
+  // org create-rights for new resources; a lack of permission surfaces as a clean 403 toast at Apply. We
+  // don't client-gate because the graph endpoint carries no per-resource `capabilities` (api.ts + the
+  // server response are owned by another agent this slice), and fetching the whole sites list just to
+  // pre-disable a toggle would be disproportionate and still race the server's authoritative check.
+  const [editing, setEditing] = useState(false);
+
+  if (editing) {
+    return (
+      <>
+        <div className="phead">
+          <div className="dname">
+            {graph.name} <span className="badge badge-app">STACK</span>
+          </div>
+          <div className="downer">
+            {graph.org && <span title={`org slug: ${graph.org.slug}`}>org: {orgLabel(graph.org)}</span>}
+          </div>
+        </div>
+        <StackEditor name={graph.name} baseGraph={graph} onExit={() => setEditing(false)} />
+      </>
+    );
+  }
 
   return (
     <>
@@ -57,6 +83,9 @@ function StackView({ graph }: { graph: Awaited<ReturnType<typeof api.stackGraph>
           {graph.org && <span title={`org slug: ${graph.org.slug}`}>org: {orgLabel(graph.org)} · </span>}
           spec v{graph.specVersion} · {graph.nodes.length} resources
           {showPending && <span className="pill pill-warn pending-pill">pending changes</span>}
+          <Button size="sm" className="stack-edit-btn" onClick={() => setEditing(true)}>
+            Edit
+          </Button>
         </div>
       </div>
 

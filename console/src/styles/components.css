@@ -651,6 +651,9 @@ code.reveal {
 .sedge-env_from .react-flow__edge-path {
   stroke: var(--info-fg);
 }
+.sedge-db .react-flow__edge-path {
+  stroke: var(--warn-fg); /* (K1) auth→database binding */
+}
 
 /* Visibility row (AccessPanel): controls wrap below the label instead of overflowing the
    panel — an unwrapped select+password+apply row is wider than the column. */
@@ -1280,4 +1283,213 @@ code.reveal {
 }
 .template-legend .legend-chip {
   cursor: default;
+}
+
+/* ============================ C2: canvas editing ("magnetic connections") ============================ */
+
+.small {
+  font-size: 12px;
+}
+.stack-edit-btn {
+  margin-left: 12px;
+}
+
+/* Edit-mode shell */
+.stack-editor {
+  margin-top: 8px;
+}
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.editor-tools-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.editor-tools-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.editor-mode-pill {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--info-fg);
+  border: 1px solid var(--info-fg);
+  border-radius: 6px;
+  padding: 1px 7px;
+}
+.editor-dirty {
+  color: var(--warn-fg);
+  font-weight: 600;
+}
+
+/* Palette (add-resource buttons) */
+.editor-palette {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+.palette-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+
+/* Canvas + drawer side-by-side */
+.editor-body {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+.editor-canvas {
+  flex: 1;
+  margin-top: 0;
+}
+.enode-selected .snode {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+/* Field drawer */
+.node-drawer {
+  width: 280px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--surface-raised);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-self: flex-start;
+  max-height: 68vh;
+  overflow: auto;
+}
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.drawer-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+.drawer-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 11px;
+}
+.drawer-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.drawer-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.drawer-field-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.node-drawer input[type="text"],
+.node-drawer .field input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+.drawer-bool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.drawer-note {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.drawer-warn {
+  color: var(--warn-fg);
+}
+.drawer-actions {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+/* Plan modal table */
+.plan-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.plan-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.plan-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.plan-table .snode-tag {
+  position: static;
+}
+.plan-needs {
+  margin: 0 0 12px;
+}
+.plan-prune {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.rebase-dropped {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Narrow viewports: drawer drops below the canvas. */
+@media (max-width: 760px) {
+  .editor-body {
+    flex-direction: column;
+  }
+  .node-drawer {
+    width: 100%;
+    max-height: none;
+  }
 }

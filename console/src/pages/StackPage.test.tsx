@@ -5,8 +5,9 @@
 // isolated data-transform tests (lib/graph.test.ts) and node-body tests (components/StackNodeBody.test.tsx).
 import { setupDom } from "../test/setup.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { render, within } from "@testing-library/react";
+import { fireEvent, render, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
+import { ToastProvider } from "../components/Toast.tsx";
 import { makeQueryClient } from "../lib/query.ts";
 import { StackPage } from "./StackPage.tsx";
 
@@ -30,6 +31,25 @@ const GRAPH = {
   plan: [] as unknown[],
 };
 
+// GET /v1/stacks/shop (the editable spec + version) and the up-dry-run plan, for the C2 edit-mode smoke.
+const DETAIL = {
+  name: "shop",
+  org: { slug: "acme", name: "Acme", kind: "team" },
+  specVersion: 3,
+  fromTemplate: null,
+  fromTemplateVersion: null,
+  spec: { name: "shop", resources: { api: { type: "app", image: "ghcr.io/x/api:1" } } },
+  resources: [{ key: "api", type: "app", siteName: "shop-api", exists: true, url: "https://shop-api.x", runtimeState: "running" }],
+};
+const DRY_RUN_PLAN = {
+  stack: "shop",
+  org: "acme",
+  specVersion: 3,
+  dryRun: true,
+  needs: [],
+  plan: [{ action: "create", key: "database", kind: "database", siteName: "shop-database", reason: "not present — will create" }],
+};
+
 let realFetch: typeof fetch;
 let graph: typeof GRAPH;
 beforeEach(() => {
@@ -42,8 +62,11 @@ beforeEach(() => {
   };
   realFetch = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.pathname : new URL(input.url, "http://x").pathname;
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.pathname : new URL(input.url, "http://x").pathname;
+    const url = raw.split("?")[0]!; // strip the query so /…/up?dry_run=1 matches by path
     if (url.includes("/graph")) return Promise.resolve(json(graph));
+    if (url.endsWith("/up")) return Promise.resolve(json(DRY_RUN_PLAN)); // dry-run + execute both hit /up
+    if (url === "/v1/stacks/shop") return Promise.resolve(json(DETAIL));
     return Promise.resolve(json({}));
   }) as unknown as typeof fetch;
 });
@@ -54,7 +77,9 @@ afterEach(() => {
 const renderPage = () =>
   render(
     <QueryClientProvider client={makeQueryClient()}>
-      <StackPage name="shop" />
+      <ToastProvider>
+        <StackPage name="shop" />
+      </ToastProvider>
     </QueryClientProvider>,
   );
 
@@ -84,5 +109,29 @@ describe("StackPage", () => {
     const drawer = r.container.querySelector(".pending-drawer") as HTMLElement;
     expect(drawer).toBeTruthy();
     expect(within(drawer).getByText(/not present — will create/)).toBeTruthy();
+  });
+});
+
+// C2 edit-mode smoke: the palette + apply flow are @xyflow-FREE (the editable canvas is behind Suspense
+// and doesn't render meaningfully under happy-dom), so this drives the always-rendered shell: enter edit
+// mode → add a database via the palette → Apply → the dry-run plan modal shows the create step.
+describe("StackPage edit mode (C2)", () => {
+  test("enter edit → add a db node → Apply shows the dry-run plan with a create step", async () => {
+    const r = renderPage();
+    // enter edit mode
+    fireEvent.click(await r.findByRole("button", { name: "Edit" }));
+    // palette appears once the spec has loaded (the lazy @xyflow canvas loads in parallel — give it room)
+    const addDb = await r.findByTestId("palette-database", {}, { timeout: 4000 });
+    fireEvent.click(addDb);
+    // now dirty → Apply enabled; click it to run the (mocked) dry-run
+    const apply = r.getByRole("button", { name: "Apply" });
+    expect((apply as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(apply);
+    // plan modal renders the create step for the new database
+    const planTable = await r.findByTestId("plan-table", {}, { timeout: 4000 });
+    expect(within(planTable).getByText("create")).toBeTruthy();
+    expect(within(planTable).getByText(/not present — will create/)).toBeTruthy();
+    // the new resource key ("database") shows in the plan (appears in both the kind + key cells)
+    expect(within(planTable).getAllByText("database").length).toBeGreaterThan(0);
   });
 });

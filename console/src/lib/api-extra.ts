@@ -2,7 +2,8 @@
 // agent. Same-origin fetch carries the session cookie, identical to lib/api.ts's `req`
 // (module-private there, so the tiny wrapper is duplicated here on purpose).
 
-import { ApiError } from "./api.ts";
+import { ApiError, type GraphPlanStep, type Org } from "./api.ts";
+import type { EditorSpec } from "./stack-editor.ts";
 
 async function req<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
@@ -57,7 +58,40 @@ export interface CreatedToken extends ServiceToken {
   token: string;
 }
 
+// ---- Stack editing (C2) — GET the spec to edit, POST it back through the SAME `up` endpoint ----------
+/** GET /v1/stacks/:name — the full stored spec + spec_version the editor rebases against, plus the
+ *  per-resource live rows. `spec` is exactly what the CLI would edit in drop.yaml (write it back via up). */
+export interface StackDetail {
+  name: string;
+  org?: Org | null;
+  specVersion: number;
+  fromTemplate: string | null;
+  fromTemplateVersion: string | null;
+  spec: EditorSpec;
+  resources: { key: string; type: string; siteName: string; exists: boolean; url: string; runtimeState: string | null }[];
+}
+
+/** POST /v1/stacks/:name/up response. Dry-run carries `dryRun:true` + the plan; execute carries `applied`.
+ *  A stale `spec_version` comes back as a 409 (ApiError.status === 409) — the editor rebases + retries. */
+export interface StackUpResult {
+  stack: string;
+  org: string;
+  specVersion: number;
+  plan: GraphPlanStep[];
+  applied?: { action: string; key: string }[];
+  needs?: { key: string; kind: string; siteName: string }[];
+  outputs?: Record<string, unknown>;
+  dryRun?: boolean;
+}
+
 export const apiExtra = {
+  /** The stack's editable spec + spec_version (C2 editor bootstrap). */
+  stackDetail: (name: string) => req<StackDetail>("GET", `/v1/stacks/${encodeURIComponent(name)}`),
+  /** Reconcile an edited spec: `dry_run` returns the plan (safe), otherwise it executes. `prune` opts in
+   *  to actually removing flagged deletes (default false → deletes are flagged-only). Optimistic-locked
+   *  by `spec_version`; a mismatch is a 409. Identical contract to `drop up`. */
+  stackUp: (name: string, body: { spec: EditorSpec; prune?: boolean; spec_version?: number }, dryRun = false) =>
+    req<StackUpResult>("POST", `/v1/stacks/${encodeURIComponent(name)}/up${dryRun ? "?dry_run=1" : ""}`, body),
   /** The signed-in user's orgs (personal + any team orgs). Powers the org switcher. */
   orgs: () => req<{ orgs: OrgSummary[] }>("GET", "/v1/orgs"),
   /** One org with its members — the Settings › Members panel. */
