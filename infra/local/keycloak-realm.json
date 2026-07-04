@@ -1,0 +1,66 @@
+{
+  "realm": "drop",
+  "enabled": true,
+  "displayName": "Drop (local test IdP)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "groups": [
+    { "name": "drop-users" }
+  ],
+  "roles": {
+    "realm": []
+  },
+  "clients": [
+    {
+      "clientId": "drop-console",
+      "name": "Drop Console (local test)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "drop-console-secret",
+      "clientAuthenticatorType": "client-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8473/auth/callback",
+        "http://localhost:8080/auth/callback",
+        "http://localhost:*/auth/callback"
+      ],
+      "webOrigins": ["*"],
+      "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "claim.name": "groups"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Example",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        { "type": "password", "value": "alice", "temporary": false }
+      ],
+      "groups": ["/drop-users"],
+      "realmRoles": ["default-roles-drop"]
+    }
+  ]
+}

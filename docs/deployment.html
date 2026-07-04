@@ -110,29 +110,33 @@
 <tr><td><code>DROP_S3_*</code></td><td>ConfigMap</td><td>Bucket / region (<code>config.s3Bucket</code>, <code>config.s3Region</code>). Leave <code>DROP_S3_ENDPOINT</code> empty for real AWS S3; set it for any S3-compatible store.</td></tr>
 <tr><td><code>DROP_BASE_DOMAIN</code></td><td>ConfigMap</td><td>Sites are served at <code>*.&lt;baseDomain&gt;</code> (<code>baseDomain</code> value).</td></tr>
 <tr><td><code>DROP_PUBLIC_URL</code></td><td>ConfigMap</td><td>The api's externally-reachable base (defaults to <code>https://&lt;apiHost&gt;</code>). Its <code>/auth/callback</code> is the OAuth redirect.</td></tr>
-<tr><td><code>DROP_GOOGLE_CLIENT_ID</code></td><td>ConfigMap</td><td>Google Web OAuth client id (not secret).</td></tr>
-<tr><td><code>DROP_GOOGLE_CLIENT_SECRET</code></td><td>Secret</td><td>Google OAuth client secret — held only on the server.</td></tr>
+<tr><td><code>DROP_OIDC_ISSUER</code></td><td>ConfigMap</td><td>OIDC issuer discovered at boot (<code>&lt;issuer&gt;/.well-known/openid-configuration</code>). Default <code>https://accounts.google.com</code> — set it to point at Okta / Entra ID / Keycloak / Authentik.</td></tr>
+<tr><td><code>DROP_OIDC_CLIENT_ID</code></td><td>ConfigMap</td><td>OAuth client id (not secret). Falls back to <code>DROP_GOOGLE_CLIENT_ID</code> when unset.</td></tr>
+<tr><td><code>DROP_OIDC_CLIENT_SECRET</code></td><td>Secret</td><td>OAuth client secret — held only on the server. Falls back to <code>DROP_GOOGLE_CLIENT_SECRET</code>.</td></tr>
+<tr><td><code>DROP_GOOGLE_CLIENT_ID</code> / <code>_SECRET</code></td><td>ConfigMap / Secret</td><td>Legacy Google credentials — still honored as the fallback for the <code>DROP_OIDC_*</code> pair (zero-migration for existing Google deployments).</td></tr>
 <tr><td><code>DROP_SESSION_SECRET</code></td><td>Secret</td><td>HS256 key signing Drop session tokens. Rotate to revoke all sessions. Generate with <code>openssl rand -hex 32</code>.</td></tr>
-<tr><td><code>DROP_ALLOWED_DOMAINS</code></td><td>ConfigMap</td><td>Comma-separated Workspace domains allowed to sign in (e.g. <code>example.com</code>). Empty = any Google account.</td></tr>
+<tr><td><code>DROP_OIDC_ALLOWED_DOMAINS</code></td><td>ConfigMap</td><td>Comma-separated email domains allowed to sign in (e.g. <code>example.com</code>). Empty = any account from the issuer. Falls back to <code>DROP_ALLOWED_DOMAINS</code>.</td></tr>
+<tr><td><code>DROP_OIDC_EMAIL_CLAIM</code> / <code>_NAME_CLAIM</code></td><td>ConfigMap</td><td>Which claims carry the email principal / display name (defaults <code>email</code> / <code>name</code>; Entra ID often needs <code>preferred_username</code>).</td></tr>
+<tr><td><code>DROP_OIDC_GROUPS_CLAIM</code> + <code>DROP_OIDC_REQUIRED_GROUP</code></td><td>ConfigMap</td><td>Optional group gate — require a group in the groups claim (array or space-joined string).</td></tr>
+<tr><td><code>DROP_OIDC_DISPLAY_NAME</code></td><td>ConfigMap</td><td>Provider name on the sign-in button (default derived from the issuer host, e.g. <code>Google</code>).</td></tr>
 <tr><td><code>DROP_ALLOWED_EMAILS</code></td><td>ConfigMap</td><td>Optional per-person allowlist layered on top of the domain rule. Empty = no per-email limit.</td></tr>
+<tr><td><code>DROP_BREAK_GLASS_ADMIN</code></td><td>Secret</td><td>Optional emergency local login <code>email:saltHex:hashHex</code> (scrypt). Enables <code>POST /auth/break-glass</code> only when set. No signup/reset.</td></tr>
 <tr><td><code>DROP_ADMINS</code></td><td>ConfigMap</td><td>Comma-separated emails seeded as platform admins on api boot (the "all sites" view). Does not bypass per-site ownership.</td></tr>
 <tr><td><code>DROP_EDGE_DISK_CACHE</code></td><td>ConfigMap (edge)</td><td>Node-local / per-pod directory where the edge caches asset bytes on disk, e.g. <code>/var/cache/drop</code> (chart mounts <code>/cache</code>).</td></tr>
 </tbody>
 </table>
-<div class="note warn"><span class="lbl">Set on the API</span><p>For real login set <code>DROP_DEV_AUTH=0</code>. If the api egresses through a TLS-inspecting proxy, set <code>NODE_EXTRA_CA_CERTS</code> to the corp CA so it can reach <code>accounts.google.com</code>. See <a href="configuration.html">Configuration</a> for the full surface.</p></div>
+<div class="note warn"><span class="lbl">Set on the API</span><p>For real login set <code>DROP_DEV_AUTH=0</code>. If the api egresses through a TLS-inspecting proxy, set <code>NODE_EXTRA_CA_CERTS</code> to the corp CA so it can reach the OIDC issuer. See <a href="configuration.html">Configuration</a> for the full surface.</p></div>
 
-<h2>Google OAuth setup</h2>
-<p>Login is <strong>server-mediated</strong>: the api <em>is</em> the Google OAuth client and issues its own session tokens, so the client secret lives only on the server — never on a developer's machine. Clients (CLI + MCP) need only <code>DROP_API</code>.</p>
+<h2>SSO (OIDC) setup</h2>
+<p>Login is generic <strong>OIDC</strong> and <strong>server-mediated</strong>: the api <em>is</em> the OAuth client, discovers the issuer, maps the claims, and issues its own session tokens, so the client secret lives only on the server — never on a developer's machine. Clients (CLI + MCP) need only <code>DROP_API</code>. <strong>Google is just the default issuer</strong>; point <code>DROP_OIDC_ISSUER</code> at any OIDC provider. One provider per deployment (multi-IdP is out of scope). Full per-provider recipes (Google, Okta, Microsoft Entra ID, Keycloak, Authentik) plus the break-glass admin and a throwaway local Keycloak are in <code>SETUP_SSO.md</code>.</p>
 <ol>
-<li>In <a href="https://console.cloud.google.com">console.cloud.google.com</a>, pick or create a project.</li>
-<li><strong>APIs &amp; Services → OAuth consent screen</strong> — set user type to <strong>Internal</strong> (your <code>example.com</code> Workspace; limits sign-in to the org, no Google verification needed).</li>
-<li>Add scopes <code>openid</code>, <code>email</code>, and <code>profile</code> (all non-sensitive).</li>
-<li><strong>Credentials → Create credentials → OAuth client ID</strong> — application type <strong>Web application</strong>.</li>
-<li>Set the <strong>Authorized redirect URI</strong> to <code>${DROP_PUBLIC_URL}/auth/callback</code> exactly (scheme, host, and path must match — e.g. <code>https://api.drop.example.com/auth/callback</code>).</li>
-<li>Copy the <strong>Client ID</strong> into <code>DROP_GOOGLE_CLIENT_ID</code> and the <strong>Client secret</strong> into the Secret as <code>DROP_GOOGLE_CLIENT_SECRET</code>.</li>
-<li>Set <code>DROP_ALLOWED_DOMAINS=example.com</code> to restrict login to your Workspace.</li>
+<li>In your IdP, create a <strong>confidential / Web</strong> OAuth client using the Authorization Code flow.</li>
+<li>Register the <strong>redirect URI</strong> <code>${DROP_PUBLIC_URL}/auth/callback</code> exactly (scheme, host, and path must match — e.g. <code>https://api.drop.example.com/auth/callback</code>).</li>
+<li>Set <code>DROP_OIDC_ISSUER</code> to the provider's issuer URL (leave unset for Google), and put the client id/secret in <code>DROP_OIDC_CLIENT_ID</code> / the Secret's <code>DROP_OIDC_CLIENT_SECRET</code> (or the legacy <code>DROP_GOOGLE_*</code> keys).</li>
+<li>Restrict sign-in with <code>DROP_OIDC_ALLOWED_DOMAINS=example.com</code>, and optionally a group gate (<code>DROP_OIDC_GROUPS_CLAIM</code> + <code>DROP_OIDC_REQUIRED_GROUP</code>).</li>
 </ol>
-<div class="note danger"><span class="lbl">redirect_uri_mismatch</span><p>The URI registered in the Google client must match <code>DROP_PUBLIC_URL</code> + <code>/auth/callback</code> character-for-character. If you change <code>DROP_PUBLIC_URL</code>, update the Google client too.</p></div>
+<div class="note"><span class="lbl">Zero migration</span><p>Existing Google deployments are unchanged: the issuer defaults to Google and <code>DROP_OIDC_CLIENT_ID/SECRET</code> fall back to the legacy <code>DROP_GOOGLE_CLIENT_ID/SECRET</code>. Set the <code>DROP_OIDC_*</code> vars only to switch providers.</p></div>
+<div class="note danger"><span class="lbl">redirect_uri_mismatch</span><p>The URI registered in the IdP client must match <code>DROP_PUBLIC_URL</code> + <code>/auth/callback</code> character-for-character. If you change <code>DROP_PUBLIC_URL</code>, update the provider client too.</p></div>
 
 <h2>Edge caching &amp; scaling</h2>
 <p>The edge is a stateless cache in front of S3 (the source of truth). It caches asset bytes on a per-pod directory set by <code>DROP_EDGE_DISK_CACHE</code> — in the chart an <strong>emptyDir</strong> (ephemeral node-local disk) mounted at <code>/cache</code>. Because it is just a cache, it needs no persistence and no sharing: per-pod + ephemeral is exactly right and scales to any replica count. A new or restarted pod re-warms from S3. The long-lived in-memory cache holds only the small per-site version pointer (10s TTL); asset bytes come from the disk cache (the OS page cache keeps hot files at RAM speed) or are fetched per-request from S3 and freed after the response.</p>

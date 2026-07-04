@@ -11,6 +11,34 @@ data:
   DROP_S3_REGION: {{ .Values.config.s3Region | quote }}
   DROP_ALLOWED_DOMAINS: {{ .Values.config.allowedDomains | quote }}
   DROP_ADMINS: {{ .Values.config.admins | quote }}
+  {{- /* (J2) Generic OIDC login — rendered only when set, so a Google-only deployment's ConfigMap
+         is unchanged and every DROP_OIDC_* fallback (issuer, client id/secret, allowed-domains) applies.
+         Note: DROP_OIDC_ALLOWED_DOMAINS is intentionally NOT emitted when empty — an empty value would
+         clear the domain gate instead of falling back to DROP_ALLOWED_DOMAINS. */}}
+  {{- with .Values.config.oidcIssuer }}
+  DROP_OIDC_ISSUER: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.oidcScopes }}
+  DROP_OIDC_SCOPES: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.oidcEmailClaim }}
+  DROP_OIDC_EMAIL_CLAIM: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.oidcNameClaim }}
+  DROP_OIDC_NAME_CLAIM: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.oidcAllowedDomains }}
+  DROP_OIDC_ALLOWED_DOMAINS: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.oidcGroupsClaim }}
+  DROP_OIDC_GROUPS_CLAIM: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.oidcRequiredGroup }}
+  DROP_OIDC_REQUIRED_GROUP: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.oidcDisplayName }}
+  DROP_OIDC_DISPLAY_NAME: {{ . | quote }}
+  {{- end }}
   # A2b — L4/TCP expose: where the edge-tcp Service lives (the API patches its port list on expose) +
   # the dynamic port pool, the LB host used in port-mode connect strings, and the shared-port map the
   # API uses to derive the sni-mode connect port per protocol. Harmless when tcp.enabled is false.

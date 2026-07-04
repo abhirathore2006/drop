@@ -28,6 +28,12 @@ EDGE_TCP_PORT    ?= 8475
 TCP_DYNAMIC_FROM ?= 7000
 TCP_DYNAMIC_TO   ?= 7009
 
+# (J2) Throwaway Keycloak for testing generic OIDC login (and the K workstream double). OPT-IN —
+# `make keycloak` only; NOT wired into `make up`. Realm imported from infra/local/keycloak-realm.json.
+KEYCLOAK_PORT  ?= 8580
+# quay.io publishes 26.x patch tags (there is no bare :26 tag); pin a concrete one.
+KEYCLOAK_IMAGE ?= quay.io/keycloak/keycloak:26.3.1
+
 # Container engine — works with podman (default if present), Docker Desktop,
 # Rancher Desktop (dockerd/moby engine), or colima. Override with
 # `DROP_CONTAINER_ENGINE=docker` (env) or `make CE=docker`.
@@ -62,7 +68,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish seed-templates login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down nuke dev-console
+.PHONY: help setup start stop restart status logs floci postgres publish seed-templates login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down nuke dev-console keycloak keycloak-down
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -76,7 +82,9 @@ help:
 	@echo "  make logs                       tail api + edge logs"
 	@echo "  make publish DIR=./dist NAME=x  publish a folder and print its URL"
 	@echo "  make dev-console                console dev loop: Vite + HMR on :5173, proxying to the api (:$(API_PORT))"
-	@echo "  make login                      sign in with Google (server-mediated, real auth)"
+	@echo "  make login                      sign in via SSO (server-mediated OIDC, real auth)"
+	@echo "  make keycloak                   throwaway Keycloak IdP on :$(KEYCLOAK_PORT) for testing SSO (opt-in; realm 'drop')"
+	@echo "  make keycloak-down              stop the throwaway Keycloak"
 	@echo "  make stop-all                   also stop the podman machine"
 	@echo "  make reset                      wipe the Floci + Postgres volumes (all sites + metadata)"
 	@echo "  make trust-cert                 trust the local HTTPS cert in the OS store (sudo)"
@@ -334,6 +342,37 @@ logs:
 login:
 	@test -f dist/drop.js || $(NODE) build.mjs cli >/dev/null
 	@$(NODE) dist/drop.js login --api http://localhost:$(API_PORT)
+
+# (J2) Throwaway Keycloak IdP for testing the generic OIDC login end-to-end (also the K double).
+# OPT-IN — deliberately NOT part of `make up`. Imports infra/local/keycloak-realm.json (realm "drop",
+# client drop-console / secret drop-console-secret, user alice@example.com / password "alice"). The
+# redirect URI http://localhost:$(API_PORT)/auth/callback is pre-registered on the client.
+keycloak: engine
+	@$(CE) rm -f drop-keycloak >/dev/null 2>&1 || true
+	@$(CE) run -d --name drop-keycloak -p $(KEYCLOAK_PORT):8080 \
+	  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+	  -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin \
+	  -v $(CURDIR)/infra/local/keycloak-realm.json:/opt/keycloak/data/import/drop-realm.json:ro \
+	  $(KEYCLOAK_IMAGE) start-dev --http-port=8080 --import-realm >/dev/null 2>&1 \
+	  || { echo "✗ could not start Keycloak (image pull blocked in this environment?). Realm + target still shipped — see infra/local/keycloak-realm.json + SETUP_SSO.md."; exit 1; }
+	@echo "▸ waiting for Keycloak realm discovery…"
+	@for i in $$(seq 1 60); do curl -sf http://localhost:$(KEYCLOAK_PORT)/realms/drop/.well-known/openid-configuration >/dev/null 2>&1 && break; sleep 1; done
+	@if curl -sf http://localhost:$(KEYCLOAK_PORT)/realms/drop/.well-known/openid-configuration >/dev/null 2>&1; then \
+	  echo "✓ keycloak :$(KEYCLOAK_PORT)  ·  admin console http://localhost:$(KEYCLOAK_PORT)/ (admin/admin)  ·  realm 'drop'  ·  user alice@example.com / alice"; \
+	  echo "  Point Drop at it (opt-in — NOT wired into 'make up'). Put in .env, then 'make restart':"; \
+	  echo "    DROP_DEV_AUTH=0"; \
+	  echo "    DROP_OIDC_ISSUER=http://localhost:$(KEYCLOAK_PORT)/realms/drop"; \
+	  echo "    DROP_OIDC_CLIENT_ID=drop-console"; \
+	  echo "    DROP_OIDC_CLIENT_SECRET=drop-console-secret"; \
+	  echo "    DROP_OIDC_ALLOWED_DOMAINS=example.com"; \
+	  echo "    DROP_OIDC_DISPLAY_NAME=Keycloak"; \
+	  echo "    DROP_PUBLIC_URL=http://localhost:$(API_PORT)"; \
+	  echo "    DROP_SESSION_SECRET=\$$(openssl rand -hex 32)"; \
+	  echo "  (see SETUP_SSO.md → 'Verify locally against a throwaway Keycloak')"; \
+	else echo "✗ Keycloak didn't become ready — logs:"; $(CE) logs drop-keycloak 2>&1 | tail -15; fi
+
+keycloak-down:
+	@-$(CE) rm -f drop-keycloak >/dev/null 2>&1 && echo "✓ keycloak stopped" || echo "(no keycloak container)"
 
 DIR  ?= ./dist
 NAME ?=

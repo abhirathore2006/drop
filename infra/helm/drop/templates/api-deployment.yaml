@@ -43,6 +43,11 @@ spec:
               value: "0"
             - name: DROP_GOOGLE_CLIENT_ID
               value: {{ .Values.googleClientId | quote }}
+            {{- /* (J2) OIDC client id — falls back to DROP_GOOGLE_CLIENT_ID when empty. */}}
+            {{- with .Values.oidcClientId }}
+            - name: DROP_OIDC_CLIENT_ID
+              value: {{ . | quote }}
+            {{- end }}
             - name: DROP_PUBLIC_URL
               value: {{ include "drop.publicUrl" . | quote }}
             - name: DROP_ALLOWED_EMAILS
@@ -52,6 +57,21 @@ spec:
                 secretKeyRef:
                   name: {{ include "drop.secretName" . }}
                   key: {{ .Values.secret.googleClientSecretKey }}
+            {{- /* (J2) OIDC client secret + break-glass admin — optional keys. optional:true means a
+                   Secret lacking them leaves the env unset, so the DROP_GOOGLE_* fallback still applies
+                   and a Google-only deployment is unaffected. */}}
+            - name: DROP_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "drop.secretName" . }}
+                  key: {{ .Values.secret.oidcClientSecretKey }}
+                  optional: true
+            - name: DROP_BREAK_GLASS_ADMIN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "drop.secretName" . }}
+                  key: {{ .Values.secret.breakGlassAdminKey }}
+                  optional: true
             - name: DROP_SESSION_SECRET
               valueFrom:
                 secretKeyRef:

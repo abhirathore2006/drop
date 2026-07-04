@@ -114,7 +114,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.get("/healthz", (c) => c.text("ok"));
 
   // Public server-mediated login routes (/auth/*) — clients only need DROP_API.
-  registerAuthRoutes(app, d.cfg, d.db, d.users);
+  registerAuthRoutes(app, d.cfg, d.db, d.users, d.audit);
 
   // Dashboard (public page; its JS calls /v1/* with the session cookie).
   // The console SPA shell. Served at the root AND at its client-side routes so deep links and

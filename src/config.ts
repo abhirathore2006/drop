@@ -7,11 +7,29 @@ export interface Config {
   s3KeyId?: string;
   s3Secret?: string;
   databaseUrl: string; // postgres connection string (required)
-  googleClientId?: string;
-  googleClientSecret?: string;
-  allowedDomains: string[]; // empty = any Google account
+  googleClientId?: string; // (J2) legacy alias — DROP_GOOGLE_CLIENT_ID; oidcClientId falls back to it
+  googleClientSecret?: string; // (J2) legacy alias — DROP_GOOGLE_CLIENT_SECRET; oidcClientSecret falls back to it
+  allowedDomains: string[]; // legacy DROP_ALLOWED_DOMAINS; oidcAllowedDomains falls back to it. empty = any account from the issuer
   allowedEmails: string[]; // empty = no per-email restriction; else only these (lowercased)
   admins: string[]; // emails that can see/manage all sites (lowercased)
+  // --- (J2) Generic OIDC platform login -------------------------------------------------
+  // Google is just the DEFAULT issuer: existing Google deployments keep working with ZERO
+  // migration because the issuer defaults to accounts.google.com and DROP_OIDC_CLIENT_ID/SECRET
+  // fall back to the legacy DROP_GOOGLE_CLIENT_ID/SECRET. Point DROP_OIDC_ISSUER at Okta / Entra /
+  // Keycloak / Authentik to switch providers. ONE provider per deployment — multi-IdP is
+  // deliberately REFUSED here (it's enterprise-SSO scope creep per Plan-v5 J2); a deployment that
+  // needs two IdPs runs two Drop instances.
+  oidcIssuer: string; // DROP_OIDC_ISSUER — discovery base (/.well-known/openid-configuration). Default https://accounts.google.com
+  oidcClientId?: string; // DROP_OIDC_CLIENT_ID, else DROP_GOOGLE_CLIENT_ID (precedence: OIDC wins)
+  oidcClientSecret?: string; // DROP_OIDC_CLIENT_SECRET, else DROP_GOOGLE_CLIENT_SECRET
+  oidcScopes: string; // DROP_OIDC_SCOPES — default "openid email profile"
+  oidcEmailClaim: string; // DROP_OIDC_EMAIL_CLAIM — claim holding the email principal (default "email")
+  oidcNameClaim: string; // DROP_OIDC_NAME_CLAIM — claim holding the display name (default "name")
+  oidcAllowedDomains: string[]; // DROP_OIDC_ALLOWED_DOMAINS, else DROP_ALLOWED_DOMAINS. empty = any domain
+  oidcGroupsClaim?: string; // DROP_OIDC_GROUPS_CLAIM — claim carrying the user's groups (array or space-joined string)
+  oidcRequiredGroup?: string; // DROP_OIDC_REQUIRED_GROUP — when set, login requires this group in the groups claim
+  oidcDisplayName: string; // DROP_OIDC_DISPLAY_NAME — provider name shown on the login button (default derived from the issuer host)
+  breakGlassAdmin?: string; // DROP_BREAK_GLASS_ADMIN — "email:saltHex:hashHex" (scrypt). Enables POST /auth/break-glass ONLY when set. No signup/reset.
   publicUrl: string; // externally-reachable API base, for the OAuth callback
   sessionSecret: string; // HS256 key for Drop session tokens (required unless devAuth)
   devAuth: boolean;
@@ -87,6 +105,24 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+    // (J2) OIDC provider — Google is the default issuer; client id/secret + allowed-domains fall
+    // back to the legacy DROP_GOOGLE_* / DROP_ALLOWED_DOMAINS vars so existing deployments are untouched.
+    oidcIssuer: env.DROP_OIDC_ISSUER || "https://accounts.google.com",
+    oidcClientId: env.DROP_OIDC_CLIENT_ID || env.DROP_GOOGLE_CLIENT_ID || undefined,
+    oidcClientSecret: env.DROP_OIDC_CLIENT_SECRET || env.DROP_GOOGLE_CLIENT_SECRET || undefined,
+    oidcScopes: env.DROP_OIDC_SCOPES || "openid email profile",
+    oidcEmailClaim: env.DROP_OIDC_EMAIL_CLAIM || "email",
+    oidcNameClaim: env.DROP_OIDC_NAME_CLAIM || "name",
+    // `??` (not `||`) so an explicit DROP_OIDC_ALLOWED_DOMAINS="" clears the gate (any domain) even
+    // when the legacy DROP_ALLOWED_DOMAINS is set — OIDC always wins when present.
+    oidcAllowedDomains: (env.DROP_OIDC_ALLOWED_DOMAINS ?? env.DROP_ALLOWED_DOMAINS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    oidcGroupsClaim: env.DROP_OIDC_GROUPS_CLAIM || undefined,
+    oidcRequiredGroup: env.DROP_OIDC_REQUIRED_GROUP || undefined,
+    oidcDisplayName: env.DROP_OIDC_DISPLAY_NAME || deriveDisplayName(env.DROP_OIDC_ISSUER || "https://accounts.google.com"),
+    breakGlassAdmin: env.DROP_BREAK_GLASS_ADMIN || undefined,
     allowedEmails: (env.DROP_ALLOWED_EMAILS ?? "")
       .split(",")
       .map((s) => s.trim().toLowerCase())
@@ -160,6 +196,36 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     tunnelIdleTimeoutMs: Number(env.DROP_TUNNEL_IDLE_TIMEOUT_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
     maxTunnelsPerUser: Number(env.DROP_MAX_TUNNELS_PER_USER ?? "5") || 5,
   };
+}
+
+// --- (J2) OIDC issuer helpers ---------------------------------------------------------------
+
+/** True iff the issuer is Google. The `hd` (hosted-domain) claim is Google-specific, so the domain
+ *  gate only trusts `hd` for Google — every other issuer falls back to the email-domain suffix. */
+export function isGoogleIssuer(issuer: string): boolean {
+  try {
+    return new URL(issuer).hostname === "accounts.google.com";
+  } catch {
+    return false;
+  }
+}
+
+/** Best-effort human name for the provider, derived from the issuer host, used as the login-button
+ *  label when DROP_OIDC_DISPLAY_NAME is unset. `https://accounts.google.com` → "Google",
+ *  `https://dev-1.okta.com` → "Okta", `https://login.microsoftonline.com/...` → "Microsoftonline".
+ *  Operators override it with DROP_OIDC_DISPLAY_NAME (e.g. "Entra ID"). */
+export function deriveDisplayName(issuer: string): string {
+  try {
+    const host = new URL(issuer).hostname; // e.g. accounts.google.com
+    let labels = host.split(".").filter(Boolean);
+    const authSub = new Set(["accounts", "login", "auth", "sso", "id", "idp", "oauth", "signin", "www", "identity"]);
+    if (labels.length > 2 && authSub.has(labels[0]!.toLowerCase())) labels = labels.slice(1);
+    // Registrable label: the second-to-last for a normal domain (google.com → google), else the host.
+    const label = labels.length >= 2 ? labels[labels.length - 2]! : labels[0] ?? host;
+    return label ? label.charAt(0).toUpperCase() + label.slice(1) : "SSO";
+  } catch {
+    return "SSO";
+  }
 }
 
 // --- edge-tcp (L4 router, A2a) ------------------------------------------------------------

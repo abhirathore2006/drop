@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Drop — self-hosted static-site publishing &amp; compute platform</title>
-<meta name="description" content="Drop is a self-hosted, Surge-style static-site publisher and a Heroku/Fly-style compute platform: push a built folder or build-and-deploy a container app with managed Postgres and write-only secrets, all on an internal HTTPS URL — grouped into organisations. Metadata in Postgres, file bytes in S3, gated by Google login.">
+<meta name="description" content="Drop is a self-hosted, Surge-style static-site publisher and a Heroku/Fly-style compute platform: push a built folder or build-and-deploy a container app with managed Postgres and write-only secrets, all on an internal HTTPS URL — grouped into organisations. Metadata in Postgres, file bytes in S3, gated by SSO (OIDC) login.">
 <link rel="stylesheet" href="assets/style.css">
 <script defer src="drop-served.js"></script>
 <script defer src="assets/site.js"></script>
@@ -50,7 +50,7 @@
       Push a built folder, or deploy a <strong>container app</strong> with a <strong>managed Postgres</strong>
       and <strong>write-only secrets</strong> — both get a confidential URL on <code>*.drop.example.com</code>,
       under one set of names, auth, and tooling. Everything lives in <strong>your own S3</strong>, <strong>your
-      own Postgres</strong>, and <strong>your own cluster</strong>, behind <strong>your own Google Workspace</strong>.</p>
+      own Postgres</strong>, and <strong>your own cluster</strong>, behind <strong>your own SSO</strong> (any OIDC provider — Google, Okta, Entra ID, Keycloak).</p>
       <div class="btnrow">
         <a class="btn primary" href="getting-started.html">Get started →</a>
         <a class="btn" href="cli-mcp.html">CLI &amp; MCP</a>
@@ -179,7 +179,7 @@ drop publish ./dist myapp</code></pre>
     <p>Two small, stateless services share a Postgres metadata store and an S3 byte store; the
     compute plane adds an opt-in Kubernetes cluster:</p>
     <ul>
-      <li><strong>api</strong> — the control plane: Google login, publishing, deploy, rollback, sharing,
+      <li><strong>api</strong> — the control plane: SSO (OIDC) login, publishing, deploy, rollback, sharing,
         visibility, admin, the dashboard, and — when compute is enabled — apps, databases, secrets, and
         lifecycle. Owns schema migrations; the only writer to Postgres and the cluster.</li>
       <li><strong>edge</strong> — the data plane: serves published <strong>site</strong> bytes by hostname,

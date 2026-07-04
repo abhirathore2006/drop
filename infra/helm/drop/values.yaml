@@ -12,12 +12,24 @@ apiHost: api.drop.example.com # control plane + dashboard + OAuth callback
 config:
   s3Bucket: drop-sites
   s3Region: us-east-1
-  allowedDomains: "example.com" # comma-separated; empty = any Google account
+  allowedDomains: "example.com" # comma-separated; empty = any account from the issuer
   allowedEmails: "" # optional per-person allowlist, comma-separated
   admins: "" # comma-separated emails seeded as platform admins on API boot
   publicUrl: "" # default https://{apiHost}; its /auth/callback is the OAuth redirect
+  # (J2) Generic OIDC login. Leave these EMPTY to keep the default Google issuer + the
+  # DROP_GOOGLE_* credentials below — existing deployments are unchanged (zero migration).
+  # Set them to point Drop at Okta / Entra ID / Keycloak / Authentik. See SETUP_SSO.md.
+  oidcIssuer: "" # default https://accounts.google.com; e.g. https://<org>.okta.com or https://<host>/realms/<realm>
+  oidcScopes: "" # default "openid email profile" (add "groups" for the group gate)
+  oidcEmailClaim: "" # default "email" (Entra ID often needs "preferred_username")
+  oidcNameClaim: "" # default "name"
+  oidcAllowedDomains: "" # comma-separated; falls back to allowedDomains above when empty
+  oidcGroupsClaim: "" # e.g. "groups" — enables the group gate together with oidcRequiredGroup
+  oidcRequiredGroup: "" # require this group to be present in the groups claim
+  oidcDisplayName: "" # sign-in button label; default derived from the issuer host
 
-googleClientId: "" # not secret → ConfigMap/env
+googleClientId: "" # not secret → ConfigMap/env (legacy; oidcClientId falls back to it)
+oidcClientId: "" # (J2) not secret → ConfigMap/env; falls back to googleClientId when empty
 
 # Postgres holds all metadata (sites, members, versions, users, auth handles).
 # Use an EXTERNAL managed database (RDS / CloudSQL / company DB) — the chart does
@@ -27,10 +39,16 @@ googleClientId: "" # not secret → ConfigMap/env
 secret:
   existingSecret: "" # name of a Secret holding the keys below
   googleClientSecretKey: DROP_GOOGLE_CLIENT_SECRET
+  # (J2) Optional secret keys — referenced with optional:true, so a Google-only deployment whose
+  # Secret lacks them is unaffected (the env var stays unset and the DROP_GOOGLE_* fallback applies).
+  oidcClientSecretKey: DROP_OIDC_CLIENT_SECRET # OIDC client secret for a non-Google IdP
+  breakGlassAdminKey: DROP_BREAK_GLASS_ADMIN # "email:saltHex:hashHex" (scrypt) — enables /auth/break-glass
   sessionSecretKey: DROP_SESSION_SECRET
   databaseUrlKey: DROP_DATABASE_URL
   create: false
   googleClientSecret: ""
+  oidcClientSecret: "" # set when using a non-Google IdP AND secret.create=true
+  breakGlassAdmin: "" # set to enable the emergency local admin login AND secret.create=true
   sessionSecret: "" # generate: openssl rand -hex 32
   databaseUrl: "" # postgres://user:pass@host:5432/drop
 

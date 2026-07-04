@@ -35,7 +35,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 13 | I2 Valkey · I3 PG depth | done | see log | cache rotate absent by design; ext add live db = 409 |
 | 14 | L1b Queue-scaled workers | done | ee23fd2 | TriggerAuth reads <cache>-cache secret; min-0 workers legal with scale_on |
 | 15 | A3 `db:proxy` tunnel | done | caad9dc | in-cluster dial only v1 (local API 501s); src/ws/frames.ts shared codec |
-| 16 | F1 `drop detect` + stack MCP | todo | | |
+| 16 | F1 `drop detect` + stack MCP | done | f9d80c7 | 9/9 examples fixture corpus; evidence-only fields |
 | 17 | M1 Console IA: sidebar/⌘K/onboarding | done | 38530d2 | pulled ahead of order (console-only); ?org= context; templates/tokens/webhooks stubs pending D1/J1/G3 |
 | 18 | J2 Generic OIDC login | todo | | |
 | 19 | G2 Edge metrics · G2b uptime checks | todo | | |
