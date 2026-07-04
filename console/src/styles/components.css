@@ -547,6 +547,108 @@ code.reveal {
   background: var(--danger-bg);
 }
 
+/* D2: template upstream-diff — the "update available" banner, per-node diff badges, and the review view. */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  border-radius: 12px;
+}
+.update-banner-txt {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--warn-fg);
+}
+.update-banner-conflicts {
+  margin-left: 4px;
+}
+/* A diff badge overlaid on a canvas node (top-left, mirrors the pending snode-tag on the right). */
+.snode-diff {
+  position: absolute;
+  top: -9px;
+  left: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid;
+  z-index: 1;
+}
+.snode-diff-added {
+  color: var(--ok-fg);
+  border-color: var(--ok-border);
+  background: var(--ok-bg);
+}
+.snode-diff-changed {
+  color: var(--warn-fg);
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+}
+.snode-diff-removed,
+.snode-diff-conflict {
+  color: var(--danger-fg);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+/* The per-resource diff legend (always-rendered review surface). */
+.diff-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0;
+}
+.diff-row {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.diff-row-conflict {
+  border-color: var(--danger-border);
+}
+.diff-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.diff-row .snode-diff {
+  position: static; /* inline in the legend, not overlaid on a node */
+}
+.diff-key {
+  font-family: var(--mono, monospace);
+}
+.diff-fields {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.diff-field-conflict code {
+  color: var(--danger-fg);
+}
+.diff-resolve {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.diff-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+  flex-wrap: wrap;
+}
+
 /* The canvas viewport container (xyflow measures it — needs an explicit height). */
 .stack-canvas {
   height: 68vh;

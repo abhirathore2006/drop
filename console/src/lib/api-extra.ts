@@ -2,7 +2,7 @@
 // agent. Same-origin fetch carries the session cookie, identical to lib/api.ts's `req`
 // (module-private there, so the tiny wrapper is duplicated here on purpose).
 
-import { ApiError, type GraphPlanStep, type Org } from "./api.ts";
+import { ApiError, type GraphPlanStep, type Org, type TemplateSpec } from "./api.ts";
 import type { EditorSpec } from "./stack-editor.ts";
 
 async function req<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
@@ -84,9 +84,61 @@ export interface StackUpResult {
   dryRun?: boolean;
 }
 
+// ---- Template upstream diff (D2) — three-way diff + upgrade (merge → standard reconcile) -------------
+export type DiffClass = "unchanged" | "upstream-only" | "local-only" | "conflict";
+export type DiffBadge = "added" | "removed" | "changed" | "conflict" | "unchanged";
+export interface StackFieldDiff {
+  field: string;
+  class: DiffClass;
+  pinned?: unknown;
+  latest?: unknown;
+  current?: unknown;
+}
+export interface StackResourceDiff {
+  key: string;
+  class: string; // unchanged | upstream-only | local-only | conflict | added-upstream | removed-upstream | added-local | removed-local
+  conflict: boolean;
+  badge: DiffBadge;
+  fields: StackFieldDiff[];
+  inPinned: boolean;
+  inLatest: boolean;
+  inCurrent: boolean;
+}
+export interface StackDiff {
+  upstreamChanged: boolean;
+  hasLocalDrift: boolean;
+  resources: StackResourceDiff[];
+  conflicts: string[];
+}
+/** GET /v1/stacks/:name/outdated. `templateDerived:false` (with a 404 that `req` surfaces as ApiError)
+ *  means the stack was not made from a template — the caller just hides the banner. */
+export interface OutdatedResult {
+  upToDate: boolean;
+  templateDerived: boolean;
+  template?: string;
+  fromVersion?: string;
+  latestVersion: string | null;
+  diff?: StackDiff;
+  current?: TemplateSpec; // the stack's current concrete spec (for the union canvas)
+  latest?: TemplateSpec; // the template's latest concrete spec (for the union canvas)
+}
+/** POST /v1/stacks/:name/upgrade response (extends the standard up result with the version transition). */
+export interface UpgradeResult extends StackUpResult {
+  template?: string;
+  fromVersion?: string;
+  toVersion?: string;
+  autoApplied?: string[];
+  resolved?: { key: string; how: string }[];
+}
+
 export const apiExtra = {
   /** The stack's editable spec + spec_version (C2 editor bootstrap). */
   stackDetail: (name: string) => req<StackDetail>("GET", `/v1/stacks/${encodeURIComponent(name)}`),
+  /** (D2) Three-way diff of the stack vs its template's latest version. 404 → not template-derived. */
+  stackOutdated: (name: string) => req<OutdatedResult>("GET", `/v1/stacks/${encodeURIComponent(name)}/outdated`),
+  /** (D2) Apply upstream changes. `dry_run` returns the reconcile plan; a missing conflict resolution 409s. */
+  stackUpgrade: (name: string, body: { to?: string; resolutions?: Record<string, "take-upstream" | "keep-local"> }, dryRun = false) =>
+    req<UpgradeResult>("POST", `/v1/stacks/${encodeURIComponent(name)}/upgrade${dryRun ? "?dry_run=1" : ""}`, body),
   /** Reconcile an edited spec: `dry_run` returns the plan (safe), otherwise it executes. `prune` opts in
    *  to actually removing flagged deletes (default false → deletes are flagged-only). Optimistic-locked
    *  by `spec_version`; a mismatch is a 409. Identical contract to `drop up`. */
