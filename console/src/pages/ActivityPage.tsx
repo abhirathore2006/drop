@@ -11,6 +11,7 @@ import { useState } from "react";
 import { Button } from "../components/Button.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Table, type Column } from "../components/Table.tsx";
+import { ActorLabel } from "../components/badges.tsx";
 import { api, fmtStamp, type AuditRecord, type Me } from "../lib/api.ts";
 import { useDebounced, useDocumentTitle } from "../lib/hooks.ts";
 
@@ -47,7 +48,7 @@ function AuditTrail() {
 
   const columns: Column<AuditRecord>[] = [
     { key: "when", header: "when", render: (e) => <span className="muted">{fmtStamp(e.at)}</span> },
-    { key: "actor", header: "actor", render: (e) => e.actor },
+    { key: "actor", header: "actor", render: (e) => <ActorLabel principal={e.actor} /> },
     { key: "action", header: "action", render: (e) => <code>{e.action}</code> },
     { key: "target", header: "target", render: (e) => e.target ?? "—" },
     { key: "detail", header: "detail", render: (e) => <span className="muted">{e.detail ? JSON.stringify(e.detail) : "—"}</span> },

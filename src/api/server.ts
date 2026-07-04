@@ -16,7 +16,7 @@ import { authMiddleware, type AuthEnv } from "../auth/middleware.ts";
 import { MetaStore } from "../metastore/store.ts";
 import type { Site, Visibility } from "../metastore/types.ts";
 import { UserStore } from "../users/store.ts";
-import { can, canCreateInOrg, canManageOrg, type Action, type Actor } from "../authz/permissions.ts";
+import { can, canCreateInOrg, canManageOrg, capabilitiesFor, type Action, type Actor } from "../authz/permissions.ts";
 import { ServiceTokenStore, validateScopes } from "../tokens/store.ts";
 import { TunnelTicketStore } from "../tokens/tunnel-tickets.ts";
 import { OrgStore, validateOrgSlug, type Org } from "../orgs/store.ts";
@@ -544,6 +544,25 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await d.orgs.removeMember(r.org.id, target);
     await audit({ actor: email, action: "org.member.remove", target: r.org.slug, targetType: "org", orgId: r.org.id, detail: { member: target } });
     return c.json({ removed: target });
+  });
+
+  // Change an existing member's org role (owner/admin only). "owner" is NOT assignable here — the
+  // one-owner-per-org invariant (a partial unique index) makes ownership a transfer, not a role edit —
+  // and the founding owner is immutable (mirrors the DELETE guard). addMember upserts the new role.
+  app.patch("/v1/orgs/:slug/members/:email", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    if (!canManageOrg(r.role, r.platformRole)) return c.json({ error: "owner/admin only" }, 403);
+    const target = decodeURIComponent(c.req.param("email")).toLowerCase();
+    const body = (await c.req.json().catch(() => ({}))) as { role?: unknown };
+    const role = String(body.role);
+    if (role !== "admin" && role !== "member" && role !== "viewer") return c.json({ error: "role must be admin|member|viewer" }, 400);
+    if (target === r.org.createdBy) return c.json({ error: "can't change the org's founding owner's role" }, 409);
+    if (!(await d.orgs.roleOf(r.org.id, target))) return c.json({ error: "not a member of this org" }, 404);
+    await d.orgs.addMember(r.org.id, target, role); // upsert → updates the role in place
+    await audit({ actor: email, action: "org.member.role", target: r.org.slug, targetType: "org", orgId: r.org.id, detail: { member: target, role } });
+    return c.json({ slug: r.org.slug, email: target, role });
   });
 
   // ---- service accounts / scoped CI tokens (J1) ----
@@ -1602,7 +1621,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(c.get("identity"), site), "read")) return c.json({ error: "not permitted" }, 403);
+    // Resolve the actor ONCE: it gates the read AND yields the capability set the console renders on
+    // (M2) — so the client never re-derives permissions from owner/role math.
+    const actor = await actorFor(c.get("identity"), site);
+    if (!can(actor, "read")) return c.json({ error: "not permitted" }, 403);
     const versions = await d.meta.listVersions(name);
     const out: Record<string, unknown> = {
       name: site.name,
@@ -1615,6 +1637,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       current: site.currentVersion,
       url: siteUrl(name),
       versions,
+      capabilities: capabilitiesFor(actor), // (M2) resolved can() verbs for the CURRENT actor on THIS resource
     };
     // Per-type live detail — best-effort: a cluster read failure (compute off / object gone)
     // must never fail the metadata read, so it's wrapped and simply omitted on error.
@@ -2014,7 +2037,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       const s = await d.meta.getSitePlain(name);
       if (!s) continue;
       if (orgFilterId && s.orgId !== orgFilterId) continue;
-      out.push({ name: s.name, type: s.type, owner: s.owner, visibility: s.visibility, url: siteUrl(name), current: s.currentVersion, org: await orgOf(s.orgId) });
+      // (M2) each item carries the caller's resolved capability set for that resource, so list-level
+      // actions (and the detail page that opens from a card) gate on the server's truth.
+      const actor = await actorFor(c.get("identity"), s);
+      out.push({ name: s.name, type: s.type, owner: s.owner, visibility: s.visibility, url: siteUrl(name), current: s.currentVersion, org: await orgOf(s.orgId), capabilities: capabilitiesFor(actor) });
     }
     return c.json({ sites: out });
   });
@@ -2038,6 +2064,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       orgId = org.id;
     }
     const { names, nextCursor } = await d.meta.listSitesPage({ cursor, limit, prefix, owner, type, orgId });
+    // (M2) Every caller here is a platform admin (gated above), so the capability set is the FULL verb
+    // set for every row — compute it ONCE rather than resolving an actor per site.
+    const adminCaps = capabilitiesFor({ email, platformRole: "admin", siteRole: null, orgRole: null });
     const out: unknown[] = [];
     for (const name of names) {
       const s = await d.meta.getSitePlain(name);
@@ -2051,6 +2080,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
           current: s.currentVersion,
           url: siteUrl(name),
           collaborators: s.collaborators.length,
+          capabilities: adminCaps,
         });
     }
     return c.json({ sites: out, nextCursor });

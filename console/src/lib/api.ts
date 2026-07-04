@@ -4,6 +4,23 @@
 
 export type WorkloadType = "site" | "app" | "database" | "bucket" | "cache";
 
+/** The permission verbs (M2) — mirrors src/authz/permissions.ts ACTIONS. `capabilities` on a list item
+ *  or detail response is the resolved subset the CURRENT actor holds on that resource; the console gates
+ *  purely on this (via lib/caps.ts), never re-deriving permissions from owner/role math. */
+export type Capability =
+  | "read"
+  | "logs"
+  | "publish"
+  | "deploy"
+  | "db:create"
+  | "connect"
+  | "rollback"
+  | "configure"
+  | "expose"
+  | "share"
+  | "transfer"
+  | "delete";
+
 export class ApiError extends Error {
   readonly status: number;
   constructor(message: string, status: number) {
@@ -45,6 +62,16 @@ export interface OrgUsage {
   };
 }
 
+/** (M2 / item 10) Per-org quota overrides as returned by GET /v1/admin/orgs/:slug/quotas.
+ *  `overrides` are the raw, explicitly-set values; `effective` folds each override over the instance
+ *  default (so an unset key still shows what's enforced — the "default hint" in the editor). */
+export interface AdminQuotas {
+  org: { slug: string; name: string };
+  keys: string[]; // the settable keys: max_workloads, max_db_storage, storage_budget_bytes
+  overrides: { key: string; value: string; updatedBy: string; updatedAt: string }[];
+  effective: { max_workloads: number; max_db_storage: string; storage_budget_bytes: number | null };
+}
+
 export interface AuditRecord {
   id: string;
   at: string;
@@ -79,6 +106,7 @@ export interface ListItem {
   current: string | null;
   collaborators?: number;
   status?: ServerStatus | null;
+  capabilities?: Capability[]; // (M2) the caller's resolved verbs on this resource
 }
 
 export interface AppStatus {
@@ -199,6 +227,7 @@ export interface Detail {
   current: string | null;
   url: string;
   versions: Version[];
+  capabilities?: Capability[]; // (M2) the caller's resolved verbs on this resource — the console gates on this
   previews?: PreviewInfo[]; // (E1) active previews — present for type=site only
   status?: ServerStatus | null;
   uptime?: UptimeSummary; // (G2b) present for site/app/database
@@ -369,6 +398,10 @@ export const api = {
   setUserRole: (email: string, role: "admin" | "member") => req("POST", `/v1/admin/users/${encodeURIComponent(email)}/role`, { role }),
   adminOrgs: () => req<{ orgs: AdminOrg[] }>("GET", "/v1/admin/orgs"),
   adminAudit: (qs: string) => req<{ entries: AuditRecord[]; nextCursor?: string }>("GET", "/v1/admin/audit" + (qs ? `?${qs}` : "")),
+  // (M2 / item 10) per-org quota editor — read the overrides+effective values, then set one or more keys.
+  adminOrgQuotas: (slug: string) => req<AdminQuotas>("GET", `/v1/admin/orgs/${encodeURIComponent(slug)}/quotas`),
+  setAdminOrgQuotas: (slug: string, quotas: Record<string, string>) =>
+    req<{ org: string; set: Record<string, string> }>("PUT", `/v1/admin/orgs/${encodeURIComponent(slug)}/quotas`, { quotas }),
   orgUsage: (slug: string) => req<OrgUsage>("GET", `/v1/orgs/${encodeURIComponent(slug)}/usage`),
   // app secrets (write-only) + lifecycle
   listSecrets: (name: string) => req<{ secrets: SecretMeta[] }>("GET", `/v1/apps/${name}/secrets`),

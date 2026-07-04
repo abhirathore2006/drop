@@ -7,6 +7,19 @@ export function TypeBadge({ t }: { t: WorkloadType }) {
   return <span className={`badge badge-${t}`}>{TYPE_LABEL[t]}</span>;
 }
 
+/** Render an audit/activity principal (J1). A service-token actor renders as `token:<name>@<org>`; give
+ *  it a small mono badge so it reads distinctly from a human email. Pure display — no behavior. */
+export function ActorLabel({ principal }: { principal: string }) {
+  if (principal.startsWith("token:")) {
+    return (
+      <span className="badge badge-token" title="service-account token">
+        {principal}
+      </span>
+    );
+  }
+  return <>{principal}</>;
+}
+
 /** Pill for an already-derived normalized status. */
 export function Pill({ s }: { s: NormalizedStatus }) {
   return (

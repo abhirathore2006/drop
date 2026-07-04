@@ -5,15 +5,15 @@ import { Button } from "../../components/Button.tsx";
 import { DropZone } from "../../components/DropZone.tsx";
 import { useToast } from "../../components/Toast.tsx";
 import { api, fmtStamp, shortVersion, type Detail } from "../../lib/api.ts";
+import { cap } from "../../lib/caps.ts";
 import type { DroppedFile } from "../../lib/dropFiles.ts";
 import { publishFiles } from "../../lib/publish.ts";
 import { ConfirmDialog } from "../../components/ConfirmDialog.tsx";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
-// M2: gate this zone behind the `publish` capability once the capabilities API lands.
-// For now it renders for every viewer of the site; the server's own ownership check
-// (POST /v1/sites/:name/versions → 403 for non-owners) is the real gate, surfaced via toast.
-function PublishDropZone({ name }: { name: string }) {
+// M2: the drop zone is `publish`-gated. Without the verb the zone is disabled (with a hint) rather than
+// letting a doomed upload reach the server's 403.
+function PublishDropZone({ name, canPublish }: { name: string; canPublish: boolean }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [progress, setProgress] = useState<number | null>(null);
@@ -35,28 +35,31 @@ function PublishDropZone({ name }: { name: string }) {
   });
 
   return (
-    <DropZone
-      label="Drop a folder here to publish a new version"
-      disabled={publish.isPending}
-      progress={progress}
-      onFiles={(files) => {
-        if (!files.length) {
-          toast.error("no files found in that folder");
-          return;
-        }
-        publish.mutate(files);
-      }}
-    />
+    <>
+      <DropZone
+        label={canPublish ? "Drop a folder here to publish a new version" : "you need the \"publish\" permission to ship a new version"}
+        disabled={!canPublish || publish.isPending}
+        progress={progress}
+        onFiles={(files) => {
+          if (!files.length) {
+            toast.error("no files found in that folder");
+            return;
+          }
+          publish.mutate(files);
+        }}
+      />
+    </>
   );
 }
 
-export function SitePanels({ d, isOwner }: { d: Detail; isOwner: boolean }) {
+export function SitePanels({ d }: { d: Detail }) {
   const act = useWorkloadAction({ success: "rolled back" });
+  const canRollback = cap(d, "rollback");
   return (
     <>
       <div className="sec">
         <h3>versions ({d.versions.length})</h3>
-        <PublishDropZone name={d.name} />
+        <PublishDropZone name={d.name} canPublish={cap(d, "publish")} />
         {d.versions.length === 0 && <p className="muted">—</p>}
         {d.versions.map((v) => (
           <div className="item" key={v.id}>
@@ -69,7 +72,7 @@ export function SitePanels({ d, isOwner }: { d: Detail; isOwner: boolean }) {
                 {v.fileCount} files · {v.publishedBy}
               </div>
             </div>
-            {v.id !== d.current && isOwner && (
+            {v.id !== d.current && canRollback && (
               <Button size="sm" loading={act.isPending} onClick={() => act.mutate(() => api.rollback(d.name, v.id))}>
                 rollback
               </Button>
@@ -77,7 +80,7 @@ export function SitePanels({ d, isOwner }: { d: Detail; isOwner: boolean }) {
           </div>
         ))}
       </div>
-      <PreviewsPanel d={d} isOwner={isOwner} />
+      <PreviewsPanel d={d} />
     </>
   );
 }
@@ -86,8 +89,9 @@ export function SitePanels({ d, isOwner }: { d: Detail; isOwner: boolean }) {
 // console UI (a drop-zone-style publish with a label field) is a follow-up — E2: today previews are
 // created via `drop publish --preview` or a CI job (docs/previews.html); the M0.5 drop zone above
 // stays untouched (it always publishes the LIVE version, never a preview).
-function PreviewsPanel({ d, isOwner }: { d: Detail; isOwner: boolean }) {
+function PreviewsPanel({ d }: { d: Detail }) {
   const previews = d.previews ?? [];
+  const canManage = cap(d, "publish"); // removing a preview is `publish`-gated (same as creating one)
   const rm = useWorkloadAction({ success: "preview removed" });
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   if (previews.length === 0) return null; // nothing to show — keep the panel list uncluttered
@@ -106,7 +110,7 @@ function PreviewsPanel({ d, isOwner }: { d: Detail; isOwner: boolean }) {
               {fmtStamp(p.expiresAt)}
             </div>
           </div>
-          {isOwner && (
+          {canManage && (
             <Button size="sm" variant="danger" loading={rm.isPending} onClick={() => setConfirmRemove(p.label)}>
               remove
             </Button>

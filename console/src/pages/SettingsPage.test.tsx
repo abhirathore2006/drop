@@ -6,7 +6,7 @@ import { render, fireEvent } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ToastProvider } from "../components/Toast.tsx";
 import { makeQueryClient } from "../lib/query.ts";
-import { Tokens } from "./SettingsPage.tsx";
+import { Members, Tokens } from "./SettingsPage.tsx";
 import type { OrgSummary } from "../lib/api-extra.ts";
 
 setupDom();
@@ -39,6 +39,12 @@ beforeEach(() => {
     if (url.endsWith("/tokens") && method === "POST") {
       const body = init?.body ? (JSON.parse(String(init.body)) as { name: string; scopes: string[] }) : { name: "", scopes: [] };
       return Promise.resolve(json({ token: "drop_st_revealedsecret", id: "st_new", name: body.name, scopes: body.scopes, expiresAt: null, createdBy: "alice@example.com", createdAt: "2026-07-04T00:00:00.000Z" }));
+    }
+    if (url === "/v1/orgs/acme" && method === "GET")
+      return Promise.resolve(json({ slug: "acme", name: "Acme", kind: "team", members: [{ email: "alice@example.com", role: "owner" }, { email: "bob@example.com", role: "member" }] }));
+    if (url.includes("/members/") && method === "PATCH") {
+      const body = init?.body ? (JSON.parse(String(init.body)) as { role: string }) : { role: "" };
+      return Promise.resolve(json({ slug: "acme", email: "bob@example.com", role: body.role }));
     }
     if (method === "DELETE") return Promise.resolve(json({ revoked: "st_old", name: "old-ci" }));
     return Promise.resolve(json({}));
@@ -87,5 +93,27 @@ describe("Settings › Tokens", () => {
     fireEvent.click(r.getByRole("button", { name: "revoke token" }));
     await new Promise((res) => setTimeout(res, 0));
     expect(calls.some((c) => c.method === "DELETE" && c.url === "/v1/orgs/acme/tokens/st_old")).toBe(true);
+  });
+});
+
+describe("Settings › Members (M2)", () => {
+  test("owner sees a role select for a non-owner member; changing it issues a PATCH", async () => {
+    const r = render(wrap(<Members org={owner} />));
+    expect(await r.findByText("bob@example.com")).toBeTruthy();
+    // the founding owner (alice) is immutable — a role pill, not a select
+    expect(r.queryByLabelText("role for alice@example.com")).toBeNull();
+    const sel = r.getByLabelText("role for bob@example.com") as HTMLSelectElement;
+    changeValue(sel, "admin");
+    await new Promise((res) => setTimeout(res, 0));
+    const patched = calls.find((c) => c.method === "PATCH" && c.url === "/v1/orgs/acme/members/bob%40example.com");
+    expect(patched).toBeTruthy();
+    expect(patched?.body).toMatchObject({ role: "admin" });
+  });
+
+  test("a viewer can't manage members (no add form, no role selects)", async () => {
+    const r = render(wrap(<Members org={viewer} />));
+    expect(await r.findByText("bob@example.com")).toBeTruthy();
+    expect(r.queryByLabelText("role for bob@example.com")).toBeNull();
+    expect(r.queryByLabelText("new member email")).toBeNull();
   });
 });

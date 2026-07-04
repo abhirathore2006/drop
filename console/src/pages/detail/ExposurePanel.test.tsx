@@ -21,6 +21,7 @@ const base: Detail = {
   current: null,
   url: "https://pg.x",
   versions: [],
+  capabilities: ["read", "expose"],
 } as Detail;
 
 const exposed = (): Detail => ({ ...base, tcp: { mode: "sni", port: null, protocol: "postgres", connect: "pg.drop.example.com:5432", sslmode: "connect with sslmode=require" } });
@@ -32,8 +33,8 @@ const wrap = (node: React.ReactNode) => (
 );
 
 describe("ExposurePanel", () => {
-  test("renders the connect string + unexpose control for an exposed workload (deployer)", () => {
-    const r = render(wrap(<ExposurePanel d={exposed()} canExpose={true} />));
+  test("renders the connect string + unexpose control for an exposed workload (expose-capable)", () => {
+    const r = render(wrap(<ExposurePanel d={exposed()} />));
     expect(r.getByText("tcp exposure")).toBeTruthy();
     expect(r.getByText("pg.drop.example.com:5432")).toBeTruthy();
     expect(r.getByText(/sslmode=require/)).toBeTruthy();
@@ -41,20 +42,20 @@ describe("ExposurePanel", () => {
   });
 
   test("clicking unexpose opens the confirm dialog", () => {
-    const r = render(wrap(<ExposurePanel d={exposed()} canExpose={true} />));
+    const r = render(wrap(<ExposurePanel d={exposed()} />));
     fireEvent.click(r.getByRole("button", { name: "unexpose" }));
     expect(r.getByText("Unexpose pg")).toBeTruthy();
   });
 
-  test("an unexposed workload shows the expose picker for a deployer", () => {
-    const r = render(wrap(<ExposurePanel d={base} canExpose={true} />));
+  test("an unexposed workload shows the expose picker when expose-capable", () => {
+    const r = render(wrap(<ExposurePanel d={base} />));
     expect(r.getByText(/not exposed/)).toBeTruthy();
     expect(r.getByRole("button", { name: "expose" })).toBeTruthy();
     expect(r.getByText("sni (shared port)")).toBeTruthy(); // the mode picker option
   });
 
-  test("a non-deployer sees the state but no expose control", () => {
-    const r = render(wrap(<ExposurePanel d={base} canExpose={false} />));
+  test("without the expose verb, the state shows but the expose control is hidden", () => {
+    const r = render(wrap(<ExposurePanel d={{ ...base, capabilities: ["read"] }} />));
     expect(r.getByText(/not exposed/)).toBeTruthy();
     expect(r.queryByRole("button", { name: "expose" })).toBeNull();
   });

@@ -10,7 +10,7 @@ import type { Detail } from "../../lib/api.ts";
 
 setupDom();
 
-const detail = (objects: number): Detail =>
+const detail = (objects: number, caps: string[] = ["read", "configure"]): Detail =>
   ({
     name: "avatars",
     type: "bucket",
@@ -21,6 +21,7 @@ const detail = (objects: number): Detail =>
     current: null,
     url: "https://avatars.x",
     versions: [],
+    capabilities: caps,
     bucket: { endpoint: "http://s3.local", bucket: "platform-bucket", prefix: "buckets/ns/avatars/", bytes: 4096, objects },
   }) as Detail;
 
@@ -31,23 +32,25 @@ const wrap = (node: React.ReactNode) => (
 );
 
 describe("BucketPanels", () => {
-  test("renders endpoint/bucket/prefix + size and the rotate control for an owner", () => {
-    const r = render(wrap(<BucketPanels d={detail(3)} isOwner={true} />));
+  test("renders endpoint/bucket/prefix + size and an enabled rotate control with `configure`", () => {
+    const r = render(wrap(<BucketPanels d={detail(3)} />));
     expect(r.getByText("object storage")).toBeTruthy();
     expect(r.getByText("platform-bucket")).toBeTruthy();
     expect(r.getByText("buckets/ns/avatars/")).toBeTruthy();
     expect(r.getByText(/4\.0 KiB · 3 objects/)).toBeTruthy();
-    expect(r.getByRole("button", { name: "rotate credentials" })).toBeTruthy();
+    expect((r.getByRole("button", { name: "rotate credentials" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  test("a non-owner sees info but no rotate control", () => {
-    const r = render(wrap(<BucketPanels d={detail(0)} isOwner={false} />));
+  test("without `configure` the rotate control is disabled (with a tooltip), not gone", () => {
+    const r = render(wrap(<BucketPanels d={detail(0, ["read"])} />));
     expect(r.getByText(/0 objects/)).toBeTruthy();
-    expect(r.queryByRole("button", { name: "rotate credentials" })).toBeNull();
+    const btn = r.getByRole("button", { name: "rotate credentials" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    expect(btn.getAttribute("title")).toMatch(/configure/);
   });
 
   test("clicking rotate opens the confirm dialog", () => {
-    const r = render(wrap(<BucketPanels d={detail(1)} isOwner={true} />));
+    const r = render(wrap(<BucketPanels d={detail(1)} />));
     fireEvent.click(r.getByRole("button", { name: "rotate credentials" }));
     expect(r.getByText("Rotate bucket credentials")).toBeTruthy();
   });

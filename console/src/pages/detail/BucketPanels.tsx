@@ -8,6 +8,7 @@ import { CopyField } from "../../components/CopyField.tsx";
 import { KV } from "../../components/Field.tsx";
 import { RevealOnce } from "../../components/RevealOnce.tsx";
 import { api, type Detail } from "../../lib/api.ts";
+import { cap, denyReason } from "../../lib/caps.ts";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
 /** Human-readable binary-SI size. */
@@ -23,12 +24,13 @@ function fmtBytes(n: number): string {
   return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
 }
 
-export function BucketPanels({ d, isOwner }: { d: Detail; isOwner: boolean }) {
+export function BucketPanels({ d }: { d: Detail }) {
   const b = d.bucket;
   // The just-rotated credentials, shown ONCE via RevealOnce; the API never returns them again.
   const [rotated, setRotated] = useState<{ accessKeyId: string; secretAccessKey: string } | null>(null);
   const [confirmRotate, setConfirmRotate] = useState(false);
   const rotate = useWorkloadAction({ onSuccess: () => setConfirmRotate(false) });
+  const canRotate = cap(d, "configure"); // credential rotation is `configure`-gated (like db password)
 
   return (
     <div className="sec">
@@ -51,19 +53,18 @@ export function BucketPanels({ d, isOwner }: { d: Detail; isOwner: boolean }) {
           <span className="sub">unavailable</span>
         </KV>
       )}
-      {isOwner && (
-        <KV label="credentials">
-          {rotated ? (
-            <RevealOnce
-              value={`S3_ACCESS_KEY_ID=${rotated.accessKeyId}\nS3_SECRET_ACCESS_KEY=${rotated.secretAccessKey}`}
-              note="shown once — store both now. redeploy apps bound to this bucket to pick up the new key."
-              onDismiss={() => setRotated(null)}
-            />
-          ) : (
-            <>
-              <Button size="sm" loading={rotate.isPending} onClick={() => setConfirmRotate(true)}>
-                rotate credentials
-              </Button>
+      <KV label="credentials">
+        {rotated ? (
+          <RevealOnce
+            value={`S3_ACCESS_KEY_ID=${rotated.accessKeyId}\nS3_SECRET_ACCESS_KEY=${rotated.secretAccessKey}`}
+            note="shown once — store both now. redeploy apps bound to this bucket to pick up the new key."
+            onDismiss={() => setRotated(null)}
+          />
+        ) : (
+          <>
+            <Button size="sm" loading={rotate.isPending} disabled={!canRotate} title={canRotate ? undefined : denyReason("configure")} onClick={() => setConfirmRotate(true)}>
+              rotate credentials
+            </Button>
               <ConfirmDialog
                 open={confirmRotate}
                 title="Rotate bucket credentials"
@@ -85,7 +86,6 @@ export function BucketPanels({ d, isOwner }: { d: Detail; isOwner: boolean }) {
             </>
           )}
         </KV>
-      )}
     </div>
   );
 }

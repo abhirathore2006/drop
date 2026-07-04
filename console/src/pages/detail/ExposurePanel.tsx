@@ -8,10 +8,12 @@ import { ConfirmDialog } from "../../components/ConfirmDialog.tsx";
 import { CopyField } from "../../components/CopyField.tsx";
 import { KV } from "../../components/Field.tsx";
 import { api, type Detail } from "../../lib/api.ts";
+import { cap } from "../../lib/caps.ts";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
-export function ExposurePanel({ d, canExpose }: { d: Detail; canExpose: boolean }) {
+export function ExposurePanel({ d }: { d: Detail }) {
   const tcp = d.tcp;
+  const canExpose = cap(d, "expose");
   const isDb = d.type === "database";
   const [mode, setMode] = useState<"sni" | "port">("sni");
   const [protocol, setProtocol] = useState(isDb ? "postgres" : "tcp");

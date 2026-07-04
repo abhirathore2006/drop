@@ -38,7 +38,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 16 | F1 `drop detect` + stack MCP | done | f9d80c7 | 9/9 examples fixture corpus; evidence-only fields |
 | 17 | M1 Console IA: sidebar/⌘K/onboarding | done | 38530d2 | pulled ahead of order (console-only); ?org= context; templates/tokens/webhooks stubs pending D1/J1/G3 |
 | 18 | J2 Generic OIDC login | done | see log | Keycloak live-tested; break-glass scrypt; zero-migration Helm-verified |
-| 19 | G2 Edge metrics · G2b uptime checks | todo | | |
+| 19 | G2 Edge metrics · G2b uptime checks | done | see log | p95=max merge honesty; keep_warm; crash-loop history → G3 |
 | 20 | M2 Permission-aware UI + capabilities | todo | | |
 | 21 | K1 Managed auth resource | todo | | |
 | 22 | C2 Canvas editing | todo | | |

@@ -9,26 +9,31 @@ import { KV } from "../../components/Field.tsx";
 import { RevealOnce } from "../../components/RevealOnce.tsx";
 import { PhasePill, Pill } from "../../components/badges.tsx";
 import { api, fmtStamp, type Detail } from "../../lib/api.ts";
+import { cap, denyReason } from "../../lib/caps.ts";
 import { POLL_DETAIL_MS } from "../../lib/query.ts";
 import { deriveStatus } from "../../lib/status.ts";
 import { LogsPanel } from "./LogsPanel.tsx";
 import { ExposurePanel } from "./ExposurePanel.tsx";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
-export function DbPanels({ d, isOwner, canDeploy }: { d: Detail; isOwner: boolean; canDeploy: boolean }) {
+export function DbPanels({ d }: { d: Detail }) {
   return (
     <>
-      {d.database && <DbInfoPanel d={d} isOwner={isOwner} canDeploy={canDeploy} />}
-      <ExposurePanel d={d} canExpose={canDeploy} />
-      {d.database && <BackupsPanel name={d.name} canManage={canDeploy} />}
-      <LogsPanel name={d.name} />
+      {d.database && <DbInfoPanel d={d} />}
+      <ExposurePanel d={d} />
+      {/* backups: trigger is `db:create`-gated; list is `read`, so the panel always shows. */}
+      {d.database && <BackupsPanel name={d.name} canManage={cap(d, "db:create")} />}
+      {/* Logs read behind `logs` (above viewer) — hide rather than 403 on load. */}
+      {cap(d, "logs") && <LogsPanel name={d.name} />}
     </>
   );
 }
 
-function DbInfoPanel({ d, isOwner, canDeploy }: { d: Detail; isOwner: boolean; canDeploy: boolean }) {
+function DbInfoPanel({ d }: { d: Detail }) {
   const db = d.database!;
   const act = useWorkloadAction();
+  const canDbOps = cap(d, "db:create"); // hibernate/wake — the DB analog of app deploy
+  const canConfigure = cap(d, "configure"); // pooler + password rotate
   // The just-rotated password, shown ONCE via RevealOnce; the API can never return it again.
   const [rotated, setRotated] = useState<{ password: string; warning: string | null } | null>(null);
   const [confirmRotate, setConfirmRotate] = useState(false);
@@ -54,19 +59,17 @@ function DbInfoPanel({ d, isOwner, canDeploy }: { d: Detail; isOwner: boolean; c
           "—"
         )}
       </KV>
-      {canDeploy && (
-        <KV label="lifecycle">
-          {db.status?.hibernated ? (
-            <Button size="sm" loading={act.isPending} onClick={() => act.mutate(() => api.wakeDb(d.name))}>
-              wake
-            </Button>
-          ) : (
-            <Button size="sm" variant="danger" loading={act.isPending} onClick={() => act.mutate(() => api.hibernateDb(d.name))}>
-              hibernate
-            </Button>
-          )}
-        </KV>
-      )}
+      <KV label="lifecycle">
+        {db.status?.hibernated ? (
+          <Button size="sm" loading={act.isPending} disabled={!canDbOps} title={canDbOps ? undefined : denyReason("db:create")} onClick={() => act.mutate(() => api.wakeDb(d.name))}>
+            wake
+          </Button>
+        ) : (
+          <Button size="sm" variant="danger" loading={act.isPending} disabled={!canDbOps} title={canDbOps ? undefined : denyReason("db:create")} onClick={() => act.mutate(() => api.hibernateDb(d.name))}>
+            hibernate
+          </Button>
+        )}
+      </KV>
       <KV label="host">
         <CopyField value={`${db.host}:${db.port}`} />
       </KV>
@@ -89,43 +92,33 @@ function DbInfoPanel({ d, isOwner, canDeploy }: { d: Detail; isOwner: boolean; c
                 <CopyField value={db.pooler.host} />
               </>
             )}
-            {canDeploy && (
-              <>
-                {" "}
-                <Button size="sm" variant="danger" loading={pooler.isPending} onClick={() => pooler.mutate(() => api.setDbPooler(d.name, false))}>
-                  disable
-                </Button>
-              </>
-            )}
+            {" "}
+            <Button size="sm" variant="danger" loading={pooler.isPending} disabled={!canConfigure} title={canConfigure ? undefined : denyReason("configure")} onClick={() => pooler.mutate(() => api.setDbPooler(d.name, false))}>
+              disable
+            </Button>
           </>
         ) : (
           <>
-            <span className="sub">off</span>
-            {canDeploy && (
-              <>
-                {" "}
-                <Button size="sm" loading={pooler.isPending} onClick={() => pooler.mutate(() => api.setDbPooler(d.name, true, "transaction"))}>
-                  enable (transaction)
-                </Button>
-              </>
-            )}
+            <span className="sub">off</span>{" "}
+            <Button size="sm" loading={pooler.isPending} disabled={!canConfigure} title={canConfigure ? undefined : denyReason("configure")} onClick={() => pooler.mutate(() => api.setDbPooler(d.name, true, "transaction"))}>
+              enable (transaction)
+            </Button>
           </>
         )}
       </KV>
-      {isOwner && (
-        <KV label="password">
-          {rotated ? (
-            <RevealOnce
-              value={rotated.password}
-              note="shown once — copy it now. restart apps to pick up the new password."
-              warning={rotated.warning}
-              onDismiss={() => setRotated(null)}
-            />
-          ) : (
-            <>
-              <Button size="sm" loading={rotate.isPending} onClick={() => setConfirmRotate(true)}>
-                set / rotate password
-              </Button>
+      <KV label="password">
+        {rotated ? (
+          <RevealOnce
+            value={rotated.password}
+            note="shown once — copy it now. restart apps to pick up the new password."
+            warning={rotated.warning}
+            onDismiss={() => setRotated(null)}
+          />
+        ) : (
+          <>
+            <Button size="sm" loading={rotate.isPending} disabled={!canConfigure} title={canConfigure ? undefined : denyReason("configure")} onClick={() => setConfirmRotate(true)}>
+              set / rotate password
+            </Button>
               <ConfirmDialog
                 open={confirmRotate}
                 title="Rotate database password"
@@ -147,7 +140,6 @@ function DbInfoPanel({ d, isOwner, canDeploy }: { d: Detail; isOwner: boolean; c
             </>
           )}
         </KV>
-      )}
     </div>
   );
 }
@@ -164,11 +156,9 @@ function BackupsPanel({ name, canManage }: { name: string; canManage: boolean })
     <div className="sec">
       <div className="sec-h">
         <h3>backups ({q.data?.backups.length ?? 0})</h3>
-        {canManage && (
-          <Button size="sm" loading={act.isPending} onClick={() => act.mutate(() => api.triggerDbBackup(name))}>
-            back up now
-          </Button>
-        )}
+        <Button size="sm" loading={act.isPending} disabled={!canManage} title={canManage ? undefined : denyReason("db:create")} onClick={() => act.mutate(() => api.triggerDbBackup(name))}>
+          back up now
+        </Button>
       </div>
       {q.isError && <div className="err">{q.error.message}</div>}
       <KV label="last success">{fmtStamp(q.data?.lastSuccessAt ?? null)}</KV>

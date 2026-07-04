@@ -5,16 +5,17 @@ import { useState } from "react";
 import { Link } from "wouter";
 import { Button } from "../components/Button.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
+import { Skeleton } from "../components/Skeleton.tsx";
 import { Table, type Column } from "../components/Table.tsx";
 import { Tabs } from "../components/Tabs.tsx";
 import { useToast } from "../components/Toast.tsx";
-import { TypeBadge } from "../components/badges.tsx";
+import { ActorLabel, TypeBadge } from "../components/badges.tsx";
 import { UsageSummary, WorkloadGrid } from "../components/workloads.tsx";
-import { api, fmtStamp, orgLabel, pathFor, type AdminOrg, type AdminUser, type AuditRecord, type ListItem, type Me } from "../lib/api.ts";
+import { api, fmtStamp, orgLabel, pathFor, type AdminOrg, type AdminQuotas, type AdminUser, type AuditRecord, type ListItem, type Me } from "../lib/api.ts";
 import { useDebounced, useDocumentTitle } from "../lib/hooks.ts";
 import { POLL_LIST_MS } from "../lib/query.ts";
 
-type AdminTab = "tenants" | "users" | "audit";
+type AdminTab = "tenants" | "users" | "quotas" | "audit";
 
 export function AdminPage({ me }: { me: Me }) {
   useDocumentTitle("admin · drop");
@@ -25,12 +26,13 @@ export function AdminPage({ me }: { me: Me }) {
         tabs={[
           { id: "tenants", label: "tenants" },
           { id: "users", label: "users" },
+          { id: "quotas", label: "quotas" },
           { id: "audit", label: "audit" },
         ]}
         active={tab}
         onChange={setTab}
       />
-      {tab === "users" ? <AdminUsers me={me} /> : tab === "audit" ? <AdminAudit /> : <AdminTenants me={me} />}
+      {tab === "users" ? <AdminUsers me={me} /> : tab === "quotas" ? <QuotaEditor /> : tab === "audit" ? <AdminAudit /> : <AdminTenants me={me} />}
     </section>
   );
 }
@@ -210,6 +212,148 @@ function AdminUsers({ me }: { me: Me }) {
   );
 }
 
+// ---- per-org quota editor (item 10) — override the instance defaults for cpu/storage/workload caps.
+const QUOTA_LABEL: Record<string, string> = {
+  max_workloads: "max workloads",
+  max_db_storage: "max db storage (per database)",
+  storage_budget_bytes: "storage budget (org-wide)",
+};
+const QUOTA_HINT: Record<string, string> = {
+  max_workloads: "non-negative integer; 0 = unlimited",
+  max_db_storage: "k8s quantity, e.g. 512Mi, 1Gi, 5Gi",
+  storage_budget_bytes: "a byte count or a k8s quantity, e.g. 10Gi",
+};
+
+/** The instance-default (effective-when-unset) value for a key, as a human string — the "default hint". */
+function effectiveLabel(data: AdminQuotas, key: string): string {
+  if (key === "max_workloads") return data.effective.max_workloads === 0 ? "unlimited" : String(data.effective.max_workloads);
+  if (key === "max_db_storage") return data.effective.max_db_storage;
+  if (key === "storage_budget_bytes") return data.effective.storage_budget_bytes == null ? "no budget" : `${data.effective.storage_budget_bytes} bytes`;
+  return "—";
+}
+
+/** Admin: pick an org, then edit its per-org quota overrides. Unset keys fall back to the instance
+ *  default (shown as a hint). Server-side validation is authoritative (PUT → 400 with a message). */
+export function QuotaEditor() {
+  const orgsQ = useQuery({ queryKey: ["/v1/admin/orgs"], queryFn: api.adminOrgs, staleTime: 60_000 });
+  const orgs = orgsQ.data?.orgs ?? [];
+  const [slug, setSlug] = useState("");
+  const q = useQuery({ queryKey: ["/v1/admin/orgs", slug, "quotas"], queryFn: () => api.adminOrgQuotas(slug), enabled: !!slug });
+  const orgOpt = (o: AdminOrg) => (o.kind === "personal" ? `👤 ${o.owner}` : `🏢 ${o.name}`) + ` (${o.slug})`;
+
+  return (
+    <>
+      <div className="adminbar">
+        <h2>Per-org quotas</h2>
+        <select value={slug} onChange={(e) => setSlug(e.target.value)} aria-label="org">
+          <option value="">pick an org…</option>
+          {orgs.map((o) => (
+            <option key={o.slug} value={o.slug}>
+              {orgOpt(o)}
+            </option>
+          ))}
+        </select>
+      </div>
+      {!slug ? (
+        <EmptyState title="Pick an org.">Choose an org to view and edit its resource quota overrides. Unset keys fall back to the instance defaults.</EmptyState>
+      ) : q.isPending ? (
+        <Skeleton lines={4} />
+      ) : q.isError ? (
+        <div className="err">{q.error.message}</div>
+      ) : (
+        <QuotaForm key={slug} slug={slug} data={q.data} />
+      )}
+    </>
+  );
+}
+
+function QuotaForm({ slug, data }: { slug: string; data: AdminQuotas }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const override = (key: string) => data.overrides.find((o) => o.key === key)?.value ?? "";
+  const [vals, setVals] = useState<Record<string, string>>(() => Object.fromEntries(data.keys.map((k) => [k, override(k)])));
+  const [err, setErr] = useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: () => {
+      // Only send keys whose value is non-empty AND changed from the stored override. (There is no
+      // "unset" — clearing an override isn't supported yet, so a blanked field is a no-op.)
+      const changed: Record<string, string> = {};
+      for (const k of data.keys) {
+        const v = (vals[k] ?? "").trim();
+        if (v && v !== override(k)) changed[k] = v;
+      }
+      if (Object.keys(changed).length === 0) return Promise.reject(new Error("no changes to save"));
+      return api.setAdminOrgQuotas(slug, changed);
+    },
+    onSuccess: async () => {
+      toast.success("quotas saved");
+      await qc.invalidateQueries({ queryKey: ["/v1/admin/orgs", slug, "quotas"] });
+    },
+    onError: (e) => setErr((e as Error).message),
+  });
+
+  // Light client-side check for quick feedback; the server validates authoritatively.
+  const validate = (): string | null => {
+    const mw = (vals["max_workloads"] ?? "").trim();
+    if (mw && !/^\d+$/.test(mw)) return "max workloads must be a non-negative integer (0 = unlimited)";
+    return null;
+  };
+
+  return (
+    <div className="panels">
+      <div className="sec">
+        <div className="sec-h">
+          <h3>{data.org.name} — quota overrides</h3>
+        </div>
+        {data.keys.map((k) => {
+          const isOverride = data.overrides.some((o) => o.key === k);
+          return (
+            <div className="kv" key={k}>
+              <span className="k">{QUOTA_LABEL[k] ?? k}</span>
+              <span className="v" style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+                <input
+                  className="input"
+                  style={{ maxWidth: "12rem" }}
+                  value={vals[k] ?? ""}
+                  placeholder={`default: ${effectiveLabel(data, k)}`}
+                  aria-label={k}
+                  onChange={(e) => {
+                    setVals((s) => ({ ...s, [k]: e.target.value }));
+                    if (err) setErr(null);
+                  }}
+                />
+                <span className="sub">
+                  {isOverride ? "override" : "default"} · effective {effectiveLabel(data, k)} · {QUOTA_HINT[k]}
+                </span>
+              </span>
+            </div>
+          );
+        })}
+        {err && <div className="field-err">{err}</div>}
+        <div className="field">
+          <Button
+            size="sm"
+            variant="primary"
+            loading={save.isPending}
+            onClick={() => {
+              const v = validate();
+              if (v) {
+                setErr(v);
+                return;
+              }
+              save.mutate();
+            }}
+          >
+            save
+          </Button>
+        </div>
+        <p className="sub">Unset keys use the instance default. Clearing an existing override isn't supported yet — set a new value to change it.</p>
+      </div>
+    </div>
+  );
+}
+
 /** Append-only audit trail (newest first) with actor/action filters + keyset paging. */
 function AdminAudit() {
   const [actor, setActor] = useState("");
@@ -234,7 +378,7 @@ function AdminAudit() {
 
   const columns: Column<AuditRecord>[] = [
     { key: "when", header: "when", render: (e) => <span className="muted">{fmtStamp(e.at)}</span> },
-    { key: "actor", header: "actor", render: (e) => e.actor },
+    { key: "actor", header: "actor", render: (e) => <ActorLabel principal={e.actor} /> },
     { key: "action", header: "action", render: (e) => <code>{e.action}</code> },
     { key: "target", header: "target", render: (e) => e.target ?? "—" },
     { key: "detail", header: "detail", render: (e) => <span className="muted">{e.detail ? JSON.stringify(e.detail) : "—"}</span> },

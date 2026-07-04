@@ -120,6 +120,15 @@ export function can(actor: Actor, action: Action): boolean {
   return viaOrg || viaSite;
 }
 
+/** The resolved capability set for an actor on THIS resource (M2): every verb `can()` grants, computed
+ *  by ONE pass over ACTIONS through the SAME `can()` — so the list the console gates on can never drift
+ *  from what the server enforces. Small by construction (only the true verbs) and ordered like ACTIONS.
+ *  A platform admin gets the full set; a service token gets its scope-filtered set; an ordinary actor
+ *  gets the union of its org + per-resource role grants. Powers `capabilities` on list/detail responses. */
+export function capabilitiesFor(actor: Actor): Action[] {
+  return ACTIONS.filter((a) => can(actor, a));
+}
+
 /** Who may create a resource IN an org (no resource exists yet, so this is an org-role check). */
 export function canCreateInOrg(orgRole: OrgRole | null, platformRole: "admin" | "member"): boolean {
   return platformRole === "admin" || orgRole === "owner" || orgRole === "admin" || orgRole === "member";

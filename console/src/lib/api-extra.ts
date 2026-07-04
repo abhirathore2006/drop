@@ -62,6 +62,11 @@ export const apiExtra = {
   orgs: () => req<{ orgs: OrgSummary[] }>("GET", "/v1/orgs"),
   /** One org with its members — the Settings › Members panel. */
   orgDetail: (slug: string) => req<OrgDetail>("GET", `/v1/orgs/${encodeURIComponent(slug)}`),
+  // ---- org membership (M2) — owner/admin only (server-enforced via canManageOrg) ----
+  addMember: (slug: string, email: string, role: string) => req<{ slug: string; email: string; role: string }>("POST", `/v1/orgs/${encodeURIComponent(slug)}/members`, { email, role }),
+  removeMember: (slug: string, email: string) => req<{ removed: string }>("DELETE", `/v1/orgs/${encodeURIComponent(slug)}/members/${encodeURIComponent(email)}`),
+  /** Change an existing member's role. "owner" is not assignable (single-owner invariant). */
+  setMemberRole: (slug: string, email: string, role: string) => req<{ slug: string; email: string; role: string }>("PATCH", `/v1/orgs/${encodeURIComponent(slug)}/members/${encodeURIComponent(email)}`, { role }),
   /** The CLI/API version this instance serves — the user-menu version chip. */
   version: () => req<{ version: string }>("GET", "/version"),
   // ---- service accounts / scoped CI tokens (J1) — Settings › Tokens ----

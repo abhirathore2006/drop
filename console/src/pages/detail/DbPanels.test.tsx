@@ -26,6 +26,8 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
+// Full editor+configure capability set so every gated control renders enabled.
+const CAPS = ["read", "logs", "deploy", "db:create", "connect", "rollback", "configure", "expose"];
 const detail = (pooler?: { enabled: boolean; mode?: string; host?: string }, extensions?: string[]): Detail =>
   ({
     name: "pgdb",
@@ -37,6 +39,7 @@ const detail = (pooler?: { enabled: boolean; mode?: string; host?: string }, ext
     current: null,
     url: "",
     versions: [],
+    capabilities: CAPS,
     status: { status: "running", reason: "healthy" },
     database: {
       host: "pgdb-rw.ns.svc.cluster.local",
@@ -58,20 +61,20 @@ const wrap = (node: React.ReactNode) => (
 
 describe("DbPanels pooler row (I3)", () => {
   test("pooler off → an enable control is offered to an editor", () => {
-    const r = render(wrap(<DbPanels d={detail({ enabled: false })} isOwner={true} canDeploy={true} />));
+    const r = render(wrap(<DbPanels d={detail({ enabled: false })} />));
     expect(r.getByText("pooler")).toBeTruthy();
     expect(r.getByRole("button", { name: /enable/ })).toBeTruthy();
   });
 
   test("pooler on → shows mode + host + a disable control", () => {
-    const r = render(wrap(<DbPanels d={detail({ enabled: true, mode: "transaction", host: "pgdb-pooler-rw.ns.svc.cluster.local" })} isOwner={true} canDeploy={true} />));
+    const r = render(wrap(<DbPanels d={detail({ enabled: true, mode: "transaction", host: "pgdb-pooler-rw.ns.svc.cluster.local" })} />));
     expect(r.getByText(/transaction/)).toBeTruthy();
     expect(r.getByText("pgdb-pooler-rw.ns.svc.cluster.local")).toBeTruthy();
     expect(r.getByRole("button", { name: "disable" })).toBeTruthy();
   });
 
   test("extensions are listed when present", () => {
-    const r = render(wrap(<DbPanels d={detail({ enabled: false }, ["pgvector", "pg_trgm"])} isOwner={true} canDeploy={true} />));
+    const r = render(wrap(<DbPanels d={detail({ enabled: false }, ["pgvector", "pg_trgm"])} />));
     expect(r.getByText("pgvector, pg_trgm")).toBeTruthy();
   });
 });

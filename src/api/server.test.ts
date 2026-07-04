@@ -2592,3 +2592,70 @@ test("G2 Prometheus /metrics: admin-gated, text format", async () => {
   expect(text).toContain('drop_edge_requests{site="myapp"} 7');
   await db.destroy();
 });
+
+// ---- (M2) capabilities API + org member role change -------------------------------------------
+
+test("(M2) detail + list carry capabilities; owner is full, editor is ship-tier (no configure/delete)", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  // owner: the full verb set
+  const owner = await (await call(app, "GET", "/v1/sites/myapp", "alice")).json();
+  expect(Array.isArray(owner.capabilities)).toBe(true);
+  expect(owner.capabilities).toContain("delete");
+  expect(owner.capabilities).toContain("configure");
+  expect(owner.capabilities).toContain("publish");
+  // the LIST carries capabilities too
+  const list = await (await call(app, "GET", "/v1/sites", "alice")).json();
+  const item = list.sites.find((s: any) => s.name === "myapp");
+  expect(item.capabilities).toContain("publish");
+  // bob as editor: ship tier — deploy/publish yes, configure/delete no
+  await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@example.com", role: "editor" });
+  const ed = await (await call(app, "GET", "/v1/sites/myapp", "bob")).json();
+  expect(ed.capabilities).toContain("deploy");
+  expect(ed.capabilities).toContain("publish");
+  expect(ed.capabilities).not.toContain("configure");
+  expect(ed.capabilities).not.toContain("delete");
+  await db.destroy();
+});
+
+test("(M2) a viewer's capabilities are read-only (no deploy)", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@example.com", role: "viewer" });
+  const v = await (await call(app, "GET", "/v1/sites/myapp", "bob")).json();
+  expect(v.capabilities).toEqual(["read"]);
+  expect(v.capabilities).not.toContain("deploy");
+  await db.destroy();
+});
+
+test("(M2) a service token's capabilities are scope-filtered on detail", async () => {
+  const { app, token, db } = await acmeWithToken(["read:myapp", "deploy:myapp", "logs:myapp"]);
+  const d = await (await call(app, "GET", "/v1/sites/myapp", token)).json();
+  expect([...d.capabilities].sort()).toEqual(["deploy", "logs", "read"]);
+  expect(d.capabilities).not.toContain("delete");
+  expect(d.capabilities).not.toContain("configure");
+  await db.destroy();
+});
+
+test("(M2) org member role change: owner/admin only, founding owner immutable, owner not assignable", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" });
+  await call(app, "POST", "/v1/orgs/acme/members", "alice", { email: "bob@example.com", role: "member" });
+  // owner promotes bob member → admin
+  const up = await call(app, "PATCH", "/v1/orgs/acme/members/bob@example.com", "alice", { role: "admin" });
+  expect(up.status).toBe(200);
+  expect((await up.json()).role).toBe("admin");
+  // reflected on the org detail roster
+  const det = await (await call(app, "GET", "/v1/orgs/acme", "alice")).json();
+  expect(det.members.find((m: any) => m.email === "bob@example.com").role).toBe("admin");
+  // "owner" is not assignable (single-owner invariant) → 400
+  expect((await call(app, "PATCH", "/v1/orgs/acme/members/bob@example.com", "alice", { role: "owner" })).status).toBe(400);
+  // the founding owner is immutable → 409
+  expect((await call(app, "PATCH", "/v1/orgs/acme/members/alice@example.com", "alice", { role: "member" })).status).toBe(409);
+  // a plain member can't change roles → 403
+  await call(app, "PATCH", "/v1/orgs/acme/members/bob@example.com", "alice", { role: "member" });
+  expect((await call(app, "PATCH", "/v1/orgs/acme/members/alice@example.com", "bob", { role: "viewer" })).status).toBe(403);
+  // changing a non-member → 404
+  expect((await call(app, "PATCH", "/v1/orgs/acme/members/nobody@example.com", "alice", { role: "member" })).status).toBe(404);
+  await db.destroy();
+});

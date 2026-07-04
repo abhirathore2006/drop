@@ -101,6 +101,17 @@
   border-color: var(--warn-border);
   background: var(--warn-bg);
 }
+/* (J1) a service-token principal (`token:<name>@<org>`) in audit/activity views — mono, muted, and
+   left as-is (no uppercase / letter-spacing) so the literal principal reads verbatim. */
+.badge-token {
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--idle-fg);
+  border-color: var(--idle-border);
+  background: var(--idle-bg);
+}
 .pill {
   font-size: 11px;
   font-weight: 600;

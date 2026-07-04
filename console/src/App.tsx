@@ -123,11 +123,11 @@ function Shell({ me }: { me: Me }) {
               <Route path="/settings">
                 <SettingsPage />
               </Route>
-              <Route path="/site/:name">{(p) => <DetailRoute name={dec(p.name)} type="site" me={me} />}</Route>
-              <Route path="/app/:name">{(p) => <DetailRoute name={dec(p.name)} type="app" me={me} />}</Route>
-              <Route path="/database/:name">{(p) => <DetailRoute name={dec(p.name)} type="database" me={me} />}</Route>
-              <Route path="/bucket/:name">{(p) => <DetailRoute name={dec(p.name)} type="bucket" me={me} />}</Route>
-              <Route path="/cache/:name">{(p) => <DetailRoute name={dec(p.name)} type="cache" me={me} />}</Route>
+              <Route path="/site/:name">{(p) => <DetailRoute name={dec(p.name)} type="site" />}</Route>
+              <Route path="/app/:name">{(p) => <DetailRoute name={dec(p.name)} type="app" />}</Route>
+              <Route path="/database/:name">{(p) => <DetailRoute name={dec(p.name)} type="database" />}</Route>
+              <Route path="/bucket/:name">{(p) => <DetailRoute name={dec(p.name)} type="bucket" />}</Route>
+              <Route path="/cache/:name">{(p) => <DetailRoute name={dec(p.name)} type="cache" />}</Route>
               <Route path="/stack/:name">
                 {(p) => (
                   <>
@@ -150,11 +150,11 @@ function Shell({ me }: { me: Me }) {
 
 /** A workload detail route: sets the tab title (the detail page itself is owned by another
  *  agent this round, so the title is set here) and renders the page. */
-function DetailRoute({ name, type, me }: { name: string; type: WorkloadType; me: Me }) {
+function DetailRoute({ name, type }: { name: string; type: WorkloadType }) {
   return (
     <>
       <DocTitle title={`${name} · ${type} · drop`} />
-      <WorkloadDetailPage key={name} name={name} me={me} />
+      <WorkloadDetailPage key={name} name={name} />
     </>
   );
 }

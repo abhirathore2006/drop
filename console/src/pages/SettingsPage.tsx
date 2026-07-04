@@ -63,8 +63,27 @@ export function SettingsPage() {
   );
 }
 
-function Members({ org }: { org: OrgSummary }) {
+// The assignable org roles (owner is the single founding owner — not assignable via the member UI).
+const ORG_ROLES = ["admin", "member", "viewer"] as const;
+
+export function Members({ org }: { org: OrgSummary }) {
+  const qc = useQueryClient();
+  const toast = useToast();
   const q = useQuery({ queryKey: ["/v1/orgs", org.slug], queryFn: () => apiExtra.orgDetail(org.slug), staleTime: 30_000 });
+  // owner/admin-gated writes (mirrors the server's canManageOrg); the personal org can't take members.
+  const canManage = org.role === "owner" || org.role === "admin";
+  const isPersonal = org.kind === "personal";
+  const [newEmail, setNewEmail] = useState("");
+  const [newRole, setNewRole] = useState<string>("member");
+
+  const act = useMutation({
+    mutationFn: (run: () => Promise<unknown>) => run(),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["/v1/orgs", org.slug] });
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
   if (q.isPending) return <Skeleton lines={3} />;
   if (q.isError) return <div className="err">{q.error.message}</div>;
   const members = q.data.members;
@@ -76,20 +95,78 @@ function Members({ org }: { org: OrgSummary }) {
         </div>
         {members.length === 0 ? (
           <p className="muted">
-            {org.kind === "personal" ? "Your personal org — it's just you. Create a team org to collaborate." : "No members yet."}
+            {isPersonal ? "Your personal org — it's just you. Create a team org to collaborate." : "No members yet."}
           </p>
         ) : (
-          members.map((m) => (
-            <div className="item" key={m.email}>
-              <div className="meta">
-                <b>{m.email}</b>
+          members.map((m) => {
+            // The founding owner is immutable (server refuses to remove/re-role it); everyone else is
+            // editable by an owner/admin. A non-owner without manage rights just sees the role pill.
+            const isOwnerRow = m.role === "owner";
+            return (
+              <div className="item" key={m.email}>
+                <div className="meta">
+                  <b>{m.email}</b>
+                </div>
+                {canManage && !isOwnerRow ? (
+                  <>
+                    <select
+                      className="input"
+                      style={{ maxWidth: "9rem" }}
+                      value={m.role}
+                      aria-label={`role for ${m.email}`}
+                      disabled={act.isPending}
+                      onChange={(e) => {
+                        // Read the value EAGERLY: the mutation runs async and a controlled select's DOM
+                        // value is restored to `m.role` before then, so a lazy `e.target.value` read
+                        // would send the OLD role.
+                        const role = e.target.value;
+                        act.mutate(() => apiExtra.setMemberRole(org.slug, m.email, role));
+                      }}
+                    >
+                      {ORG_ROLES.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                    <Button size="sm" variant="danger" disabled={act.isPending} onClick={() => act.mutate(() => apiExtra.removeMember(org.slug, m.email))}>
+                      remove
+                    </Button>
+                  </>
+                ) : (
+                  <span className="pill pill-idle">{m.role}</span>
+                )}
               </div>
-              <span className="pill pill-idle">{m.role}</span>
-            </div>
-          ))
+            );
+          })
         )}
-        {/* Add/remove members exists at POST/DELETE /v1/orgs/:slug/members; the write UI
-            arrives with M2's permission-aware surfaces (owner/admin-gated). */}
+        {canManage && !isPersonal && (
+          <form
+            className="item visrow"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const em = newEmail.trim();
+              if (!em) return;
+              act.mutate(async () => {
+                await apiExtra.addMember(org.slug, em, newRole);
+                setNewEmail("");
+              });
+            }}
+          >
+            <input className="input" placeholder="teammate@example.com" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} aria-label="new member email" />
+            <select className="input" style={{ maxWidth: "9rem" }} value={newRole} onChange={(e) => setNewRole(e.target.value)} aria-label="new member role">
+              {ORG_ROLES.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+            <Button size="sm" type="submit" disabled={!newEmail.trim() || act.isPending}>
+              add
+            </Button>
+          </form>
+        )}
+        {isPersonal && canManage && <p className="sub">The personal org can't take members — create a team org to collaborate.</p>}
       </div>
     </div>
   );

@@ -1,6 +1,9 @@
 // Shared workload detail frame: header (name/type/url/owner/org), per-type panels,
 // access (members) and the danger zone. Decomposes the old 270-line WorkloadPage
 // conditional monolith into per-type panel modules.
+//
+// M2: permission gating is server-computed. Every panel reads `d.capabilities` via lib/caps.ts —
+// there is NO client-side owner/role math here anymore.
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useLocation } from "wouter";
@@ -9,7 +12,8 @@ import { ConfirmDialog } from "../../components/ConfirmDialog.tsx";
 import { AddRow, validateEmail } from "../../components/Field.tsx";
 import { TypeBadge } from "../../components/badges.tsx";
 import { useToast } from "../../components/Toast.tsx";
-import { api, orgLabel, type Detail, type Me } from "../../lib/api.ts";
+import { api, orgLabel, type Detail } from "../../lib/api.ts";
+import { cap } from "../../lib/caps.ts";
 import { AppPanels } from "./AppPanels.tsx";
 import { DbPanels } from "./DbPanels.tsx";
 import { BucketPanels } from "./BucketPanels.tsx";
@@ -18,12 +22,10 @@ import { SitePanels } from "./SitePanels.tsx";
 import { MetricsPanel } from "./MetricsPanel.tsx";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
-export function WorkloadFrame({ d, me }: { d: Detail; me: Me }) {
-  // Same rules the old console applied (M2 replaces this with server-computed capabilities):
-  // owner/admin manage secrets + sharing + danger zone; editor+ drives lifecycle.
-  const isOwner = d.owner === me.email || me.admin;
-  const canDeploy = !!me.admin || d.members.some((m) => m.email === me.email && (m.role === "owner" || m.role === "editor"));
-
+export function WorkloadFrame({ d }: { d: Detail }) {
+  // The danger zone (delete/transfer) is a destructive, ownership-tier surface: HIDDEN unless the
+  // actor holds one of those verbs (per the M2 convention).
+  const showDanger = cap(d, "delete") || cap(d, "transfer");
   return (
     <>
       <div className="phead">
@@ -46,25 +48,26 @@ export function WorkloadFrame({ d, me }: { d: Detail; me: Me }) {
         </div>
       </div>
       <div className="panels">
-        {d.type === "site" && <SitePanels d={d} isOwner={isOwner} />}
-        {d.type === "app" && <AppPanels d={d} isOwner={isOwner} canDeploy={canDeploy} />}
-        {d.type === "database" && <DbPanels d={d} isOwner={isOwner} canDeploy={canDeploy} />}
-        {d.type === "bucket" && <BucketPanels d={d} isOwner={isOwner} />}
+        {d.type === "site" && <SitePanels d={d} />}
+        {d.type === "app" && <AppPanels d={d} />}
+        {d.type === "database" && <DbPanels d={d} />}
+        {d.type === "bucket" && <BucketPanels d={d} />}
         {d.type === "cache" && <CachePanels d={d} />}
         {(d.type === "site" || d.type === "app" || d.type === "database") && <MetricsPanel d={d} />}
-        <AccessPanel d={d} isOwner={isOwner} />
-        {isOwner && <DangerPanel d={d} />}
+        <AccessPanel d={d} />
+        {showDanger && <DangerPanel d={d} />}
       </div>
     </>
   );
 }
 
-function AccessPanel({ d, isOwner }: { d: Detail; isOwner: boolean }) {
+function AccessPanel({ d }: { d: Detail }) {
   const act = useWorkloadAction();
+  const canShare = cap(d, "share");
   return (
     <div className="sec">
       <h3>access</h3>
-      {(d.type === "site" || d.type === "app") && <VisibilityRow d={d} isOwner={isOwner} />}
+      {(d.type === "site" || d.type === "app") && <VisibilityRow d={d} />}
       <div className="item">
         <div className="meta">
           <b>{d.owner}</b>
@@ -77,14 +80,14 @@ function AccessPanel({ d, isOwner }: { d: Detail; isOwner: boolean }) {
             <b>{em}</b>
             <div className="sub">collaborator</div>
           </div>
-          {isOwner && (
+          {canShare && (
             <Button size="sm" variant="danger" disabled={act.isPending} onClick={() => act.mutate(() => api.removeCollaborator(d.name, em))}>
               remove
             </Button>
           )}
         </div>
       ))}
-      {isOwner && (
+      {canShare && (
         <AddRow
           placeholder="teammate@example.com"
           cta="share"
@@ -98,15 +101,15 @@ function AccessPanel({ d, isOwner }: { d: Detail; isOwner: boolean }) {
 }
 
 /** Who can view the served workload: public / password (basic-auth) / private. Mirrors the
- *  old console's setVisibility flow; the edge enforces it. Owner-only to change. */
-function VisibilityRow({ d, isOwner }: { d: Detail; isOwner: boolean }) {
+ *  old console's setVisibility flow; the edge enforces it. `configure`-gated to change. */
+function VisibilityRow({ d }: { d: Detail }) {
   const act = useWorkloadAction();
   const [vis, setVis] = useState(d.visibility);
   const [pw, setPw] = useState("");
   // Changing TO password needs a password; already-password keeps the stored one unless retyped.
   const needsPw = vis === "password" && d.visibility !== "password" && !pw;
   const dirty = vis !== d.visibility || (vis === "password" && pw !== "");
-  if (!isOwner) {
+  if (!cap(d, "configure")) {
     return (
       <div className="item">
         <div className="meta">
@@ -154,6 +157,8 @@ function DangerPanel({ d }: { d: Detail }) {
   const toast = useToast();
   const [transferTo, setTransferTo] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const canTransfer = cap(d, "transfer");
+  const canDelete = cap(d, "delete");
 
   const leave = (message: string) => {
     navigate("/");
@@ -167,12 +172,14 @@ function DangerPanel({ d }: { d: Detail }) {
   return (
     <div className="sec">
       <h3>danger</h3>
-      {d.type !== "database" && (
+      {d.type !== "database" && canTransfer && (
         <AddRow placeholder="new-owner@example.com" cta="transfer" validate={validateEmail} onSubmit={(email) => setTransferTo(email)} />
       )}
-      <Button variant="danger" wide disabled={transfer.isPending || del.isPending} onClick={() => setConfirmDelete(true)}>
-        delete {d.type}
-      </Button>
+      {canDelete && (
+        <Button variant="danger" wide disabled={transfer.isPending || del.isPending} onClick={() => setConfirmDelete(true)}>
+          delete {d.type}
+        </Button>
+      )}
 
       <ConfirmDialog
         open={transferTo !== null}

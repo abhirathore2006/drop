@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { can, type Action, type Actor } from "./permissions.ts";
+import { can, capabilitiesFor, ACTIONS, type Action, type Actor } from "./permissions.ts";
 
 const ALL: Action[] = ["read", "publish", "rollback", "configure", "share", "transfer", "delete"];
 const owner: Actor = { email: "o@x.com", platformRole: "member", siteRole: "owner", orgRole: null };
@@ -53,6 +53,47 @@ test("non-member can do nothing", () => {
 
 test("platform admin can do everything regardless of site role", () => {
   for (const a of ALL) expect(can(admin, a)).toBe(true);
+});
+
+// ---- capabilitiesFor (M2): the resolved verb set the console gates on -------------------------
+
+test("capabilitiesFor: owner + admin get the FULL verb set; it stays in ACTIONS order", () => {
+  expect(capabilitiesFor(owner)).toEqual([...ACTIONS]); // site owner can do everything
+  expect(capabilitiesFor(admin)).toEqual([...ACTIONS]); // platform admin too
+});
+
+test("capabilitiesFor: editor is the ship tier (no configure/share/transfer/delete)", () => {
+  expect(capabilitiesFor(editor)).toEqual(["read", "logs", "publish", "deploy", "db:create", "connect", "rollback", "expose"]);
+});
+
+test("capabilitiesFor: viewer is read-only; a non-member gets nothing", () => {
+  expect(capabilitiesFor(viewer)).toEqual(["read"]);
+  expect(capabilitiesFor(stranger)).toEqual([]);
+});
+
+test("capabilitiesFor: exactly matches can() over every action (never drifts)", () => {
+  for (const a of [owner, editor, viewer, stranger, admin]) {
+    const caps = capabilitiesFor(a);
+    for (const verb of ACTIONS) expect(caps.includes(verb)).toBe(can(a, verb));
+  }
+});
+
+test("capabilitiesFor: a service token gets its SCOPE-filtered set, fenced to its own org", () => {
+  const scoped: Actor = {
+    email: "token:ci@acme",
+    platformRole: "member",
+    siteRole: null,
+    orgRole: null,
+    token: { scopes: ["deploy:myapp", "logs"], orgId: "org1", resourceName: "myapp", resourceOrgId: "org1" },
+  };
+  // ACTIONS order → logs before deploy; nothing else the scopes don't grant.
+  expect(capabilitiesFor(scoped)).toEqual(["logs", "deploy"]);
+  // a bare `deploy:otherapp` scope grants nothing on `myapp`
+  const narrow: Actor = { ...scoped, token: { ...scoped.token!, scopes: ["deploy:otherapp"] } };
+  expect(capabilitiesFor(narrow)).toEqual([]);
+  // cross-org (resource's org ≠ token's org) → empty, whatever the scopes say
+  const crossOrg: Actor = { ...scoped, token: { ...scoped.token!, scopes: ["deploy:*", "read:*"], resourceOrgId: "org2" } };
+  expect(capabilitiesFor(crossOrg)).toEqual([]);
 });
 
 test("org role grants org-wide; unions with per-resource grant (broader wins)", () => {
