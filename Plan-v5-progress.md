@@ -56,7 +56,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 33 | F2 AI intent layer | done | e9d498a | off by default; provider-agnostic; sanitized → C2 editor, never executes |
 | 34 | L4 Runtime config / flags | done | a0df77d | app_configs 0018; lazy config-read token; @drop/config etag SDK |
 | 35 | G3 Alerting / notifications | done | ea22630 | events 0017; dedup incidents; org webhooks (Slack adapter); /v1/me badge |
-| 36 | L5 OpenAPI + typed client | todo | | |
-| 37 | B3 GitOps mode | todo | | |
+| 36 | L5 OpenAPI + typed client | done | 5720145 | zod→schema (no dep); /v1/openapi.json; @drop/client; check:openapi CI gate |
+| 37 | B3 GitOps mode | done | 5720145 | pull-only poller; sha256 change-detect; token on row; dry-run-only review |
 | 38 | G4 Searchable log retention | done | 3b0e29c | tail→S3 NDJSON 0020; 7d org-override; grep-grade search; DBs excluded |
 | 39 | M5 Console quality bar | todo | | |
