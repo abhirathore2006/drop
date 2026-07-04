@@ -8,10 +8,11 @@ import { EmptyState } from "../components/EmptyState.tsx";
 import { Skeleton } from "../components/Skeleton.tsx";
 import { Table, type Column } from "../components/Table.tsx";
 import { Tabs } from "../components/Tabs.tsx";
+import { Time } from "../components/Time.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { ActorLabel, TypeBadge } from "../components/badges.tsx";
 import { UsageSummary, WorkloadGrid } from "../components/workloads.tsx";
-import { api, fmtStamp, orgLabel, pathFor, type AdminOrg, type AdminQuotas, type AdminUser, type AuditRecord, type ListItem, type Me } from "../lib/api.ts";
+import { api, orgLabel, pathFor, type AdminOrg, type AdminQuotas, type AdminUser, type AuditRecord, type ListItem, type Me } from "../lib/api.ts";
 import { useDebounced, useDocumentTitle } from "../lib/hooks.ts";
 import { POLL_LIST_MS } from "../lib/query.ts";
 
@@ -377,7 +378,7 @@ function AdminAudit() {
   const entries = q.data?.pages.flatMap((p) => p.entries) ?? [];
 
   const columns: Column<AuditRecord>[] = [
-    { key: "when", header: "when", render: (e) => <span className="muted">{fmtStamp(e.at)}</span> },
+    { key: "when", header: "when", render: (e) => <Time at={e.at} className="muted" /> },
     { key: "actor", header: "actor", render: (e) => <ActorLabel principal={e.actor} /> },
     { key: "action", header: "action", render: (e) => <code>{e.action}</code> },
     { key: "target", header: "target", render: (e) => e.target ?? "—" },
@@ -391,12 +392,13 @@ function AdminAudit() {
         <input placeholder="action, e.g. site.delete" value={action} onChange={(e) => setAction(e.target.value)} />
       </div>
       {q.isError && <div className="err">{q.error.message}</div>}
-      <Table columns={columns} rows={entries} rowKey={(e) => e.id} empty="no audit events" />
-      {q.hasNextPage && (
-        <Button size="sm" loading={q.isFetchingNextPage} onClick={() => void q.fetchNextPage()}>
-          load more
-        </Button>
-      )}
+      <Table
+        columns={columns}
+        rows={entries}
+        rowKey={(e) => e.id}
+        empty="no audit events"
+        loadMore={{ hasMore: !!q.hasNextPage, onLoadMore: () => void q.fetchNextPage(), loading: q.isFetchingNextPage }}
+      />
     </>
   );
 }

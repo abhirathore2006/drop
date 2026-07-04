@@ -4,7 +4,11 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { api, orgLabel, pathFor, shortVersion, type ListItem, type OrgUsage, type WorkloadType } from "../lib/api.ts";
 import { POLL_LIST_MS } from "../lib/query.ts";
+import { metricValues, sparklineArea, sparklinePath } from "../lib/chart-data.ts";
 import { TypeBadge } from "./badges.tsx";
+
+// (M4) Types that see edge traffic — the only cards that carry a request sparkline.
+const TRAFFIC_TYPES = new Set<WorkloadType>(["site", "app", "database"]);
 
 export function Card({ w }: { w: ListItem }) {
   return (
@@ -15,6 +19,7 @@ export function Card({ w }: { w: ListItem }) {
         <TypeBadge t={w.type} />
       </div>
       <div className="card-owner">{w.owner}</div>
+      {TRAFFIC_TYPES.has(w.type) && <CardSparkline name={w.name} />}
       <div className="card-foot">
         {w.org && (
           <span className="card-org" title={`org: ${w.org.slug}`}>
@@ -24,6 +29,30 @@ export function Card({ w }: { w: ListItem }) {
         <span className="ver">{w.current ? shortVersion(w.current) : "—"}</span>
       </div>
     </Link>
+  );
+}
+
+/** (M4) A tiny HAND-ROLLED SVG request sparkline off the 1h series. Deliberately NOT uPlot — that keeps
+ *  uPlot's chunk off the list page entirely (a list can show dozens of cards). Fetched cheaply: long
+ *  staleTime, no polling, no retry; the card just omits the spark on any failure or an empty/flat window. */
+function CardSparkline({ name }: { name: string }) {
+  const q = useQuery({
+    queryKey: ["/v1/sites", name, "metrics", "1h"],
+    queryFn: () => api.metrics(name, "1h"),
+    staleTime: 60_000,
+    retry: false,
+  });
+  const series = q.data?.series;
+  if (!series || series.length < 2) return null;
+  const values = metricValues(series, "requests");
+  if (!values.some((v) => v > 0)) return null; // no traffic → no spark (the number view still tells the story)
+  const W = 148;
+  const H = 22;
+  return (
+    <svg className="card-spark" width={W} height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
+      <path className="card-spark-area" d={sparklineArea(values, W, H)} />
+      <path className="card-spark-line" d={sparklinePath(values, W, H)} fill="none" />
+    </svg>
   );
 }
 

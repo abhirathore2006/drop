@@ -10,8 +10,9 @@ import { KV } from "../../components/Field.tsx";
 import { RevealOnce } from "../../components/RevealOnce.tsx";
 import { StreamHeader } from "../../components/StreamHeader.tsx";
 import { Table } from "../../components/Table.tsx";
+import { Time } from "../../components/Time.tsx";
 import { PhasePill, Pill } from "../../components/badges.tsx";
-import { api, fmtStamp, type Detail, type SqlQueryResult } from "../../lib/api.ts";
+import { api, type Detail, type SqlQueryResult } from "../../lib/api.ts";
 import { cap, denyReason } from "../../lib/caps.ts";
 import { POLL_DETAIL_MS } from "../../lib/query.ts";
 import { deriveStatus } from "../../lib/status.ts";
@@ -249,13 +250,13 @@ function BackupsPanel({ name, canManage }: { name: string; canManage: boolean })
         </Button>
       </div>
       {q.isError && <div className="err">{q.error.message}</div>}
-      <KV label="last success">{fmtStamp(q.data?.lastSuccessAt ?? null)}</KV>
+      <KV label="last success">{q.data?.lastSuccessAt ? <Time at={q.data.lastSuccessAt} /> : "—"}</KV>
       {q.data?.backups.map((b) => (
         <div className="item" key={b.name}>
           <div className="meta">
             <b>{b.name}</b>
             <div className="sub">
-              <PhasePill phase={b.phase} /> {fmtStamp(b.startedAt)}
+              <PhasePill phase={b.phase} /> {b.startedAt ? <Time at={b.startedAt} /> : "—"}
               {b.error ? ` · ${b.error}` : ""}
             </div>
           </div>

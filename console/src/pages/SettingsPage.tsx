@@ -17,7 +17,8 @@ import { Tabs } from "../components/Tabs.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { useOrgsQuery } from "../components/OrgSwitcher.tsx";
 import { apiExtra, TOKEN_VERBS, type CreatedToken, type OrgSummary, type ServiceToken } from "../lib/api-extra.ts";
-import { api, fmtStamp } from "../lib/api.ts";
+import { api } from "../lib/api.ts";
+import { Time } from "../components/Time.tsx";
 import { useDocumentTitle } from "../lib/hooks.ts";
 import { currentOrg, useOrgParam } from "../lib/org.ts";
 
@@ -415,7 +416,7 @@ export function Tokens({ org }: { org: OrgSummary }) {
                   <b>{t.name}</b>
                   <div className="sub">{t.scopes.join(", ")}</div>
                   <div className="sub muted">
-                    last used {fmtStamp(t.lastUsedAt)} · expires {t.expiresAt ? fmtStamp(t.expiresAt) : "never"}
+                    last used {t.lastUsedAt ? <Time at={t.lastUsedAt} /> : "never"} · expires {t.expiresAt ? <Time at={t.expiresAt} /> : "never"}
                   </div>
                 </div>
                 <span className={`pill ${st.cls}`}>{st.label}</span>
@@ -506,7 +507,7 @@ export function Webhooks({ org }: { org: OrgSummary }) {
             <div className="meta">
               <b>{current.url}</b>
               <div className="sub muted">
-                {current.hasSecret ? "signed (secret set)" : "unsigned"} · updated by {current.updatedBy} · {fmtStamp(current.updatedAt)}
+                {current.hasSecret ? "signed (secret set)" : "unsigned"} · updated by {current.updatedBy} · <Time at={current.updatedAt} />
               </div>
             </div>
             <span className="pill pill-ok">active</span>

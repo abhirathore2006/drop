@@ -1769,3 +1769,223 @@ code.reveal {
   color: inherit;
   resize: vertical;
 }
+
+/* ============================================================================
+ * M4 — data-heavy views: metric charts, sparklines, uptime strip, table
+ * virtualization/paging, stack-page composition. All colors go through the
+ * design tokens so both themes stay correct. uPlot's own stylesheet ships in
+ * the lazy Chart chunk (hashed, CSP-safe); these are the app-side wrappers.
+ * ==========================================================================*/
+
+/* ---- metrics panel: range picker + chart grid --------------------------- */
+.metrics-panel .sec-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.range-picker {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.range-btn {
+  appearance: none;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.range-btn:first-child {
+  border-left: 0;
+}
+.range-btn:hover {
+  color: var(--text);
+}
+.range-btn.active {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.range-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 12px 0;
+}
+@media (max-width: 720px) {
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.chart-grid-skel {
+  height: 200px;
+  border-radius: 8px;
+  background: linear-gradient(var(--surface), var(--surface));
+  border: 1px solid var(--border);
+  opacity: 0.5;
+  margin: 12px 0;
+}
+.chart-cell {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  padding: 8px 10px;
+  min-width: 0;
+}
+.chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.chart-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: lowercase;
+}
+.chart-hint {
+  font-size: 12px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.chart {
+  width: 100%;
+  min-height: 88px;
+}
+.chart .u-title,
+.chart .u-legend {
+  display: none;
+}
+.chart-empty {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  min-height: 88px;
+}
+.chart-empty-val {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.metrics-totals {
+  margin-top: 8px;
+}
+
+/* ---- uptime strip: a thin ok/fail timeline ------------------------------ */
+.uptime-strip-wrap {
+  margin: 8px 0 12px;
+}
+.uptime-strip {
+  display: flex;
+  gap: 2px;
+  align-items: flex-end;
+  height: 22px;
+}
+.uptime-cell {
+  flex: 1 1 0;
+  min-width: 2px;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--ok-bg);
+}
+.uptime-cell.ok {
+  background: var(--ok-fg);
+}
+.uptime-cell.fail {
+  background: var(--danger-fg);
+}
+.uptime-caption {
+  margin-top: 4px;
+}
+
+/* ---- workload card sparkline (hand-rolled SVG, no uPlot on the list) ----- */
+.card-spark {
+  display: block;
+  width: 100%;
+  height: 22px;
+  margin: 6px 0 2px;
+}
+.card-spark-line {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.card-spark-area {
+  fill: var(--accent-glow);
+  opacity: 0.5;
+  stroke: none;
+}
+
+/* ---- shared Table: keyset "load more" + virtualization scroll ----------- */
+.tbl-scroll {
+  overflow-y: auto;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.tbl-scroll .tbl thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-translucent);
+  backdrop-filter: blur(4px);
+}
+.tbl-spacer td {
+  padding: 0 !important;
+  border: 0 !important;
+}
+.tbl-more {
+  margin-top: 10px;
+}
+
+/* ---- stack page composition: header actions, E3 slot, node metric chips - */
+.stack-phead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+}
+.stack-phead .downer {
+  flex: 1 1 auto;
+}
+.stack-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+/* E3 slot is an empty placeholder today — reserves the layout position without
+ * drawing anything until the environment picker lands. */
+.env-switcher-slot:empty {
+  display: none;
+}
+.node-metric-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.node-metric-chip .nm-req {
+  color: var(--text-muted);
+}
+.node-metric-chip .nm-err {
+  color: var(--danger-fg);
+}

@@ -5,12 +5,12 @@
 //    filters + keyset paging. Rendered below the events feed for admins.
 import { keepPreviousData, useInfiniteQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Button } from "../components/Button.tsx";
 import { EmptyState } from "../components/EmptyState.tsx";
 import { Table, type Column } from "../components/Table.tsx";
+import { Time } from "../components/Time.tsx";
 import { ActorLabel } from "../components/badges.tsx";
 import { useOrgsQuery } from "../components/OrgSwitcher.tsx";
-import { api, fmtStamp, type AuditRecord, type EventRecord, type Me } from "../lib/api.ts";
+import { api, type AuditRecord, type EventRecord, type Me } from "../lib/api.ts";
 import { useDebounced, useDocumentTitle } from "../lib/hooks.ts";
 import { currentOrg, useOrgParam } from "../lib/org.ts";
 
@@ -53,7 +53,7 @@ function EventFeed({ slug }: { slug: string }) {
   const events = q.data?.pages.flatMap((p) => p.events) ?? [];
 
   const columns: Column<EventRecord>[] = [
-    { key: "when", header: "when", render: (e) => <span className="muted">{fmtStamp(e.createdAt)}</span> },
+    { key: "when", header: "when", render: (e) => <Time at={e.createdAt} className="muted" /> },
     {
       key: "severity",
       header: "severity",
@@ -71,12 +71,13 @@ function EventFeed({ slug }: { slug: string }) {
   return (
     <>
       {q.isError && <div className="err">{q.error.message}</div>}
-      <Table columns={columns} rows={events} rowKey={(e) => e.id} empty="no events yet — deploys, crash-loops, and quota warnings will show here" />
-      {q.hasNextPage && (
-        <Button size="sm" loading={q.isFetchingNextPage} onClick={() => void q.fetchNextPage()}>
-          load more
-        </Button>
-      )}
+      <Table
+        columns={columns}
+        rows={events}
+        rowKey={(e) => e.id}
+        empty="no events yet — deploys, crash-loops, and quota warnings will show here"
+        loadMore={{ hasMore: !!q.hasNextPage, onLoadMore: () => void q.fetchNextPage(), loading: q.isFetchingNextPage }}
+      />
     </>
   );
 }
@@ -103,7 +104,7 @@ function AuditTrail() {
   const entries = q.data?.pages.flatMap((p) => p.entries) ?? [];
 
   const columns: Column<AuditRecord>[] = [
-    { key: "when", header: "when", render: (e) => <span className="muted">{fmtStamp(e.at)}</span> },
+    { key: "when", header: "when", render: (e) => <Time at={e.at} className="muted" /> },
     { key: "actor", header: "actor", render: (e) => <ActorLabel principal={e.actor} /> },
     { key: "action", header: "action", render: (e) => <code>{e.action}</code> },
     { key: "target", header: "target", render: (e) => e.target ?? "—" },
@@ -117,12 +118,13 @@ function AuditTrail() {
         <input placeholder="action, e.g. site.delete" value={action} onChange={(e) => setAction(e.target.value)} />
       </div>
       {q.isError && <div className="err">{q.error.message}</div>}
-      <Table columns={columns} rows={entries} rowKey={(e) => e.id} empty="no audit events" />
-      {q.hasNextPage && (
-        <Button size="sm" loading={q.isFetchingNextPage} onClick={() => void q.fetchNextPage()}>
-          load more
-        </Button>
-      )}
+      <Table
+        columns={columns}
+        rows={entries}
+        rowKey={(e) => e.id}
+        empty="no audit events"
+        loadMore={{ hasMore: !!q.hasNextPage, onLoadMore: () => void q.fetchNextPage(), loading: q.isFetchingNextPage }}
+      />
     </>
   );
 }

@@ -1,6 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Route, Switch, useLocation } from "wouter";
+import { startEventStream } from "./lib/events-stream.ts";
 import { Breadcrumbs } from "./components/Breadcrumbs.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary.tsx";
@@ -62,6 +63,12 @@ function Shell({ me }: { me: Me }) {
       return next;
     });
   };
+
+  // (M4) Open the live event stream once, for the authenticated session. Each pushed G3 event flips the
+  // activity feed / list / canvas via query invalidations; the wrapper degrades to polling if the endpoint
+  // 404s (older API) or on a hard close (re-checking the session). Disposed on sign-out (Shell unmounts).
+  const qc = useQueryClient();
+  useEffect(() => startEventStream(qc), [qc]);
 
   // ⌘K / Ctrl+K opens the palette from anywhere.
   useEffect(() => {

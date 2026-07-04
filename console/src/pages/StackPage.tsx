@@ -3,7 +3,7 @@
 // React.lazy so the rest of the console never pays for it; a resource legend renders the node names
 // immediately (and keeps the page usable before the canvas chunk loads / on unsupported browsers). The
 // ?include_plan overlay surfaces out-of-band drift as a "pending changes" drawer + per-node badges.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Suspense, lazy, useMemo, useState } from "react";
 import { Link } from "wouter";
 import { Button } from "../components/Button.tsx";
@@ -12,7 +12,8 @@ import { ErrorBoundary } from "../components/ErrorBoundary.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { Skeleton } from "../components/Skeleton.tsx";
 import { TypeBadge } from "../components/badges.tsx";
-import { api, orgLabel, stackNodePath, templatePreviewGraph, type GraphPlanStep, type StackGraph, type TemplateSpec } from "../lib/api.ts";
+import { fmtCount } from "../lib/chart-data.ts";
+import { api, orgLabel, stackNodePath, templatePreviewGraph, type GraphNode, type GraphPlanStep, type MetricsTotals, type StackGraph, type TemplateSpec } from "../lib/api.ts";
 import { apiExtra, type DiffBadge, type OutdatedResult, type StackDiff, type UpgradeResult } from "../lib/api-extra.ts";
 import { hasPending, nodeDotClass, pendingByKey } from "../lib/graph.ts";
 import { POLL_DETAIL_MS } from "../lib/query.ts";
@@ -24,6 +25,40 @@ import { StackEditor } from "../canvas/StackEditor.tsx";
 const StackCanvas = lazy(() => import("../canvas/StackCanvas.tsx"));
 
 const ACTION_WORD: Record<GraphPlanStep["action"], string> = { create: "create", update: "update", delete: "delete", noop: "noop" };
+
+// (M4) Traffic-bearing resource kinds — the nodes that get a metric chip.
+const TRAFFIC_TYPES = new Set(["site", "app", "database"]);
+
+/** A 1h requests/errors summary per traffic-bearing, existing node → a `siteName → totals` map. One
+ *  un-polled `metrics` query per node (keyed identically to the detail page, so navigating there is warm).
+ *  Failures/absent series are simply omitted (the chip disappears). */
+function useNodeMetrics(nodes: GraphNode[]): Map<string, MetricsTotals> {
+  const traffic = nodes.filter((n) => n.exists && TRAFFIC_TYPES.has(n.type));
+  const results = useQueries({
+    queries: traffic.map((n) => ({
+      queryKey: ["/v1/sites", n.siteName, "metrics", "1h"],
+      queryFn: () => api.metrics(n.siteName, "1h"),
+      staleTime: 30_000,
+      retry: false,
+    })),
+  });
+  const map = new Map<string, MetricsTotals>();
+  traffic.forEach((n, i) => {
+    const t = results[i]?.data?.totals;
+    if (t) map.set(n.siteName, t);
+  });
+  return map;
+}
+
+/** The compact per-node chip: 1h request count + (only if any) an error count. */
+function MetricChip({ t }: { t: MetricsTotals }) {
+  return (
+    <span className="node-metric-chip" title={`${t.requests} requests · ${t.errors} errors · p95 ${t.p95}ms (1h)`}>
+      <span className="nm-req">{fmtCount(t.requests)}</span>
+      {t.errors > 0 && <span className="nm-err">{fmtCount(t.errors)}✕</span>}
+    </span>
+  );
+}
 
 export function StackPage({ name }: { name: string }) {
   const q = useQuery({
@@ -60,6 +95,11 @@ function StackView({ graph }: { graph: StackGraph }) {
   const [editing, setEditing] = useState(false);
   const [reviewing, setReviewing] = useState(false);
 
+  // (M4) Per-resource metric chips: a 1h requests/errors summary per traffic-bearing node. There is no
+  // batch metrics endpoint (the graph carries none), so this is the sanctioned per-resource 1h summary —
+  // one cheap, un-polled call per site/app/database node, deduped with the detail page's own metrics key.
+  const nodeMetrics = useNodeMetrics(graph.nodes);
+
   // (D2) "update available": compare the stack to its template's latest. A non-template-derived stack 404s
   // (retry off) → the query errors and the banner simply never shows. Polled lazily (no refetch interval).
   const outdatedQ = useQuery<OutdatedResult>({
@@ -93,7 +133,7 @@ function StackView({ graph }: { graph: StackGraph }) {
 
   return (
     <>
-      <div className="phead">
+      <div className="phead stack-phead">
         <div className="dname">
           {graph.name} <span className="badge badge-app">STACK</span>
         </div>
@@ -101,6 +141,10 @@ function StackView({ graph }: { graph: StackGraph }) {
           {graph.org && <span title={`org slug: ${graph.org.slug}`}>org: {orgLabel(graph.org)} · </span>}
           spec v{graph.specVersion} · {graph.nodes.length} resources
           {showPending && <span className="pill pill-warn pending-pill">pending changes</span>}
+        </div>
+        <div className="stack-actions">
+          {/* E3: env switcher — a later slice mounts the environment picker here (dev/staging/prod). */}
+          <span className="env-switcher-slot" data-testid="env-switcher-slot" aria-hidden />
           <Button size="sm" className="stack-edit-btn" onClick={() => setEditing(true)}>
             Edit
           </Button>
@@ -150,6 +194,7 @@ function StackView({ graph }: { graph: StackGraph }) {
               <span className={nodeDotClass(st.status)} aria-label={st.status} />
               <span className="legend-name">{n.key}</span>
               <TypeBadge t={n.type} />
+              {nodeMetrics.get(n.siteName) && <MetricChip t={nodeMetrics.get(n.siteName)!} />}
             </Link>
           );
         })}

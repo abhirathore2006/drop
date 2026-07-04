@@ -214,3 +214,34 @@ describe("StackPage update banner + diff view (D2)", () => {
     expect(r.getByTestId("confirm-upgrade")).toBeTruthy();
   });
 });
+
+// M4 composition smoke: the flagship StackPage composes the canvas + per-resource metric CHIPS + the E3
+// env-switcher SLOT. The chips come from a per-node 1h metrics summary (no batch endpoint exists); this
+// mocks graph + metrics and asserts a chip renders in the legend and the E3 slot is present.
+describe("StackPage composition (M4)", () => {
+  beforeEach(() => {
+    globalThis.fetch = ((input: RequestInfo | URL) => {
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+      const path = raw.split("?")[0]!;
+      if (path.includes("/graph")) return Promise.resolve(json(graph));
+      if (path.endsWith("/metrics")) {
+        // shop-api gets real traffic; the others none — the chip only shows where there is signal.
+        const totals = path.includes("shop-api") ? { requests: 1234, errors: 5, bytesIn: 0, bytesOut: 0, p50: 4, p95: 9 } : { requests: 0, errors: 0, bytesIn: 0, bytesOut: 0, p50: 0, p95: 0 };
+        return Promise.resolve(json({ range: "1h", series: [], totals }));
+      }
+      return Promise.resolve(json({}));
+    }) as unknown as typeof fetch;
+  });
+
+  test("renders a per-resource metric chip and the E3 env-switcher slot", async () => {
+    const r = renderPage();
+    await r.findByText("shop"); // header rendered
+    // the E3 slot placeholder is present (a later slice mounts the picker here)
+    expect(r.getByTestId("env-switcher-slot")).toBeTruthy();
+    // the api node's 1h request count renders as a chip in the legend (1234 → "1.2k")
+    const legend = within(r.container.querySelector(".stack-legend") as HTMLElement);
+    expect(await legend.findByText("1.2k")).toBeTruthy();
+    // and its error count
+    expect(legend.getByText(/5/)).toBeTruthy();
+  });
+});
