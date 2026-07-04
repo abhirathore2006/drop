@@ -40,22 +40,20 @@ for (const t of targets) {
   console.log(`✓ built ${t.out}`);
 }
 
-// Published workspace packages (K2). `@drop/auth` is the first — a zero-runtime-dep ESM library built
-// neutral (usable in Node, edge runtimes, and browser bundles). `node:crypto` (used only by the
-// server-side verifyRequest, via a lazy dynamic import) is kept external so it stays a runtime import
-// and never bundles a Node builtin into a browser graph. "Published" here = built + packable (npm
-// pack), NOT npm-published. Built by `node build.mjs` (no args) and `node build.mjs packages`.
+// Published workspace packages (K2). Zero-runtime-dep ESM libraries built neutral (usable in Node, edge
+// runtimes, and browser bundles). `node:crypto` (used only by @drop/auth's server-side verifyRequest, via
+// a lazy dynamic import) is kept external so it stays a runtime import and never bundles a Node builtin
+// into a browser graph — harmless for packages that don't touch it (@drop/config). "Published" here =
+// built + packable (npm pack), NOT npm-published. Built by `node build.mjs` (no args) / `… packages`.
 if (!only.length || only.includes("packages")) {
-  await build({
-    bundle: true,
-    format: "esm",
-    platform: "neutral",
-    target: "es2022",
-    external: ["node:crypto"],
-    entryPoints: ["packages/auth/src/index.ts"],
-    outfile: "packages/auth/dist/index.js",
-  });
-  console.log("✓ built packages/auth/dist/index.js (@drop/auth)");
+  const pkgs = [
+    { name: "@drop/auth", entry: "packages/auth/src/index.ts", out: "packages/auth/dist/index.js" },
+    { name: "@drop/config", entry: "packages/config/src/index.ts", out: "packages/config/dist/index.js" }, // (L4) runtime-config SDK
+  ];
+  for (const p of pkgs) {
+    await build({ bundle: true, format: "esm", platform: "neutral", target: "es2022", external: ["node:crypto"], entryPoints: [p.entry], outfile: p.out });
+    console.log(`✓ built ${p.out} (${p.name})`);
+  }
 }
 
 // The admin console — a proper Vite app (console/, React + wouter + TanStack Query) built

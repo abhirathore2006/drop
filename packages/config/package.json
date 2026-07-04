@@ -1,0 +1,24 @@
+{
+  "name": "@drop/config",
+  "version": "0.1.0",
+  "description": "App-side SDK for Drop runtime config (L4): polls a per-app non-secret KV with If-None-Match ETag caching and exposes get(key)/getAll()/onChange(). Zero runtime deps.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "node ../../build.mjs packages"
+  }
+}

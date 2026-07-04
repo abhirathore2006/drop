@@ -86,6 +86,25 @@ test("query is a first-class token scope (query:<db> parses + grants like other 
   expect(can(tok, "query")).toBe(true);
 });
 
+test("config.read is a TOKEN-ONLY scope: parses + grants like a verb, but no role grants it (L4)", () => {
+  expect(parseScope("config.read:myapp")).toEqual({ verb: "config.read", resource: "myapp" });
+  expect(parseScope("config.read")).toEqual({ verb: "config.read", resource: "*" });
+  // Longest-verb-first: `config.read` never swallows a `configure:` scope, and vice-versa.
+  expect(parseScope("configure:myapp")).toEqual({ verb: "configure", resource: "myapp" });
+  expect(scopeAllows(["config.read:myapp"], "config.read", "myapp")).toBe(true);
+  expect(scopeAllows(["config.read:myapp"], "config.read", "other")).toBe(false); // scoped to myapp only
+  expect(scopeAllows(["read:myapp"], "config.read", "myapp")).toBe(false); // read doesn't imply config.read
+  // No role grants config.read — it's injected into an app as a service-token scope, never held by a human.
+  expect(can(owner, "config.read")).toBe(false);
+  expect(can(editor, "config.read")).toBe(false);
+  expect(can(viewer, "config.read")).toBe(false);
+  // …but a config-read token can read config on its own app, fenced to its org.
+  const tok: Actor = { email: "token:config-myapp@acme", platformRole: "member", siteRole: null, orgRole: null, token: { scopes: ["config.read:myapp"], orgId: "org1", resourceName: "myapp", resourceOrgId: "org1" } };
+  expect(can(tok, "config.read")).toBe(true);
+  const crossOrg: Actor = { ...tok, token: { ...tok.token!, resourceOrgId: "org2" } };
+  expect(can(crossOrg, "config.read")).toBe(false); // cross-org → deny whatever the scopes say
+});
+
 test("capabilitiesFor: query is present for owner/editor, absent for viewer (I4 console gating)", () => {
   expect(capabilitiesFor(owner)).toContain("query");
   expect(capabilitiesFor(editor)).toContain("query");
@@ -111,7 +130,10 @@ test("platform admin can do everything regardless of site role", () => {
 // ---- capabilitiesFor (M2): the resolved verb set the console gates on -------------------------
 
 test("capabilitiesFor: owner + admin get the FULL verb set; it stays in ACTIONS order", () => {
-  expect(capabilitiesFor(owner)).toEqual([...ACTIONS]); // site owner can do everything
+  // `config.read` (L4) is a TOKEN-ONLY scope — no ROLE grants it, so an owner's resolved set is every verb
+  // EXCEPT config.read (humans read config via ordinary `read`). A platform admin's can() short-circuits,
+  // so it still resolves to the whole set (config.read included).
+  expect(capabilitiesFor(owner)).toEqual(ACTIONS.filter((a) => a !== "config.read")); // site owner can do everything a role grants
   expect(capabilitiesFor(admin)).toEqual([...ACTIONS]); // platform admin too
 });
 

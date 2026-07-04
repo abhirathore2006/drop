@@ -22,6 +22,9 @@ export function AppPanels({ d }: { d: Detail }) {
       <AppPreviewsPanel d={d} />
       {/* Secrets list reads behind `configure` (server-gated) — hide the whole surface without it. */}
       {cap(d, "configure") && <SecretsPanel name={d.name} />}
+      {/* (L4) Runtime config — a NON-SECRET KV shown in plaintext (distinct from the write-only secrets
+          panel above). Same `configure` gate (mutations are configure-gated server-side). */}
+      {cap(d, "configure") && <ConfigPanel name={d.name} />}
       {/* (M3/J3) Interactive shell — gated on `exec` (editor+). A shell can read the app's env, so the
           panel carries a one-time-per-app secrets ack before the first session. */}
       {cap(d, "exec") && <TerminalPanel d={d} />}
@@ -216,6 +219,100 @@ function SecretsPanel({ name }: { name: string }) {
           set/changed secrets apply on the next <b>restart</b>.
         </div>
       )}
+    </div>
+  );
+}
+
+const CONFIG_KEY_RE = /^[A-Za-z_][A-Za-z0-9_.]{0,127}$/;
+
+/** (L4) Runtime config: a per-app NON-SECRET key/value table. Unlike secrets, values are returned and
+ *  shown in PLAINTEXT (the server refuses credential-looking values). Inline add/edit/remove. Only
+ *  rendered when the actor holds `configure` (mutations are configure-gated), so every control is
+ *  unconditionally available here. Exported for the panel's own smoke test. */
+export function ConfigPanel({ name }: { name: string }) {
+  const q = useQuery({ queryKey: ["/v1/apps", name, "config"], queryFn: () => api.listConfig(name) });
+  const act = useWorkloadAction();
+  const [nk, setNk] = useState("");
+  const [nv, setNv] = useState("");
+  const [keyErr, setKeyErr] = useState<string | null>(null);
+  const entries = q.data ? Object.entries(q.data.config) : [];
+
+  const add = () => {
+    if (!nk || !nv) return;
+    if (!CONFIG_KEY_RE.test(nk)) {
+      setKeyErr("keys are env-var-ish (letter/underscore start, then letters, digits, _ or .)");
+      return;
+    }
+    setKeyErr(null);
+    act.mutate(async () => {
+      await api.setConfig(name, nk, nv);
+      setNk("");
+      setNv("");
+    });
+  };
+
+  return (
+    <div className="sec">
+      <h3>config ({entries.length})</h3>
+      {q.isError && <div className="err">{q.error.message}</div>}
+      <div className="sub">
+        runtime key/value — <b>non-secret</b>, shown in plaintext and polled by the app (no restart). Put credentials in the secrets panel above.
+      </div>
+      {entries.length === 0 && <p className="muted">no config — add a key below</p>}
+      {entries.map(([k, v]) => (
+        <ConfigRow key={k} name={name} k={k} v={v} act={act} />
+      ))}
+      <Field error={keyErr}>
+        <form
+          className="secadd"
+          onSubmit={(e) => {
+            e.preventDefault();
+            add();
+          }}
+        >
+          <input
+            aria-label="new config key"
+            placeholder="KEY"
+            value={nk}
+            onChange={(e) => {
+              setNk(e.target.value);
+              if (keyErr) setKeyErr(null);
+            }}
+          />
+          <input aria-label="new config value" placeholder="value" value={nv} onChange={(e) => setNv(e.target.value)} />
+          <Button size="sm" type="submit" disabled={!nk || !nv} loading={act.isPending}>
+            set
+          </Button>
+        </form>
+      </Field>
+    </div>
+  );
+}
+
+/** One config row: KEY + an inline-editable value (saves on Enter/blur when changed) + remove. Keyed by
+ *  the config key upstream, so a value edit re-renders this same instance and the local input persists. */
+function ConfigRow({ name, k, v, act }: { name: string; k: string; v: string; act: ReturnType<typeof useWorkloadAction> }) {
+  const [val, setVal] = useState(v);
+  const save = () => {
+    if (val !== v) act.mutate(() => api.setConfig(name, k, val));
+  };
+  return (
+    <div className="item">
+      <div className="meta">
+        <b>{k}</b>
+        <form
+          className="secadd"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save();
+          }}
+        >
+          <input aria-label={`value for ${k}`} value={val} onChange={(e) => setVal(e.target.value)} onBlur={save} />
+        </form>
+      </div>
+      <Button size="sm" variant="danger" disabled={act.isPending} aria-label={`remove ${k}`} title="delete" onClick={() => act.mutate(() => api.deleteConfig(name, k))}>
+        ✕
+      </Button>
     </div>
   );
 }

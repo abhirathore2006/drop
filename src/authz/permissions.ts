@@ -3,7 +3,13 @@ import type { OrgRole, SiteRole } from "../db/schema.ts";
 // The permission verbs. Kept as a runtime array (not just a type) so the scope grammar (J1) can
 // validate a token's scopes against the SAME source of truth `can()` enforces. `Action` derives
 // from it, so the two can never drift.
-export const ACTIONS = ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "query", "rollback", "configure", "expose", "share", "transfer", "delete"] as const;
+// `config.read` (L4) is a TOKEN-ONLY implicit scope: it exists so the J1 scope grammar accepts
+// `config.read:<app>` for the per-app runtime-config read token Drop injects into an app. No ROLE grants
+// it (it's absent from SITE_MAP/ORG_MAP below) — humans read config via ordinary `read`, so the config
+// GET endpoint authorizes with `read` OR `config.read`. Keeping it in ACTIONS (not the role maps) fences
+// the injected token to config reads ONLY, and lets validateScopes/parseScope/scopeAllows treat it like
+// any other verb. It sorts LAST so `capabilitiesFor` never surfaces it to a human actor.
+export const ACTIONS = ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "query", "rollback", "configure", "expose", "share", "transfer", "delete", "config.read"] as const;
 export type Action = (typeof ACTIONS)[number];
 
 export interface Actor {

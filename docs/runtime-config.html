@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Runtime config &amp; feature flags · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="buckets.html">Buckets (object storage)</a>
+      <a href="cache.html">Cache (managed Valkey)</a>
+      <a href="auth.html">Auth (per-app users)</a>
+      <a href="previews.html">Previews</a>
+      <a href="runtime-config.html" class="active">Runtime config &amp; flags</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <a href="tokens.html">CI tokens (service accounts)</a>
+      <a href="observability.html">Observability</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Runtime config &amp; feature flags</h1>
+<p class="lead">Every config change shouldn't be a redeploy. When you just need to flip a flag or nudge a knob, Drop gives each app a small <strong>runtime key/value store</strong>: <code>drop config set &lt;app&gt; KEY=value</code>, and the app reads the change live. It is deliberately small — a per-app KV, <strong>not</strong> a flag platform (no targeting rules, no percentage rollouts, no environments-within-an-app). Values are <strong>non-secret by definition</strong>; secrets keep going through the write-only <a href="#">secret</a> path.</p>
+
+<div class="note"><span class="lbl">Config vs. secrets — the one distinction that matters</span><p><strong>Config is readable in plaintext</strong> (in the console, over the API, in the SDK). <strong>Secrets are write-only</strong> — set once, injected into the pod, never returned. So put feature flags, tunables, copy, and non-sensitive URLs in config; put API keys, passwords, and tokens in <code>drop secrets set</code>. Drop enforces the line: the config store <strong>refuses credential-looking values</strong> (see below).</p></div>
+
+<h2 id="model">The model</h2>
+<p>A workload of type <code>app</code> owns a flat map of string keys to string values, plus a monotonically-increasing <strong>version</strong> that acts as an ETag. The store lives in the control plane's metastore (<code>app_configs</code>), so it is audited, editable from the console, and needs no schema of yours.</p>
+<ul>
+  <li><strong>Keys</strong> are env-var-ish: a letter or underscore, then letters, digits, <code>_</code> or <code>.</code> (so <code>FEATURE_NEW_UI</code> and <code>feature.newUi</code> both work), up to 128 chars.</li>
+  <li><strong>Values</strong> are plain strings, capped at <strong>4&nbsp;KiB</strong>. Parse them app-side (a <code>"true"</code>/<code>"25"</code>/JSON blob is just a string here).</li>
+  <li><strong>Version</strong> bumps on every <code>set</code>/<code>rm</code> that actually changes something. It's the ETag the SDK polls against — an unchanged poll costs a <code>304</code>.</li>
+</ul>
+
+<h2 id="cli">Setting config from the CLI</h2>
+<pre><code><span class="tok-c"># set / update a key (non-secret)</span>
+$ drop config set billing FEATURE_NEW_UI=true
+  ✓ billing: set FEATURE_NEW_UI (config version 1)
+
+<span class="tok-c"># list an app's config — key, value (plaintext), version</span>
+$ drop config ls billing
+  { "config": { "FEATURE_NEW_UI": "true" }, "version": 1 }
+
+<span class="tok-c"># remove a key</span>
+$ drop config rm billing FEATURE_NEW_UI
+  ✓ billing: removed FEATURE_NEW_UI (config version 2)</code></pre>
+<p>The same three actions live on the app's page in the console as an inline <strong>config table</strong> — add, edit, and remove rows, with values shown in plaintext (a note distinguishes it from the write-only secrets panel just above it). Both surfaces are gated on the <code>configure</code> permission; every mutation is audited (<code>config.set</code> / <code>config.rm</code>).</p>
+
+<div class="note warn"><span class="lbl">Credential-looking values are refused</span><p>If a key <em>looks</em> secret (<code>API_KEY</code>, <code>DB_PASSWORD</code>, <code>STRIPE_SECRET</code>, …) or a value looks like an opaque credential (a long, high-entropy, whitespace-free token), Drop rejects it — client-side <em>and</em> server-side — with:</p>
+<pre><code>✗ looks like a secret — use `drop secrets set` (config values are non-secret and stored in plaintext)</code></pre>
+<p>This reuses the same entropy/keyword heuristic that keeps credentials out of published templates. Prose, URLs, UUIDs, and short tunables pass; opaque tokens don't. If you genuinely have a secret, it belongs in the write-only secret path.</p></div>
+
+<h2 id="sdk">Reading config in your app: <code>@drop/config</code></h2>
+<p>The read path is an HTTP endpoint plus a tiny, dependency-free SDK. <code>@drop/config</code> polls <code>GET&nbsp;/v1/apps/&lt;app&gt;/config</code> with an <code>If-None-Match</code> ETag on an interval (30&nbsp;s by default), caches the map in memory, and fires <code>onChange</code> only when the version advances — so a steady app makes one cheap conditional request every 30&nbsp;s and does nothing until something actually changes.</p>
+<pre><code><span class="tok-c">// zero-config inside a Drop app — DROP_CONFIG_URL + DROP_CONFIG_TOKEN are injected</span>
+import { createConfigClient } from "@drop/config";
+
+const config = createConfigClient();               <span class="tok-c">// polls every 30s</span>
+
+config.get("FEATURE_NEW_UI");                       <span class="tok-c">// "true" | undefined (in-memory, no network)</span>
+config.getAll();                                    <span class="tok-c">// { FEATURE_NEW_UI: "true", … } (a copy)</span>
+
+const off = config.onChange((map, version) =&gt; {    <span class="tok-c">// fires when the version ETag changes</span>
+  console.log("config changed to v" + version, map);
+});
+<span class="tok-c">// off()            — unsubscribe</span>
+<span class="tok-c">// config.refresh() — poll once, now</span>
+<span class="tok-c">// config.stop()    — stop the background poll</span></code></pre>
+<p>Outside a Drop app (a test, a script, a custom runtime) pass what you need explicitly:</p>
+<pre><code>createConfigClient({
+  url:   "https://api.drop.example.com/v1/apps/billing/config",
+  token: "drop_st_…",       <span class="tok-c">// a config.read-scoped token</span>
+  pollMs: 5000,             <span class="tok-c">// override the interval (0 disables the background poll)</span>
+});</code></pre>
+
+<h3 id="injection">The injected environment</h3>
+<p>Apps don't authenticate the read with anything new. On your <strong>first</strong> <code>drop config set</code> for an app, Drop lazily mints a per-app read token — an ordinary <a href="tokens.html">service token</a> whose <em>only</em> scope is an implicit <code>config.read:&lt;app&gt;</code> — and injects two values into the app's write-only secret:</p>
+<table class="tbl">
+<thead><tr><th>Env var</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><code>DROP_CONFIG_URL</code></td><td>The endpoint <code>@drop/config</code> polls (<code>&lt;api&gt;/v1/apps/&lt;app&gt;/config</code>).</td></tr>
+<tr><td><code>DROP_CONFIG_TOKEN</code></td><td>A read-only, config-scoped bearer token — it can read <em>this</em> app's config and nothing else.</td></tr>
+</tbody>
+</table>
+<p>Because they're injected via the secret path, they land in the pod on its <strong>next restart or deploy</strong> (like any secret). After that first pickup, config changes are hot — the SDK polls; no restart is needed. Minting is lazy (an app that never uses config never gets a token) and idempotent (subsequent sets don't re-mint). The token read scope is <code>config.read</code> only, so it can never read your app's metadata, secrets, or logs.</p>
+
+<h2 id="alternative">When to use this — and when a table in your database is fine</h2>
+<p>Honestly: if your app already has a <a href="#">managed database</a>, a <code>settings</code> table in it is a perfectly good place for runtime config, and you may not need this at all. Reach for Drop's runtime config when you want:</p>
+<ul>
+  <li><strong>Audit</strong> — every change is recorded (<code>config.set</code>/<code>config.rm</code>) with who and when, in the same trail as the rest of your platform activity.</li>
+  <li><strong>Console editing</strong> — a non-developer (or you, without a psql session) can flip a flag from the app's page.</li>
+  <li><strong>No schema</strong> — nothing to migrate, and it works for apps with no database at all.</li>
+  <li><strong>Live reads</strong> — the ETag-polling SDK gives you change notifications without wiring up your own.</li>
+</ul>
+<p>If instead you want row-level structure, transactions with the rest of your data, or very high write rates, use your database. This KV is for the small, cross-cutting knobs — not your application's data model.</p>
+
+<div class="note"><span class="lbl">Not a flag platform</span><p>There is deliberately no per-user targeting, no percentage rollout, and no A/B bucketing here — that scope belongs to a dedicated experimentation tool. Drop's runtime config is the 20% that removes the redeploy tax on the other 80% of "I just need to change one value" moments.</p></div>
+
+<p class="crumbs" style="margin-top:2rem">See also: <a href="tokens.html">CI tokens</a> (the scoped-token machinery this reuses) · <a href="roles-visibility.html">Roles &amp; Visibility</a> (the <code>configure</code> permission) · <a href="configuration.html">Configuration (drop.yaml)</a> (build-time config, secrets).</p>
+  </article></main>
+</div>
+</body>
+</html>
