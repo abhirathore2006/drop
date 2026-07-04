@@ -162,7 +162,9 @@ function DetailRoute({ name, type }: { name: string; type: WorkloadType }) {
 
 export function App() {
   const expired = useSyncExternalStore(sessionExpiry.subscribe, sessionExpiry.getSnapshot, sessionExpiry.getSnapshot);
-  const meQ = useQuery({ queryKey: ["/v1/me"], queryFn: api.me, retry: false, staleTime: Infinity });
+  // (G3) Poll /v1/me so the sidebar's unread-events badge (me.unresolvedEvents) stays fresh; the
+  // response is tiny and the poll pauses on hidden tabs (query.ts sets refetchIntervalInBackground:false).
+  const meQ = useQuery({ queryKey: ["/v1/me"], queryFn: api.me, retry: false, staleTime: 20_000, refetchInterval: 30_000 });
   const [loc, navigate] = useLocation();
   const me = meQ.data;
 

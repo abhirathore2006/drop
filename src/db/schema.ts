@@ -292,6 +292,50 @@ export interface UptimeChecksTable {
   status: number;
 }
 
+export type EventSeverity = "info" | "warning" | "error";
+
+/** (G3) A per-org alerting/notification incident. bigserial `id` (returned as a string by the pg
+ *  driver) is monotonic → it doubles as the keyset-pagination cursor, exactly like `audit_log`.
+ *  `site_name` is nullable (org-level events like a quota warning have no site) and NOT FK-bound — an
+ *  incident may name a resource that's since been deleted (kept for the post-mortem); org-delete
+ *  cascades clean it up. `resolved_at` NULL marks an OPEN incident; the store keeps at most one open row
+ *  per (org, site_name, kind) — a repeat emit bumps `detail.count` + `created_at` instead of inserting. */
+export interface EventsTable {
+  id: Generated<string>;
+  org_id: string;
+  site_name: string | null;
+  kind: string; // crashloop | deploy_failed | stack_halted | quota | preview_expiring
+  severity: ColumnType<EventSeverity, EventSeverity, EventSeverity>;
+  title: string;
+  detail: ColumnType<Record<string, unknown> | null, string | null, string | null>; // jsonb; `count` accrues here on dedup
+  created_at: Ts; // written from the store's injectable clock (the column also has a now() default)
+  resolved_at: Ts | null; // null = OPEN; set on recovery/resolve
+}
+
+/** (G3) One outbound webhook per org (a Slack/Teams incoming-webhook URL, or any endpoint). `secret`
+ *  (nullable) HMAC-SHA256-signs the delivery (`X-Drop-Signature: sha256=…`) when set. */
+export interface EventWebhooksTable {
+  org_id: string;
+  url: string;
+  secret: string | null;
+  updated_by: string;
+  updated_at: Ts; // written from the store's injectable clock (the column also has a now() default)
+}
+
+/** (L4) A per-app, NON-SECRET runtime key/value entry. `value` is size-capped and refused if it looks
+ *  like a credential (the D1 heuristic) — secrets live in the write-only secret path, not here. `version`
+ *  is the per-app monotonic ETag stamp: each set/rm stamps the mutated (or a surviving) row with the next
+ *  value, so MAX(version) over an app's rows is the ETag `GET /v1/apps/:name/config` answers `If-None-Match`
+ *  against. PK (app, key); `app` cascades on the owning app's delete. */
+export interface AppConfigsTable {
+  app: string;
+  key: string;
+  value: string;
+  version: ColumnType<number, number | undefined, number>;
+  updated_by: string;
+  updated_at: Generated<Ts>;
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -314,4 +358,7 @@ export interface Database {
   tunnel_tickets: TunnelTicketsTable;
   traffic_minutes: TrafficMinutesTable;
   uptime_checks: UptimeChecksTable;
+  events: EventsTable;
+  event_webhooks: EventWebhooksTable;
+  app_configs: AppConfigsTable;
 }

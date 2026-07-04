@@ -59,6 +59,8 @@ import { normalizeStatus } from "./status.ts";
 import { MetricsStore } from "../metrics/store.ts";
 import { aggregateSeries, parseRange, rangeWindowMs, summarizeUptime, formatPrometheus } from "../metrics/aggregate.ts";
 import type { AuditStore, AuditEntry } from "../audit/store.ts";
+import { EventStore, type EmitInput } from "../events/store.ts";
+import { AppConfigStore, ConfigValidationError } from "../appconfig/store.ts";
 
 export interface Deps {
   cfg: Config;
@@ -82,6 +84,8 @@ export interface Deps {
   previews?: PreviewStore; // (E1) preview registry (previews); defaults over `db`
   tickets?: TunnelTicketStore; // (A3) db:proxy single-use tunnel tickets; defaults over `db`. Share ONE instance with the tunnel upgrade handler (bin/api.ts) so issuance + redemption hit the same table.
   metrics?: MetricsStore; // (G2/G2b) edge traffic + uptime rollups; defaults over `db`
+  events?: EventStore; // (G3) alerting/notifications event feed + org webhook delivery; defaults over `db`. Share ONE instance with the crash-loop/preview sweeps (bin/api.ts) so emit/resolve/webhook all hit the same delivery path.
+  appConfigs?: AppConfigStore; // (L4) per-app NON-SECRET runtime config KV (app_configs); defaults over `db`
   authEngine?: AuthEngine; // (K1) the managed-auth engine port; defaults to GoTrue pinned via cfg.authEngineImage
   // (K1) The transport the user-admin proxy uses to reach the in-cluster auth engine's admin API. Tests
   // inject a fake (routes through the FakeEngine's records); prod defaults to an in-cluster fetch. Absent
@@ -110,9 +114,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const quotas = d.quotas ?? new QuotaStore(d.db); // (item 10) per-org quota overrides
   const tcp = d.tcp ?? new TcpEndpointStore(d.db); // (A2b) TCP exposure registry
   const tokens = d.tokens ?? new ServiceTokenStore(d.db); // (J1) service accounts / scoped CI tokens
+  const appConfigs = d.appConfigs ?? new AppConfigStore(d.db); // (L4) per-app runtime config KV
   const previews = d.previews ?? new PreviewStore(d.db); // (E1) preview registry
   const tickets = d.tickets ?? new TunnelTicketStore(d.db, now, d.cfg.tunnelTicketTtlMs); // (A3) db:proxy tunnel tickets
   const metrics = d.metrics ?? new MetricsStore(d.db); // (G2/G2b) edge traffic + uptime rollups
+  const events = d.events ?? new EventStore(d.db); // (G3) alerting/notifications feed + org webhook delivery
   // (I4) SQL-console executor. Default: the real pg connector reading the `<db>-app` creds via the kube
   // client (the same secret-read mechanism as the app binding). It is only ever CALLED in-cluster — the
   // query route 501s when out-of-cluster (or when compute is off, via resolveDb) BEFORE invoking it — so
@@ -297,6 +303,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // the CREATE path passes through here — re-deploys of an existing workload don't claim a new name.
     const cap = await quotas.resolvedMaxWorkloads(org.id, d.cfg.maxWorkloadsPerOrg);
     if (cap > 0 && (await d.meta.countSitesInOrg(org.id)) >= cap) {
+      await emitEvent({ orgId: org.id, kind: "quota", severity: "warning", title: `workload cap reached (${cap})`, detail: { cap, reason: "workloads" } }); // throttled via dedup (one open quota incident per org)
       return { err: c.json({ error: `workload cap reached for this org (${cap}) — delete one or ask an admin to raise the limit` }, 429) };
     }
     return { org };
@@ -329,6 +336,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const cur = await orgStorageUsage(orgId, ns);
     const total = cur.dbBytes + cur.bucketBytes + cur.cacheBytes + addBytes;
     if (total > budget) {
+      await emitEvent({ orgId, kind: "quota", severity: "warning", title: "storage budget exceeded", detail: { budget, wouldUse: total, reason: "storage" } }); // throttled via dedup
       return `org storage budget exceeded: ${total} bytes would be used > ${budget} byte budget (databases ${cur.dbBytes} + buckets ${cur.bucketBytes} + caches ${cur.cacheBytes} + new ${addBytes})`;
     }
     return null;
@@ -479,6 +487,12 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // not 500 a delete/transfer/etc. Awaited (not fire-and-forget) so the trail is ordered + the
   // record is durable before we respond — the only swallowed outcome is the write itself failing.
   const audit = (e: AuditEntry) => d.audit.record(e).catch((err) => console.error(`audit ${e.action} (${e.target ?? "-"}):`, (err as Error).message));
+  // (G3) Emit an alerting event WITHOUT ever failing the action it records — same best-effort posture as
+  // `audit`. Thin one-liner at the deploy-fail / stack-halt / quota emit points; the store dedups + fires
+  // the org webhook (fire-and-forget) internally.
+  const emitEvent = (e: EmitInput) => events.emit(e).catch((err) => console.error(`event ${e.kind} (${e.siteName ?? e.orgId}):`, (err as Error).message));
+  // (G3) Close an open incident on recovery (a successful redeploy / stack up) — same best-effort posture.
+  const resolveEvent = (siteName: string, kind: string) => events.resolve(siteName, kind).catch((err) => console.error(`event resolve ${kind} (${siteName}):`, (err as Error).message));
   // Resolve a resource's owning org to a display shape ({slug,name,kind}) for the console/CLI, or null.
   const orgOf = async (orgId: string | null) => {
     if (!orgId) return null;
@@ -577,7 +591,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.get("/v1/me", async (c) => {
     const email = c.get("identity").email;
     await ensureUser(email); // ensure the personal org exists on first console/CLI touch
-    return c.json({ email, admin: await isPlatformAdmin(email) });
+    // (G3) The frame's unread badge folds in here (the lighter option vs a dedicated poll) — one cheap
+    // indexed COUNT of OPEN incidents across every org the caller belongs to, org-context-independent so
+    // the badge is correct whatever org the switcher is on (including "all orgs").
+    return c.json({ email, admin: await isPlatformAdmin(email), unresolvedEvents: await events.countUnresolvedForUser(email) });
   });
 
   // ---- organisations (logical resource grouping + org-level permissions) ----
@@ -660,6 +677,62 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       quota, // { hard, used } | null
       storage,
     });
+  });
+
+  // ---- (G3) org events feed — a keyset page of the org's alerting incidents (any member) ----
+  // `?unresolved=1` returns just the OPEN incident count (a light poll); otherwise a newest-first page.
+  app.get("/v1/orgs/:slug/events", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email); // member or platform admin
+    if ("err" in r) return r.err;
+    if (c.req.query("unresolved") === "1") return c.json({ count: await events.countUnresolved(r.org.id) });
+    const cursor = c.req.query("cursor") || undefined;
+    const limit = Math.min(Number(c.req.query("limit") ?? "50") || 50, 500);
+    return c.json(await events.list(r.org.id, { cursor, limit }));
+  });
+
+  // ---- (G3) per-org outbound webhook (Slack/Teams incoming-webhook URL, or any endpoint) ----
+  // GET (owner/admin): the current config with the secret MASKED (never returned). POST: set/replace it
+  // (audited `org.webhook.set`). DELETE: remove it.
+  app.get("/v1/orgs/:slug/webhook", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    if (!canManageOrg(r.role, r.platformRole)) return c.json({ error: "owner/admin only" }, 403);
+    const wh = await events.getWebhook(r.org.id);
+    return c.json({ webhook: wh ? { url: wh.url, hasSecret: !!wh.secret, updatedBy: wh.updatedBy, updatedAt: wh.updatedAt } : null });
+  });
+
+  app.post("/v1/orgs/:slug/webhook", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    if (!canManageOrg(r.role, r.platformRole)) return c.json({ error: "owner/admin only" }, 403);
+    const body = (await c.req.json().catch(() => ({}))) as { url?: unknown; secret?: unknown };
+    const url = typeof body.url === "string" ? body.url.trim() : "";
+    // Only http(s) — a webhook is an outbound POST; anything else (file:, etc.) is rejected out of hand.
+    let ok = false;
+    try {
+      const u = new URL(url);
+      ok = u.protocol === "https:" || u.protocol === "http:";
+    } catch {
+      ok = false;
+    }
+    if (!ok) return c.json({ error: "url must be a valid http(s) URL" }, 400);
+    const secret = typeof body.secret === "string" && body.secret.length ? body.secret : null;
+    await events.setWebhook(r.org.id, url, secret, email);
+    await audit({ actor: email, action: "org.webhook.set", target: r.org.slug, targetType: "org", orgId: r.org.id, detail: { host: new URL(url).host, signed: !!secret } });
+    return c.json({ webhook: { url, hasSecret: !!secret, updatedBy: email } });
+  });
+
+  app.delete("/v1/orgs/:slug/webhook", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    if (!canManageOrg(r.role, r.platformRole)) return c.json({ error: "owner/admin only" }, 403);
+    await events.deleteWebhook(r.org.id);
+    await audit({ actor: email, action: "org.webhook.remove", target: r.org.slug, targetType: "org", orgId: r.org.id });
+    return c.json({ removed: true });
   });
 
   app.post("/v1/orgs/:slug/members", async (c) => {
@@ -1211,9 +1284,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     if (result.halt) {
       await audit({ actor: email, action: "app.release.failed", target: name, targetType: "app", orgId: theSite.orgId, detail: { reason: result.reason, version: verId } });
+      if (theSite.orgId) await emitEvent({ orgId: theSite.orgId, siteName: name, kind: "deploy_failed", severity: "error", title: `deploy failed: ${name}`, detail: { reason: result.reason, version: verId } });
       // The old version keeps serving; return the release logs so the failure is diagnosable inline.
       return c.json({ error: `release command failed (${result.reason}) — the previous version keeps serving`, releaseLogs: (result.logs ?? "").slice(-4000) }, 422);
     }
+    await resolveEvent(name, "deploy_failed"); // recovery: a clean deploy closes any open deploy-failed incident
     return c.json({ url: siteUrl(name), name, version: verId, image: appCfg.image, started: !result.stopped });
   });
 
@@ -1326,6 +1401,90 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await d.meta.deleteSecretKey(r.site.name, key);
     await d.secrets.ensureBinding(scope, (await d.meta.listSecretKeys(r.site.name)).map((k) => k.key));
     return c.json({ key, deleted: true });
+  });
+
+  // ---- app runtime config (L4): a per-app, NON-SECRET key/value store (flip a flag without a redeploy) ----
+  // Read: `GET .../config` returns the map + an ETag `version`; supports `If-None-Match` → 304. It's served
+  // to the APP itself (via an injected per-app read token — a J1 service token whose ONLY scope is the
+  // token-only `config.read:<name>` verb) AND to the console/CLI (a session or a person's token) — so the
+  // GET authorizes with `read` OR `config.read`. Mutations are `configure`-gated + audited. The config
+  // token is minted LAZILY on the FIRST `config set` (not at deploy — see ensureConfigToken).
+  const CONFIG_TOKEN_KEY = "DROP_CONFIG_TOKEN";
+  const CONFIG_URL_KEY = "DROP_CONFIG_URL";
+  const configEtag = (version: number) => `W/"${version}"`;
+  const ifNoneMatchVersion = (raw: string | undefined): number | null => {
+    if (!raw) return null;
+    const m = /(\d+)/.exec(raw); // the client echoes back `W/"<version>"`; pull the integer
+    return m ? Number(m[1]) : null;
+  };
+
+  // Lazily provision the app's config-read token on the first `config set`. Idempotent: the token's secret
+  // is injected as DROP_CONFIG_TOKEN, so if that key is already in the app's secret registry we've minted
+  // before and do nothing. Deliberately NOT done in the deploy handler (that's off-limits + we want the
+  // token only for apps that actually use config). Writes DROP_CONFIG_TOKEN (the J1 secret, scope
+  // `config.read:<name>`) + DROP_CONFIG_URL (the endpoint the @drop/config SDK polls) into the app's
+  // write-only secret via the SAME path bindings use — no deploy-handler change. They land in the pod on
+  // the app's NEXT restart/deploy (envFrom Secrets are read at pod start); thereafter config changes are
+  // hot (the SDK polls, no restart). An app in the org-migration window (no orgId) can't scope a token, so
+  // the mint is skipped (console/CLI still work via session; the SDK just has no injected token).
+  const ensureConfigToken = async (site: Site, actorEmail: string): Promise<void> => {
+    if (!site.orgId) return;
+    const keys = await d.meta.listSecretKeys(site.name);
+    if (keys.some((k) => k.key === CONFIG_TOKEN_KEY)) return; // already minted
+    const { token } = await tokens.create(site.orgId, `config-${site.name}`, [`config.read:${site.name}`], null, actorEmail);
+    const scope = { owner: site.owner, app: site.name, namespace: site.namespace };
+    const url = `${d.cfg.publicUrl}/v1/apps/${site.name}/config`;
+    for (const [k, v] of [[CONFIG_TOKEN_KEY, token], [CONFIG_URL_KEY, url]] as [string, string][]) {
+      await d.secrets.setSecret(scope, k, v);
+      await d.meta.upsertSecretKey(site.name, k, fingerprint(v), actorEmail);
+    }
+    await d.secrets.ensureBinding(scope, (await d.meta.listSecretKeys(site.name)).map((k) => k.key));
+    await audit({ actor: actorEmail, action: "config.token.mint", target: site.name, targetType: "app", orgId: site.orgId, detail: { scope: `config.read:${site.name}` } });
+  };
+
+  app.get("/v1/apps/:name/config", async (c) => {
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such app" }, 404);
+    if (site.type !== "app") return c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409);
+    // Accept BOTH principals: a person/session with `read`, and the injected app token with `config.read`.
+    const actor = await actorFor(c.get("identity"), site);
+    if (!can(actor, "read") && !can(actor, "config.read")) return c.json({ error: "not permitted" }, 403);
+    const snap = await appConfigs.get(name);
+    const etag = configEtag(snap.version);
+    if (ifNoneMatchVersion(c.req.header("if-none-match")) === snap.version) {
+      return c.body(null, 304, { ETag: etag, "Cache-Control": "no-cache" }); // unchanged → cheap poll
+    }
+    return c.json({ config: snap.map, version: snap.version }, 200, { ETag: etag, "Cache-Control": "no-cache" });
+  });
+
+  app.put("/v1/apps/:name/config/:key", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const r = await resolveAppForSecrets(c); // resolves the app + gates on `configure` (same tier as secrets)
+    if ("err" in r) return r.err;
+    const key = c.req.param("key");
+    const body = (await c.req.json().catch(() => ({}))) as { value?: unknown };
+    if (typeof body.value !== "string") return c.json({ error: "value required (string)" }, 400);
+    let snap: { map: Record<string, string>; version: number };
+    try {
+      snap = await appConfigs.set(r.site.name, key, body.value, r.email);
+    } catch (e) {
+      if (e instanceof ConfigValidationError) return c.json({ error: e.message }, 400); // bad key / too large / looks like a secret
+      throw e;
+    }
+    await ensureConfigToken(r.site, r.email); // lazy-mint the per-app read token on the first set
+    await audit({ actor: r.email, action: "config.set", target: r.site.name, targetType: "app", orgId: r.site.orgId, detail: { key } });
+    return c.json({ key, value: body.value, version: snap.version }, 200, { ETag: configEtag(snap.version) });
+  });
+
+  app.delete("/v1/apps/:name/config/:key", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const r = await resolveAppForSecrets(c);
+    if ("err" in r) return r.err;
+    const key = c.req.param("key");
+    const snap = await appConfigs.rm(r.site.name, key);
+    await audit({ actor: r.email, action: "config.rm", target: r.site.name, targetType: "app", orgId: r.site.orgId, detail: { key } });
+    return c.json({ key, deleted: true, version: snap.version }, 200, { ETag: configEtag(snap.version) });
   });
 
   // ---- app lifecycle: restart / stop (true-offline) / start (editor+; operational) ----
@@ -3304,11 +3463,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       detail: { applied: outcome.applied.map((s) => ({ action: s.action, key: s.key })), prune, failed: outcome.failure?.step.key ?? null, ...(args.auditDetail ?? {}) },
     });
     if (outcome.failure) {
+      // Keyed on the STACK name (not a step) so a later successful `up` resolves it symmetrically.
+      await emitEvent({ orgId: org.id, siteName: name, kind: "stack_halted", severity: "error", title: `stack up halted: ${name}`, detail: { stack: name, step: outcome.failure.step.key, error: outcome.failure.error } });
       return {
         status: 500,
         body: { error: `stack up halted at "${outcome.failure.step.key}": ${outcome.failure.error}`, stack: name, applied: outcome.applied, failedStep: outcome.failure.step, plan, needs, outputs },
       };
     }
+    await resolveEvent(name, "stack_halted"); // recovery: a clean reconcile closes any open halt incident
     return { status: 200, body: { stack: name, org: org.slug, specVersion: outcome.newVersion, plan, applied: outcome.applied, needs, outputs } };
   };
 

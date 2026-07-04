@@ -3253,3 +3253,130 @@ test("(E2) a non-owner cannot create or remove an app preview (deploy-gated)", a
   expect((await call(app, "DELETE", "/v1/sites/web/previews/pr1", "bob")).status).toBe(403);
   await db.destroy();
 });
+
+// ---- (L4) runtime config / feature flags ------------------------------------------------------
+
+test("(L4) config set/get: stores non-secret KV, returns map + ETag; If-None-Match → 304", async () => {
+  const { app, db } = await mk();
+  expect((await call(app, "POST", "/v1/apps/cfgapp", "alice", { image: "x:1" })).status).toBe(200);
+
+  // set two keys
+  expect((await call(app, "PUT", "/v1/apps/cfgapp/config/FEATURE_X", "alice", { value: "on" })).status).toBe(200);
+  const put2 = await call(app, "PUT", "/v1/apps/cfgapp/config/THEME", "alice", { value: "dark" });
+  expect(put2.status).toBe(200);
+  expect((await put2.json()).version).toBe(2); // ETag bumps per mutation
+
+  // get returns the map + version + a weak ETag header
+  const g = await call(app, "GET", "/v1/apps/cfgapp/config", "alice");
+  expect(g.status).toBe(200);
+  const body = await g.json();
+  expect(body).toEqual({ config: { FEATURE_X: "on", THEME: "dark" }, version: 2 });
+  const etag = g.headers.get("etag");
+  expect(etag).toBe('W/"2"');
+
+  // If-None-Match with the current ETag → 304 (unchanged), no body change
+  const notMod = await app.request("/v1/apps/cfgapp/config", { headers: { authorization: "Bearer alice", "if-none-match": etag! } });
+  expect(notMod.status).toBe(304);
+
+  // a stale ETag → 200 with the current map
+  const stale = await app.request("/v1/apps/cfgapp/config", { headers: { authorization: "Bearer alice", "if-none-match": 'W/"1"' } });
+  expect(stale.status).toBe(200);
+  await db.destroy();
+});
+
+test("(L4) config: credential-looking values are REFUSED (400) — steered to the secret path", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/cfgapp", "alice", { image: "x:1" });
+  // secret-y KEY name
+  const r1 = await call(app, "PUT", "/v1/apps/cfgapp/config/API_KEY", "alice", { value: "whatever" });
+  expect(r1.status).toBe(400);
+  expect((await r1.json()).error).toMatch(/drop secrets set/);
+  // high-entropy VALUE under a benign key
+  const r2 = await call(app, "PUT", "/v1/apps/cfgapp/config/BLOB", "alice", { value: "9aF3kQ2mZ7pL1xR8vT4wYbN6cD0eG5hJ7tWq" });
+  expect(r2.status).toBe(400);
+  // nothing was stored
+  expect((await (await call(app, "GET", "/v1/apps/cfgapp/config", "alice")).json()).config).toEqual({});
+  // an oversized value is rejected too
+  const big = await call(app, "PUT", "/v1/apps/cfgapp/config/BIG", "alice", { value: "x".repeat(5000) });
+  expect(big.status).toBe(400);
+  await db.destroy();
+});
+
+test("(L4) config authz: mutations are configure-gated; a viewer reads but cannot set; both audited", async () => {
+  const { app, audit, db } = await mk();
+  await call(app, "POST", "/v1/apps/cfgapp", "alice", { image: "x:1" });
+  await call(app, "POST", "/v1/sites/cfgapp/collaborators", "alice", { email: "bob@example.com", role: "viewer" });
+
+  // a viewer can READ config (read verb) but cannot SET it (configure)
+  await call(app, "PUT", "/v1/apps/cfgapp/config/K", "alice", { value: "v" });
+  expect((await call(app, "GET", "/v1/apps/cfgapp/config", "bob")).status).toBe(200);
+  expect((await call(app, "PUT", "/v1/apps/cfgapp/config/K", "bob", { value: "v2" })).status).toBe(403);
+  expect((await call(app, "DELETE", "/v1/apps/cfgapp/config/K", "bob")).status).toBe(403);
+
+  // set + rm are audited
+  expect((await call(app, "DELETE", "/v1/apps/cfgapp/config/K", "alice")).status).toBe(200);
+  expect((await audit.list({ action: "config.set", target: "cfgapp" })).entries.length).toBeGreaterThan(0);
+  expect((await audit.list({ action: "config.rm", target: "cfgapp" })).entries.length).toBeGreaterThan(0);
+  await db.destroy();
+});
+
+test("(L4) first config set LAZILY mints the app read token (config.read scope) + injects DROP_CONFIG_*", async () => {
+  const { app, meta, secrets, tokens, db } = await mk();
+  await call(app, "POST", "/v1/apps/cfgapp", "alice", { image: "x:1" });
+  const site = (await meta.getSitePlain("cfgapp"))!;
+
+  await call(app, "PUT", "/v1/apps/cfgapp/config/FEATURE_X", "alice", { value: "on" });
+  // the injected env landed in the write-only secret store (not a response/log)
+  const bag = secrets.values.get(`${site.namespace}/cfgapp`)!;
+  expect(bag.get("DROP_CONFIG_TOKEN")).toMatch(/^drop_st_/);
+  expect(bag.get("DROP_CONFIG_URL")).toContain("/v1/apps/cfgapp/config");
+  // …and is registered as secret keys so the ESO/kube binding syncs it
+  const keyNames = (await meta.listSecretKeys("cfgapp")).map((k) => k.key);
+  expect(keyNames).toContain("DROP_CONFIG_TOKEN");
+  expect(keyNames).toContain("DROP_CONFIG_URL");
+  // a config-scoped service token exists in the app's org
+  const orgTokens = await tokens.list(site.orgId!);
+  const cfgTok = orgTokens.find((t) => t.name === "config-cfgapp");
+  expect(cfgTok).toBeTruthy();
+  expect(cfgTok!.scopes).toEqual(["config.read:cfgapp"]);
+
+  // a SECOND set does NOT mint a new token (idempotent)
+  await call(app, "PUT", "/v1/apps/cfgapp/config/THEME", "alice", { value: "dark" });
+  expect((await tokens.list(site.orgId!)).filter((t) => t.name === "config-cfgapp")).toHaveLength(1);
+  await db.destroy();
+});
+
+test("(L4) the injected app token authenticates a config GET — fenced to its own app", async () => {
+  const { app, meta, tokens, db } = await mk();
+  await call(app, "POST", "/v1/apps/cfgapp", "alice", { image: "x:1" });
+  await call(app, "POST", "/v1/apps/other", "alice", { image: "x:1" });
+  await call(app, "PUT", "/v1/apps/cfgapp/config/FEATURE_X", "alice", { value: "on" });
+  const site = (await meta.getSitePlain("cfgapp"))!;
+
+  // mint a config.read token exactly like the server does lazily, and use it as the app would
+  const { token } = await tokens.create(site.orgId!, "config-cfgapp", ["config.read:cfgapp"], null, "alice@example.com");
+  const asApp = await call(app, "GET", "/v1/apps/cfgapp/config", token);
+  expect(asApp.status).toBe(200);
+  expect((await asApp.json()).config).toEqual({ FEATURE_X: "on" });
+
+  // the token is scoped to cfgapp only — it cannot read another app's config, nor mutate its own
+  expect((await call(app, "GET", "/v1/apps/other/config", token)).status).toBe(403);
+  expect((await call(app, "PUT", "/v1/apps/cfgapp/config/K", token, { value: "v" })).status).toBe(403);
+  await db.destroy();
+});
+
+test("(L4) config: 404 for a missing app, 409 for a non-app, 501 mutate without compute", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "staticsite", await tgz({ "index.html": "x" })); // a site, not an app
+  expect((await call(app, "GET", "/v1/apps/nope/config", "alice")).status).toBe(404);
+  expect((await call(app, "GET", "/v1/apps/staticsite/config", "alice")).status).toBe(409);
+
+  const db2 = await makeTestDb();
+  const users = new UserStore(db2);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  const noKube = createApp({ cfg, meta: new MetaStore(db2), blob: new FakeBlob(), db: db2, users, verifier, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs: new OrgStore(db2), audit: new AuditStore(db2) }); // no kube
+  expect((await call(noKube, "PUT", "/v1/apps/x/config/K", "alice", { value: "v" })).status).toBe(501);
+  await db.destroy();
+  await db2.destroy();
+});

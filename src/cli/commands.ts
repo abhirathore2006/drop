@@ -19,6 +19,7 @@ import { parseStackConfig } from "../stack-config.ts";
 import { rbacSeedSql } from "../auth-resource/rbac-seed.ts";
 import { CONFIG_FILE_YAML } from "../site-config.ts";
 import { validateName } from "../names.ts";
+import { validateConfigKey, looksLikeSecret } from "../appconfig/validate.ts";
 import { VERSION } from "../version.ts";
 
 async function session(): Promise<Session> {
@@ -65,6 +66,36 @@ function parseExpiryDays(s: string): number {
   const days = n * mult;
   if (days <= 0 || days > 3650) throw new Error("--expires out of range (1–3650 days)");
   return days;
+}
+
+/** (G3) One row of the org events feed (as returned by GET /v1/orgs/:slug/events). */
+interface EventRow {
+  id: string;
+  siteName: string | null;
+  kind: string;
+  severity: string;
+  title: string;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+/** (G3) Parse a "recent window" duration (`30m`, `24h`, `7d`, or a bare hour count) → milliseconds. */
+function parseSinceMs(s: string): number {
+  const m = /^(\d+)\s*(m|h|d)?$/i.exec(s.trim());
+  if (!m) throw new Error(`invalid --since "${s}" — use e.g. 30m, 24h, 7d`);
+  const n = parseInt(m[1]!, 10);
+  const unit = (m[2] ?? "h").toLowerCase();
+  const mult = unit === "m" ? 60_000 : unit === "d" ? 86_400_000 : 3_600_000;
+  return n * mult;
+}
+
+/** (G3) The caller's personal org slug — the default org for `drop events` / `drop org webhook` when
+ *  `--org` is omitted (personal is listed first by GET /v1/orgs). */
+async function personalOrgSlug(c: Client): Promise<string> {
+  const { orgs } = (await c.listOrgs()) as { orgs: { slug: string; kind: string }[] };
+  const personal = orgs.find((o) => o.kind === "personal") ?? orgs[0];
+  if (!personal) throw new Error("no organisation found for your account");
+  return personal.slug;
 }
 
 async function readStdin(): Promise<string> {
@@ -172,6 +203,38 @@ export function buildProgram(): Command {
     .description("Show the saved config and the resolved API URL")
     .action(async () => {
       show({ configured: await loadConfig(), resolvedApi: await resolveApiBase(program.opts()) });
+    });
+
+  // (L4) App RUNTIME config — a per-app NON-SECRET key/value store (flip a flag without a redeploy). Lives
+  // under `drop config` alongside the CLI-config subcommands above (set-api/show); `set/ls/rm` take an app.
+  // Values are non-secret: the CLI refuses credential-looking keys/values up front (the server refuses too)
+  // and steers them to `drop secrets set`. The first `set` mints an injected read token server-side so the
+  // @drop/config SDK can poll — picked up on the app's next restart/deploy.
+  config
+    .command("set <app> <pair>")
+    .description("Set an app runtime-config value: KEY=value (NON-SECRET — use `drop secrets set` for credentials)")
+    .action(async (app: string, pair: string) => {
+      const eq = pair.indexOf("=");
+      if (eq <= 0) throw new Error(`expected KEY=value, got "${pair}"`);
+      const key = pair.slice(0, eq);
+      const value = pair.slice(eq + 1);
+      const keyErr = validateConfigKey(key);
+      if (keyErr) throw new Error(keyErr);
+      const secretErr = looksLikeSecret(key, value);
+      if (secretErr) throw new Error(`${key} ${secretErr}`);
+      const res = (await (await client()).configSet(app, key, value)) as { version: number };
+      console.log(`✓ ${app}: set ${key} (config version ${res.version})`);
+    });
+  config
+    .command("ls <app>")
+    .description("List an app's runtime config (key/value + version; non-secret, shown in plaintext)")
+    .action(async (app: string) => show(await (await client()).configList(app)));
+  config
+    .command("rm <app> <key>")
+    .description("Remove an app runtime-config key")
+    .action(async (app: string, key: string) => {
+      const res = (await (await client()).configRemove(app, key)) as { version: number };
+      console.log(`✓ ${app}: removed ${key} (config version ${res.version})`);
     });
 
   // Update the CLI itself — re-runs the installer recorded in config at install time (installUrl),
@@ -905,6 +968,57 @@ export function buildProgram(): Command {
     .description("Add/update a member (owner|admin|member|viewer; default member)")
     .action(async (slug: string, email: string, role?: string) => show(await (await client()).addOrgMember(slug, email, role)));
   org.command("rm <slug> <email>").description("Remove a member").action(async (slug: string, email: string) => show(await (await client()).removeOrgMember(slug, email)));
+
+  // ---- (G3) per-org outbound webhook (Slack/Teams incoming-webhook URL, or any endpoint) ----
+  // `--org` defaults to your personal org; a Slack `hooks.slack.com` URL gets a Slack-formatted `{text}`
+  // body, everyone else the generic event JSON. `--secret` HMAC-signs deliveries (X-Drop-Signature).
+  const webhook = org.command("webhook").description("Manage the org's outbound events webhook (Slack/Teams/any URL)");
+  webhook
+    .command("set <url>")
+    .description("Set (or replace) the org's events webhook. Point it at a Slack/Teams incoming-webhook URL.")
+    .option("--org <slug>", "the organisation (default: your personal org)")
+    .option("--secret <secret>", "HMAC-SHA256 signing secret (sent as X-Drop-Signature: sha256=…)")
+    .action(async (url: string, opts: { org?: string; secret?: string }) => {
+      const c = await client();
+      const slug = opts.org ?? (await personalOrgSlug(c));
+      show(await c.setWebhook(slug, url, opts.secret));
+    });
+  webhook
+    .command("show")
+    .description("Show the org's current webhook (the signing secret is never returned)")
+    .option("--org <slug>", "the organisation (default: your personal org)")
+    .action(async (opts: { org?: string }) => {
+      const c = await client();
+      show(await c.getWebhook(opts.org ?? (await personalOrgSlug(c))));
+    });
+  webhook
+    .command("rm")
+    .description("Remove the org's events webhook")
+    .option("--org <slug>", "the organisation (default: your personal org)")
+    .action(async (opts: { org?: string }) => {
+      const c = await client();
+      show(await c.removeWebhook(opts.org ?? (await personalOrgSlug(c))));
+    });
+
+  // (G3) `drop events` — the recent org events feed (crash-loops, deploy/stack failures, quota warnings).
+  // `--since` filters client-side to a recent window (e.g. 24h, 7d); `--org` defaults to your personal org.
+  program
+    .command("events")
+    .description("List recent org events (crash-loops, deploy/stack failures, quota warnings, preview-expiry)")
+    .option("--org <slug>", "the organisation (default: your personal org)")
+    .option("--since <dur>", "only events newer than this (e.g. 30m, 24h, 7d)")
+    .option("--limit <n>", "page size (default 50)", (v) => parseInt(v, 10))
+    .action(async (opts: { org?: string; since?: string; limit?: number }) => {
+      const c = await client();
+      const slug = opts.org ?? (await personalOrgSlug(c));
+      const res = (await c.listEvents(slug, { limit: opts.limit })) as { events: EventRow[]; nextCursor?: string };
+      let rows = res.events;
+      if (opts.since) {
+        const cutoff = Date.now() - parseSinceMs(opts.since);
+        rows = rows.filter((e) => new Date(e.createdAt).getTime() >= cutoff);
+      }
+      show({ events: rows, ...(res.nextCursor ? { nextCursor: res.nextCursor } : {}) });
+    });
 
   // ---- service accounts / scoped CI tokens (J1) ----
   const token = program.command("token").description("Manage service-account / CI tokens (scoped, org-owned bearer credentials)");

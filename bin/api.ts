@@ -14,6 +14,8 @@ import { TunnelTicketStore } from "../src/tokens/tunnel-tickets.ts";
 import { PreviewStore } from "../src/previews/store.ts";
 import { MetricsStore } from "../src/metrics/store.ts";
 import { UptimePoller } from "../src/metrics/uptime.ts";
+import { EventStore } from "../src/events/store.ts";
+import { diffCrashLoops, type AppStatusSnapshot } from "../src/events/crashloop.ts";
 import { createDbTunnelHandler, writeHttpError } from "../src/api/db-tunnel.ts";
 import { createExecHandler } from "../src/api/exec-bridge.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
@@ -104,10 +106,11 @@ const tokens = new ServiceTokenStore(db); // (J1) service accounts / scoped CI t
 const previews = new PreviewStore(db); // (E1) preview registry
 const tickets = new TunnelTicketStore(db, undefined, cfg.tunnelTicketTtlMs); // (A3) db:proxy tunnel tickets — ONE instance shared by issuance (createApp) + redemption (the upgrade handler below)
 const metrics = new MetricsStore(db); // (G2/G2b) edge traffic + uptime rollups — read by the API routes/Prometheus, written by the poller + swept below
+const events = new EventStore(db); // (G3) alerting/notifications feed + org webhook delivery — emitted from the API routes AND the sweeps below (crash-loop, preview-expiring); ONE instance shared so all emits hit the same webhook path
 // Accept `Authorization: Bearer drop_st_…` alongside human logins. TokenVerifier goes FIRST in the
 // chain; it returns null for any non-service token so session/Google verification still runs after it.
 verifier = new ChainVerifier([new TokenVerifier(tokens, orgs), verifier]);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens, previews, tickets, metrics });
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens, previews, tickets, metrics, events });
 const server = serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });
@@ -175,8 +178,17 @@ setInterval(() => {
     .then(async (expired) => {
       let appN = 0;
       for (const p of expired) {
-        if (p.kind !== "app" || !kube) continue; // site previews are pointer-only; app previews need kube to tear down
         const parent = await meta.getSitePlain(p.siteName).catch(() => null); // parent still exists (FK cascade would have removed the row otherwise)
+        // (G3) Warn BEFORE reaping a preview that was actively in use — an expiring preview that saw edge
+        // traffic in the last hour is worth an `info` heads-up (its host is `<site>--<label>`). Best-effort,
+        // dedup'd to one open notice per (org, site). Chosen over the "emit unconditionally for previews >1h"
+        // fallback: the traffic cross-check is a cheap LIMIT-1 probe, so we can afford the accurate signal.
+        if (parent?.orgId) {
+          const host = `${p.siteName}--${p.label}`;
+          const used = await meta.hadTrafficSince(host, new Date(sweepNow.getTime() - 60 * 60 * 1000)).catch(() => false);
+          if (used) void events.emit({ orgId: parent.orgId, siteName: p.siteName, kind: "preview_expiring", severity: "info", title: `preview expiring with traffic: ${host}`, detail: { label: p.label, host, kind: p.kind } }).catch((e) => console.error("preview_expiring emit:", (e as Error).message));
+        }
+        if (p.kind !== "app" || !kube) continue; // site previews are pointer-only; app previews need kube to tear down
         const ns = parent?.namespace;
         if (!ns) continue;
         appN++;
@@ -191,22 +203,65 @@ setInterval(() => {
   // (A3) Reap spent/expired tunnel tickets on the same tick — they're tiny + 60s-lived, but unredeemed
   // ones would otherwise accumulate. Same posture as the preview sweep: best-effort, unaudited, never throws.
   tickets.deleteExpired(new Date()).catch((e) => console.error("tunnel-ticket sweep failed:", (e as Error).message));
-  // (G2/G2b) Retention sweep — drop traffic_minutes + uptime_checks older than the retention window
-  // (default 30d). Same best-effort posture; a range delete over the `minute` index, not a table scan.
-  //
-  // G3: crash-loop history is deliberately NOT persisted in v1. The plan considered recording per-sweep
-  // restart-count deltas here (listNamespaceAppStatuses per active namespace), but that's N cluster
-  // calls/sweep for a history table that doesn't exist yet (the G3 `events` table). Current restart
-  // COUNTS already surface live on the app-status + graph endpoints (appStatus.restarts), so v1 keeps
-  // it honest: no persisted crash-loop timeline. When G3 lands, the restart-delta detection + event
-  // emit go RIGHT HERE (bounded to namespaces with running apps, ≤1/min, skipped when compute is off).
+  // (G2/G2b/G3) Retention sweep — drop traffic_minutes + uptime_checks + events older than the retention
+  // window (default 30d). Same best-effort posture; a range delete over the `minute`/`created_at` index,
+  // not a table scan. Events are cheap and valuable for a post-mortem, so they ride the same 30d window;
+  // an actively-flapping incident keeps a fresh created_at (dedup bumps it) so only truly-stale rows go.
   const cutoff = new Date(Date.now() - cfg.metricsRetentionDays * 24 * 60 * 60 * 1000);
   metrics
     .sweepTraffic(cutoff)
     .then((n) => n > 0 && console.log(`traffic sweep: removed ${n} row(s) older than ${cfg.metricsRetentionDays}d`))
     .catch((e) => console.error("traffic sweep failed:", (e as Error).message));
   metrics.sweepUptime(cutoff).catch((e) => console.error("uptime sweep failed:", (e as Error).message));
+  events.sweep(cutoff).catch((e) => console.error("events sweep failed:", (e as Error).message));
+  // (G3) Crash-loop detection — the formalization the plan assigned jointly to G2/G3. RIGHT HERE, as the
+  // old G3 marker promised: per active namespace read live app statuses (restart counts + reason), diff
+  // the restart counts against the PREVIOUS sweep (bounded state — `crashPrev` is rebuilt from each
+  // sweep, so it can't grow unbounded), and emit `crashloop` (error) on a new crash-loop / `resolve` on
+  // recovery. Skipped entirely when compute is off (no kube). Best-effort; a cluster read error on one
+  // namespace logs + is skipped, never crashing the loop.
+  if (kube) void detectCrashLoops(kube).catch((e) => console.error("crash-loop sweep failed:", (e as Error).message));
 }, cfg.previewSweepIntervalMs).unref();
+
+// (G3) Previous-sweep restart counts, keyed by app name. Rebuilt each sweep from the CURRENT snapshot
+// (diffCrashLoops returns the next map), so it stays bounded to apps seen this tick.
+let crashPrev = new Map<string, number>();
+async function detectCrashLoops(k: KubeClient): Promise<void> {
+  const apps = await meta.listAppsForCrashScan(); // running apps + their namespace/org
+  if (apps.length === 0) {
+    crashPrev = new Map();
+    return;
+  }
+  // One namespace-wide status read per DISTINCT namespace (bounded), then match the apps we own.
+  const byNs = new Map<string, { name: string; orgId: string }[]>();
+  for (const a of apps) {
+    const list = byNs.get(a.namespace) ?? [];
+    list.push({ name: a.name, orgId: a.orgId });
+    byNs.set(a.namespace, list);
+  }
+  const snapshots: AppStatusSnapshot[] = [];
+  for (const [ns, list] of byNs) {
+    const statuses = await k.listNamespaceAppStatuses(ns).catch((e) => {
+      console.error(`crash-loop: listNamespaceAppStatuses ${ns}:`, (e as Error).message);
+      return {} as Record<string, { replicas: number; ready: number; restarts: number; reason: string }>;
+    });
+    for (const { name, orgId } of list) {
+      const s = statuses[name];
+      if (!s) continue; // no live Deployment (e.g. a cron/schedule app has none) — nothing to diff
+      snapshots.push({ name, orgId, restarts: s.restarts, ready: s.ready, replicas: s.replicas, reason: s.reason });
+    }
+  }
+  const { emit, resolve, next } = diffCrashLoops(crashPrev, snapshots);
+  crashPrev = next;
+  for (const s of emit) {
+    await events
+      .emit({ orgId: s.orgId, siteName: s.name, kind: "crashloop", severity: "error", title: `crash-loop: ${s.name}`, detail: { restarts: s.restarts, reason: s.reason, ready: s.ready, replicas: s.replicas } })
+      .catch((e) => console.error(`crashloop emit ${s.name}:`, (e as Error).message));
+  }
+  for (const s of resolve) {
+    await events.resolve(s.name, "crashloop").catch((e) => console.error(`crashloop resolve ${s.name}:`, (e as Error).message));
+  }
+}
 
 // (G2b) Synthetic uptime poller — probes each qualifying workload on its own interval (default 60s)
 // and records the outcome into `uptime_checks`. HTTP probes (sites/apps) go through the EDGE

@@ -61,6 +61,9 @@ export function Sidebar({ me, collapsed, onToggleCollapse, mobileOpen, onCloseMo
         <nav className="sidebar-nav">
           {items.map((n) => {
             const on = n.match(loc);
+            // (G3) The activity item carries the unread badge — OPEN warning/error incidents across the
+            // caller's orgs (from /v1/me). Shown as a count pill; on the collapsed rail it's a dot.
+            const badge = n.href === "/activity" ? (me.unresolvedEvents ?? 0) : 0;
             return (
               <Link
                 key={n.href}
@@ -68,12 +71,18 @@ export function Sidebar({ me, collapsed, onToggleCollapse, mobileOpen, onCloseMo
                 onClick={onCloseMobile}
                 className={`sidebar-link${on ? " on" : ""}`}
                 aria-current={on ? "page" : undefined}
-                title={n.label}
+                title={badge > 0 ? `${n.label} (${badge} unresolved)` : n.label}
               >
                 <span className="sidebar-glyph" aria-hidden="true">
                   {n.glyph}
+                  {badge > 0 && <span className="sidebar-badge-dot" aria-hidden="true" />}
                 </span>
                 <span className="sidebar-link-text">{n.label}</span>
+                {badge > 0 && (
+                  <span className="sidebar-badge" aria-label={`${badge} unresolved events`}>
+                    {badge > 99 ? "99+" : badge}
+                  </span>
+                )}
               </Link>
             );
           })}

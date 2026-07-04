@@ -21,7 +21,8 @@ export type Capability =
   | "expose"
   | "share"
   | "transfer"
-  | "delete";
+  | "delete"
+  | "config.read"; // (L4) token-only implicit scope for the injected app config-read token; never held by a human
 
 export class ApiError extends Error {
   readonly status: number;
@@ -35,6 +36,28 @@ export class ApiError extends Error {
 export interface Me {
   email: string;
   admin: boolean;
+  unresolvedEvents?: number; // (G3) OPEN warning/error incidents across the caller's orgs — the frame's unread badge
+}
+
+/** (G3) One row of the org events feed. `resolvedAt` non-null = a closed/recovered incident. */
+export interface EventRecord {
+  id: string;
+  orgId: string;
+  siteName: string | null;
+  kind: string; // crashloop | deploy_failed | stack_halted | quota | preview_expiring
+  severity: "info" | "warning" | "error";
+  title: string;
+  detail: Record<string, unknown> | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+/** (G3) The org's outbound webhook config as returned by GET /v1/orgs/:slug/webhook (secret masked). */
+export interface WebhookConfig {
+  url: string;
+  hasSecret: boolean;
+  updatedBy: string;
+  updatedAt: string;
 }
 
 export interface AdminUser {
@@ -228,6 +251,12 @@ export interface SecretMeta {
   fingerprint: string;
   updatedBy: string;
   updatedAt: string;
+}
+/** (L4) An app's runtime config: a NON-SECRET key/value map + its version ETag. Distinct from secrets —
+ *  values are returned + shown in plaintext (the server refuses credential-looking values). */
+export interface RuntimeConfig {
+  config: Record<string, string>;
+  version: number;
 }
 /** (A2b) A workload's TCP (L4) exposure state, present on the detail response iff it's exposed. */
 export interface TcpExposure {
@@ -476,10 +505,19 @@ export const api = {
   setAdminOrgQuotas: (slug: string, quotas: Record<string, string>) =>
     req<{ org: string; set: Record<string, string> }>("PUT", `/v1/admin/orgs/${encodeURIComponent(slug)}/quotas`, { quotas }),
   orgUsage: (slug: string) => req<OrgUsage>("GET", `/v1/orgs/${encodeURIComponent(slug)}/usage`),
+  // (G3) alerting / notifications — the org events feed (any member) + the outbound webhook (owner/admin)
+  orgEvents: (slug: string, cursor?: string) => req<{ events: EventRecord[]; nextCursor?: string }>("GET", `/v1/orgs/${encodeURIComponent(slug)}/events${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
+  orgWebhook: (slug: string) => req<{ webhook: WebhookConfig | null }>("GET", `/v1/orgs/${encodeURIComponent(slug)}/webhook`),
+  setOrgWebhook: (slug: string, url: string, secret?: string) => req<{ webhook: WebhookConfig }>("POST", `/v1/orgs/${encodeURIComponent(slug)}/webhook`, { url, ...(secret ? { secret } : {}) }),
+  removeOrgWebhook: (slug: string) => req<{ removed: boolean }>("DELETE", `/v1/orgs/${encodeURIComponent(slug)}/webhook`),
   // app secrets (write-only) + lifecycle
   listSecrets: (name: string) => req<{ secrets: SecretMeta[] }>("GET", `/v1/apps/${name}/secrets`),
   setSecret: (name: string, key: string, value: string) => req("PUT", `/v1/apps/${name}/secrets/${encodeURIComponent(key)}`, { value }),
   deleteSecret: (name: string, key: string) => req("DELETE", `/v1/apps/${name}/secrets/${encodeURIComponent(key)}`),
+  // (L4) app runtime config — NON-SECRET key/value; values are returned + shown in plaintext.
+  listConfig: (name: string) => req<RuntimeConfig>("GET", `/v1/apps/${name}/config`),
+  setConfig: (name: string, key: string, value: string) => req<{ key: string; value: string; version: number }>("PUT", `/v1/apps/${name}/config/${encodeURIComponent(key)}`, { value }),
+  deleteConfig: (name: string, key: string) => req<{ key: string; deleted: boolean; version: number }>("DELETE", `/v1/apps/${name}/config/${encodeURIComponent(key)}`),
   restartApp: (name: string) => req("POST", `/v1/apps/${name}/restart`, {}),
   stopApp: (name: string) => req("POST", `/v1/apps/${name}/stop`, {}),
   startApp: (name: string) => req("POST", `/v1/apps/${name}/start`, {}),

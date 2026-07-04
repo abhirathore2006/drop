@@ -416,4 +416,27 @@ export class MetaStore {
       };
     });
   }
+
+  /** (G3) Whether a serving host had ANY edge traffic since `since` — used by the preview sweep to warn
+   *  (emit `preview_expiring`) before reaping a preview that was actively in use. The traffic collector
+   *  keys on the resolved HOST label, which for a preview is `<site>--<label>` (not FK-bound to a site).
+   *  A cheap existence probe (LIMIT 1 over the `minute` index), not a sum. */
+  async hadTrafficSince(host: string, since: Date): Promise<boolean> {
+    const r = await this.db.selectFrom("traffic_minutes").select("site_name").where("site_name", "=", host).where("minute", ">=", since).limit(1).executeTakeFirst();
+    return !!r;
+  }
+
+  /** (G3) Every RUNNING app with a resolved namespace — the crash-loop sweep's enumeration. Bounded to
+   *  container workloads (`type='app'`) that are meant to be up (runtime_state='running'); the sweep
+   *  groups these by namespace, reads live restart deltas, and emits/resolves crash-loop events. */
+  async listAppsForCrashScan(): Promise<{ name: string; namespace: string; orgId: string }[]> {
+    const rows = await this.db
+      .selectFrom("sites")
+      .innerJoin("organisations", "organisations.id", "sites.org_id")
+      .select(["sites.name as name", "organisations.namespace as ns", "sites.org_id as org_id"])
+      .where("sites.type", "=", "app")
+      .where("sites.runtime_state", "=", "running")
+      .execute();
+    return rows.map((r) => ({ name: r.name as string, namespace: r.ns as string, orgId: r.org_id as string }));
+  }
 }

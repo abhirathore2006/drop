@@ -978,6 +978,43 @@ code.reveal {
   outline-offset: -1px;
 }
 
+/* (G3) unread-events badge on the activity nav item — a count pill when expanded, a dot when collapsed */
+.sidebar-glyph {
+  position: relative;
+}
+.sidebar-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  border-radius: 9px;
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border: 1px solid var(--danger-border);
+}
+.shell.collapsed .sidebar-badge {
+  display: none;
+}
+.sidebar-badge-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger-fg);
+  display: none;
+}
+.shell.collapsed .sidebar-badge-dot {
+  display: block;
+}
+
 .sidebar-collapse {
   display: flex;
   align-items: center;

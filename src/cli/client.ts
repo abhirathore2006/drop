@@ -118,6 +118,23 @@ export class Client {
   revokeToken(slug: string, id: string) {
     return this.req("DELETE", `/v1/orgs/${slug}/tokens/${encodeURIComponent(id)}`);
   }
+  // (G3) alerting / notifications — the org events feed + the outbound webhook config
+  listEvents(slug: string, opts: { cursor?: string; limit?: number } = {}) {
+    const q = new URLSearchParams();
+    if (opts.cursor) q.set("cursor", opts.cursor);
+    if (opts.limit != null) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return this.req("GET", `/v1/orgs/${slug}/events${qs ? `?${qs}` : ""}`);
+  }
+  getWebhook(slug: string) {
+    return this.req("GET", `/v1/orgs/${slug}/webhook`);
+  }
+  setWebhook(slug: string, url: string, secret?: string) {
+    return this.req("POST", `/v1/orgs/${slug}/webhook`, { contentType: "application/json", body: JSON.stringify({ url, ...(secret ? { secret } : {}) }) });
+  }
+  removeWebhook(slug: string) {
+    return this.req("DELETE", `/v1/orgs/${slug}/webhook`);
+  }
   dbPassword(name: string, password?: string, setSecret?: { app: string; key: string }, show?: boolean) {
     return this.req("POST", `/v1/databases/${name}/password`, {
       contentType: "application/json",
@@ -204,6 +221,20 @@ export class Client {
   }
   deleteSecret(app: string, key: string) {
     return this.req("DELETE", `/v1/apps/${app}/secrets/${encodeURIComponent(key)}`);
+  }
+  // (L4) app runtime config — a NON-SECRET key/value store. `configSet` triggers the lazy per-app
+  // read-token mint server-side; the CLI just calls PUT. `configList` returns `{config, version}`.
+  configSet(app: string, key: string, value: string) {
+    return this.req("PUT", `/v1/apps/${app}/config/${encodeURIComponent(key)}`, {
+      contentType: "application/json",
+      body: JSON.stringify({ value }),
+    });
+  }
+  configList(app: string) {
+    return this.req("GET", `/v1/apps/${app}/config`);
+  }
+  configRemove(app: string, key: string) {
+    return this.req("DELETE", `/v1/apps/${app}/config/${encodeURIComponent(key)}`);
   }
   restartApp(app: string) {
     return this.req("POST", `/v1/apps/${app}/restart`);

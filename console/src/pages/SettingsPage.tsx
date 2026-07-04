@@ -5,7 +5,7 @@
 // J1: the Tokens tab — service-account / scoped CI tokens (create with a scope builder,
 //     RevealOnce the secret, last-used, revoke; owner/admin-gated) — implemented below.
 // G3: the Webhooks tab — per-org outbound webhook (Slack/Teams incoming-webhook URL) for
-//     the events feed — lands with G3.
+//     the events feed (set/replace/remove URL + optional signing secret; owner/admin-gated).
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Button } from "../components/Button.tsx";
@@ -58,7 +58,7 @@ export function SettingsPage() {
         active={tab}
         onChange={setTab}
       />
-      {tab === "members" ? <Members org={org} /> : tab === "usage" ? <Usage org={org} /> : tab === "tokens" ? <Tokens org={org} /> : <WebhooksStub />}
+      {tab === "members" ? <Members org={org} /> : tab === "usage" ? <Usage org={org} /> : tab === "tokens" ? <Tokens org={org} /> : <Webhooks org={org} />}
     </section>
   );
 }
@@ -444,7 +444,116 @@ export function Tokens({ org }: { org: OrgSummary }) {
   );
 }
 
-function WebhooksStub() {
-  // G3: outbound org webhook for the events feed.
-  return <EmptyState title="Webhooks arrive with events.">A per-org outbound webhook (point it at a Slack or Teams incoming URL) lands with the G3 events feed.</EmptyState>;
+// G3: the per-org outbound events webhook. Owner/admin-gated (mirrors the server's canManageOrg). Point
+// it at a Slack/Teams incoming-webhook URL (or any endpoint) — Slack hosts get a `{text}` body, everyone
+// else the generic event JSON; an optional signing secret HMAC-signs each delivery (X-Drop-Signature).
+export function Webhooks({ org }: { org: OrgSummary }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const canManage = org.role === "owner" || org.role === "admin";
+  const q = useQuery({ queryKey: ["/v1/orgs", org.slug, "webhook"], queryFn: () => api.orgWebhook(org.slug), enabled: canManage, staleTime: 15_000 });
+
+  const [url, setUrl] = useState("");
+  const [secret, setSecret] = useState("");
+  const [removing, setRemoving] = useState(false);
+
+  const save = useMutation({
+    mutationFn: () => api.setOrgWebhook(org.slug, url.trim(), secret.trim() || undefined),
+    onSuccess: async () => {
+      toast.success("webhook saved");
+      setUrl("");
+      setSecret("");
+      await qc.invalidateQueries({ queryKey: ["/v1/orgs", org.slug, "webhook"] });
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+
+  const remove = useMutation({
+    mutationFn: () => api.removeOrgWebhook(org.slug),
+    onSuccess: async () => {
+      toast.success("webhook removed");
+      setRemoving(false);
+      await qc.invalidateQueries({ queryKey: ["/v1/orgs", org.slug, "webhook"] });
+    },
+    onError: (e) => {
+      toast.error((e as Error).message);
+      setRemoving(false);
+    },
+  });
+
+  if (!canManage) {
+    return <EmptyState title="Owner/admin only.">Only an org owner or admin can configure the outbound events webhook.</EmptyState>;
+  }
+
+  const current = q.data?.webhook ?? null;
+  // A valid http(s) URL enables save (the server re-validates + rejects anything else).
+  const urlOk = /^https?:\/\/.+/i.test(url.trim());
+
+  return (
+    <div className="panels">
+      <div className="sec">
+        <div className="sec-h">
+          <h3>events webhook</h3>
+        </div>
+        <p className="sub">
+          Drop POSTs each new incident (crash-loops, deploy/stack failures, quota warnings) to this URL. Point it at a Slack or Teams incoming-webhook URL — a Slack{" "}
+          <code>hooks.slack.com</code> URL gets a Slack-formatted message; everything else gets the generic event JSON. An optional secret HMAC-signs deliveries (<code>X-Drop-Signature</code>).
+        </p>
+        {q.isPending ? (
+          <Skeleton lines={2} />
+        ) : current ? (
+          <div className="item">
+            <div className="meta">
+              <b>{current.url}</b>
+              <div className="sub muted">
+                {current.hasSecret ? "signed (secret set)" : "unsigned"} · updated by {current.updatedBy} · {fmtStamp(current.updatedAt)}
+              </div>
+            </div>
+            <span className="pill pill-ok">active</span>
+            <Button size="sm" variant="danger" onClick={() => setRemoving(true)}>
+              remove
+            </Button>
+          </div>
+        ) : (
+          <p className="muted">No webhook set — incidents show in the Activity feed only.</p>
+        )}
+      </div>
+
+      <div className="sec">
+        <div className="sec-h">
+          <h3>{current ? "replace webhook" : "set a webhook"}</h3>
+        </div>
+        <form
+          className="panels"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (urlOk) save.mutate();
+          }}
+        >
+          <div className="field">
+            <input className="input" placeholder="https://hooks.slack.com/services/…" value={url} onChange={(e) => setUrl(e.target.value)} aria-label="webhook url" />
+          </div>
+          <div className="field">
+            <input className="input" placeholder="signing secret (optional)" value={secret} onChange={(e) => setSecret(e.target.value)} aria-label="signing secret" />
+          </div>
+          <div className="field">
+            <Button size="sm" variant="primary" type="submit" disabled={!urlOk} loading={save.isPending}>
+              {current ? "replace" : "save"} webhook
+            </Button>
+          </div>
+        </form>
+      </div>
+
+      <ConfirmDialog
+        open={removing}
+        title="Remove the events webhook?"
+        body={<p>New incidents will stop being delivered to this URL. They still show in the Activity feed. This can't be undone (you can set it again).</p>}
+        confirmLabel="remove webhook"
+        danger
+        busy={remove.isPending}
+        onConfirm={() => remove.mutate()}
+        onCancel={() => setRemoving(false)}
+      />
+    </div>
+  );
 }

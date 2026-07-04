@@ -501,6 +501,77 @@ const m0016_app_previews: Migration = {
   },
 };
 
+// (G3) Alerting / notifications. Two tables:
+//  - `events`: a per-org, keyset-paged incident feed (bigserial id → the cursor, exactly like
+//    `audit_log`). `site_name` is nullable (org-level events like a quota warning carry no site) and is
+//    NOT FK-bound — an incident may outlive the resource it names (a crash-loop event stays for the
+//    post-mortem after the app is deleted), and org-delete cascades sweep it anyway. `severity` is
+//    'info' | 'warning' | 'error'; `detail` is jsonb (a `count` accrues there on dedup). `resolved_at`
+//    NULL = an OPEN incident; the DEDUP rule keeps at most one open row per (org, site_name, kind), so a
+//    repeat emit while one is open bumps its count + created_at instead of inserting, and recovery sets
+//    resolved_at. 30d retention, swept in the same housekeeping loop as the G2 rollups.
+//  - `event_webhooks`: one outbound webhook per org (`org_id` PK) — a Slack/Teams incoming-webhook URL
+//    (or any endpoint). `secret` (nullable) HMAC-signs the delivery (`X-Drop-Signature`) when set.
+const m0017_events: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("events")
+      .addColumn("id", "bigserial", (c) => c.primaryKey())
+      .addColumn("org_id", "text", (c) => c.notNull().references("organisations.id").onDelete("cascade"))
+      .addColumn("site_name", "text") // nullable — org-level events (quota) carry no site; not FK-bound
+      .addColumn("kind", "text", (c) => c.notNull()) // crashloop | deploy_failed | stack_halted | quota | preview_expiring
+      .addColumn("severity", "text", (c) => c.notNull()) // 'info' | 'warning' | 'error'
+      .addColumn("title", "text", (c) => c.notNull())
+      .addColumn("detail", "jsonb")
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addColumn("resolved_at", "timestamptz") // null = OPEN incident; set on recovery/resolve
+      .execute();
+    // Org-scoped keyset browse (newest-first is id DESC within the org) + the feed list's hot path.
+    await db.schema.createIndex("events_org_id_idx").on("events").columns(["org_id", "id"]).execute();
+    // Dedup + the unread badge: locate the OPEN incident per (org, kind, site) and count unresolved rows
+    // — a partial index over just the open set (the rows either query touches).
+    await sql`create index events_open_idx on events(org_id, kind, site_name) where resolved_at is null`.execute(db);
+
+    await db.schema
+      .createTable("event_webhooks")
+      .addColumn("org_id", "text", (c) => c.primaryKey().references("organisations.id").onDelete("cascade"))
+      .addColumn("url", "text", (c) => c.notNull())
+      .addColumn("secret", "text") // null = unsigned delivery; set → HMAC-SHA256 X-Drop-Signature
+      .addColumn("updated_by", "text", (c) => c.notNull())
+      .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
+// (L4) Runtime config / feature flags — a per-app, NON-SECRET key/value store. A lighter path than a
+// redeploy for flipping a flag or tweaking a knob. Values are size-capped and, by definition, non-secret
+// (the store refuses credential-looking values via the D1 heuristic — secrets stay in the write-only
+// secret path). `version` is the per-app monotonic ETag: every set/rm stamps the mutated (or a surviving)
+// row with the next value, so the app-level version = MAX(version) over the app's rows advances on any
+// mutation and `GET /v1/apps/:name/config` can answer `If-None-Match` with a cheap 304. PK (app, key);
+// `app` FKs `sites.name` with ON DELETE CASCADE so an app's config is reaped with the app (like
+// `app_secret_keys`), needing no delete-handler change.
+const m0018_app_configs: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("app_configs")
+      .addColumn("app", "text", (c) => c.notNull().references("sites.name").onDelete("cascade"))
+      .addColumn("key", "text", (c) => c.notNull())
+      .addColumn("value", "text", (c) => c.notNull())
+      .addColumn("version", "integer", (c) => c.notNull().defaultTo(1)) // per-app monotonic ETag stamp
+      .addColumn("updated_by", "text", (c) => c.notNull())
+      .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addPrimaryKeyConstraint("app_configs_pk", ["app", "key"])
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -521,6 +592,8 @@ export class InlineMigrations implements MigrationProvider {
       "0014_edge_metrics": m0014_edge_metrics,
       "0015_exec_tickets": m0015_exec_tickets,
       "0016_app_previews": m0016_app_previews,
+      "0017_events": m0017_events,
+      "0018_app_configs": m0018_app_configs,
     };
   }
 }

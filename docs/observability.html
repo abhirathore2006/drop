@@ -114,18 +114,59 @@ drop_edge_status{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</sp
 drop_edge_status{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>,<span class="tok-k">class</span>=<span class="tok-s">"4xx"</span>} 2
 drop_edge_status{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>,<span class="tok-k">class</span>=<span class="tok-s">"5xx"</span>} 1</code></pre>
 
+<h2 id="events">Events &amp; alerting</h2>
+<p>Deliberately minimal, event-driven, no pager pretensions. When something notable happens, the API writes a row to a per-org <code>events</code> feed (keyset-paged like the audit log) and — if the org has configured one — fires a single <strong>outbound webhook</strong>. Sinks v1 are the console notification badge + feed and that webhook; there is no on-call rotation, no escalation, no dashboards.</p>
+
+<table class="tbl">
+<thead><tr><th>Kind</th><th>Severity</th><th>Fires when</th><th>Recovers on</th></tr></thead>
+<tbody>
+<tr><td><code>crashloop</code></td><td>error</td><td>A workload's pods keep restarting (a housekeeping sweep diffs restart counts per active namespace against the previous sweep).</td><td>The app returns to <code>Running</code> its desired replicas.</td></tr>
+<tr><td><code>deploy_failed</code></td><td>error</td><td>A release Job halts a deploy (the old version keeps serving).</td><td>The next successful deploy of that app.</td></tr>
+<tr><td><code>stack_halted</code></td><td>error</td><td>A <code>stack up</code> halts partway (a step failed; applied steps persist).</td><td>The next clean <code>stack up</code>.</td></tr>
+<tr><td><code>quota</code></td><td>warning</td><td>A create is refused for the org's workload cap or storage budget (a 429).</td><td>—&nbsp;(the org's usage dropping isn't polled; the incident is deduped to one row until swept).</td></tr>
+<tr><td><code>preview_expiring</code></td><td>info</td><td>The sweep is about to reap a preview that saw edge traffic in the last hour.</td><td>—&nbsp;(a point-in-time heads-up).</td></tr>
+</tbody>
+</table>
+
+<div class="note"><span class="lbl">Dedup &amp; resolve</span><p>At most <strong>one open incident per <code>(org, site, kind)</code></strong>. A repeat emit while one is open doesn't insert a new row — it bumps a <code>count</code> in the incident's <code>detail</code> and freshens its timestamp, so a flapping crash-loop or a throttled quota warning is <em>one</em> feed entry, not a flood. Recovery sets <code>resolved_at</code> (the incident closes); a later emit after a resolve opens a <em>fresh</em> incident. The unread <strong>badge</strong> counts open <code>warning</code>/<code>error</code> incidents across your orgs (folded into <code>/v1/me</code>) — <code>info</code> notices show in the feed but don't badge.</p></div>
+
+<h3 id="webhook">Outbound webhook</h3>
+<p>One webhook per org (<code>drop org webhook set &lt;url&gt;</code>, owner/admin-gated). On each <strong>new</strong> incident (and on recovery — never on a dedup bump) the API POSTs the event as JSON. Delivery runs <strong>in the API process</strong> — no queue, no new infra — with a bounded retry/backoff (3 attempts, exponential; a permanent 4xx stops early). The posture is honest <strong>best-effort, at-most-once</strong>: the retries ride over a transient webhook failure, but a process crash mid-delivery does <em>not</em> replay — the durable record is the <code>events</code> table (re-read the feed). A configured <strong>signing secret</strong> HMAC-SHA256-signs the body as <code>X-Drop-Signature: sha256=&lt;hex&gt;</code>.</p>
+<pre><code><span class="tok-c"># generic JSON (Teams incoming webhooks + any endpoint)</span>
+{ <span class="tok-k">"kind"</span>: <span class="tok-s">"crashloop"</span>, <span class="tok-k">"title"</span>: <span class="tok-s">"crash-loop: api"</span>, <span class="tok-k">"severity"</span>: <span class="tok-s">"error"</span>,
+  <span class="tok-k">"siteName"</span>: <span class="tok-s">"api"</span>, <span class="tok-k">"detail"</span>: { <span class="tok-k">"restarts"</span>: 7, <span class="tok-k">"count"</span>: 3 }, <span class="tok-k">"resolved"</span>: false }
+
+<span class="tok-c"># a hooks.slack.com URL instead gets Slack's {text} shape (renders as a line)</span>
+{ <span class="tok-k">"text"</span>: <span class="tok-s">"🔴 [drop] error: crash-loop: api · api"</span> }</code></pre>
+<div class="note"><span class="lbl">Slack &amp; Teams</span><p>A Slack incoming-webhook URL (<code>hooks.slack.com</code>) is auto-detected and sent Slack's minimal <code>{text}</code> body so it renders without a bespoke integration; a richer Slack Block Kit adapter is a follow-up. <strong>Teams</strong> incoming webhooks and any other endpoint receive the generic event JSON above.</p></div>
+
+<h3 id="events-api">Surfaces</h3>
+<pre><code><span class="tok-c"># the org feed (any member; keyset-paged, newest first)</span>
+GET  /v1/orgs/&lt;slug&gt;/events?cursor=&lt;id&gt;
+GET  /v1/orgs/&lt;slug&gt;/events?unresolved=1     <span class="tok-c"># just the open warning/error count</span>
+
+<span class="tok-c"># the org webhook (owner/admin; the secret is never returned)</span>
+POST   /v1/orgs/&lt;slug&gt;/webhook  { <span class="tok-k">"url"</span>: <span class="tok-s">"https://…"</span>, <span class="tok-k">"secret"</span>: <span class="tok-s">"optional"</span> }
+DELETE /v1/orgs/&lt;slug&gt;/webhook
+
+<span class="tok-c"># CLI</span>
+drop events --org &lt;slug&gt; --since 24h
+drop org webhook set https://hooks.slack.com/… --secret s3cr3t
+drop org webhook rm</code></pre>
+<p class="lead" style="font-size:15px">MCP has no events surface — alerting is a human/ops concern, not an agent one.</p>
+
 <h2 id="config">Retention &amp; config</h2>
-<p>Both <code>traffic_minutes</code> and <code>uptime_checks</code> are retained <strong>30 days</strong> and swept in the API's housekeeping loop (a range delete over the <code>minute</code> index, not a table scan).</p>
+<p><code>traffic_minutes</code>, <code>uptime_checks</code>, and the <code>events</code> feed are all retained <strong>30 days</strong> and swept in the API's housekeeping loop (a range delete over the <code>minute</code>/<code>created_at</code> index, not a table scan). Events are cheap and valuable for a post-mortem, so they ride the same window; an actively-flapping incident keeps a fresh timestamp (dedup bumps it), so only truly-stale rows are swept.</p>
 <table class="tbl">
 <thead><tr><th>Env var</th><th>Default</th><th>Effect</th></tr></thead>
 <tbody>
 <tr><td><code>DROP_METRICS_FLUSH_INTERVAL_MS</code></td><td><code>15000</code></td><td>How often each edge flushes its in-process counters to <code>traffic_minutes</code>.</td></tr>
 <tr><td><code>DROP_UPTIME_INTERVAL_MS</code></td><td><code>60000</code></td><td>How often the API's uptime poller sweeps.</td></tr>
 <tr><td><code>DROP_EDGE_INTERNAL_URL</code></td><td><em>(unset)</em></td><td>The internal edge origin the poller GETs (Host-routed), e.g. <code>http://drop-edge.drop-system.svc</code>. <strong>Unset → HTTP uptime probes are disabled</strong> (with a startup warning); database TCP probes still run.</td></tr>
-<tr><td><code>DROP_METRICS_RETENTION_DAYS</code></td><td><code>30</code></td><td>Retention window for both rollup tables.</td></tr>
+<tr><td><code>DROP_METRICS_RETENTION_DAYS</code></td><td><code>30</code></td><td>Retention window for both rollup tables <strong>and</strong> the <a href="#events">events</a> feed.</td></tr>
 </tbody>
 </table>
-<div class="note"><span class="lbl">On crash loops</span><p>A workload's current <strong>restart count</strong> already shows live on the app-status and stack-graph endpoints (it comes straight from the pods). A <em>persistent</em> crash-loop timeline — history you can chart and alert on — is a later piece (G3), landing with the events/alerting work.</p></div>
+<div class="note"><span class="lbl">On crash loops</span><p>A workload's current <strong>restart count</strong> shows live on the app-status and stack-graph endpoints (straight from the pods). Persistent crash-loops are now also detected by the housekeeping sweep and surfaced as <a href="#events"><code>crashloop</code> events</a> — one open incident that resolves when the app recovers — so you get a feed entry + webhook, not just a live number.</p></div>
 
 <div class="next">
   <a href="tcp-access.html"><div class="d">← Back</div><div class="t">TCP access (L4)</div></a>
