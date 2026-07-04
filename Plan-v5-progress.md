@@ -59,4 +59,4 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 36 | L5 OpenAPI + typed client | done | 5720145 | zod→schema (no dep); /v1/openapi.json; @drop/client; check:openapi CI gate |
 | 37 | B3 GitOps mode | done | 5720145 | pull-only poller; sha256 change-detect; token on row; dry-run-only review |
 | 38 | G4 Searchable log retention | done | 3b0e29c | tail→S3 NDJSON 0020; 7d org-override; grep-grade search; DBs excluded |
-| 39 | M5 Console quality bar | todo | | |
+| 39 | M5 Console quality bar | done | 5ec0335 | a11y (aria-sort/tabs/labels); WCAG AA token test; 109KB gz initial; Playwright e2e |
