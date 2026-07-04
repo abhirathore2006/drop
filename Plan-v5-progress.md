@@ -54,8 +54,8 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 31 | E3 Environments | todo | | |
 | 32 | L3 `drop dev` | todo | | |
 | 33 | F2 AI intent layer | todo | | |
-| 34 | L4 Runtime config / flags | todo | | |
-| 35 | G3 Alerting / notifications | todo | | |
+| 34 | L4 Runtime config / flags | done | a0df77d | app_configs 0018; lazy config-read token; @drop/config etag SDK |
+| 35 | G3 Alerting / notifications | done | ea22630 | events 0017; dedup incidents; org webhooks (Slack adapter); /v1/me badge |
 | 36 | L5 OpenAPI + typed client | todo | | |
 | 37 | B3 GitOps mode | todo | | |
 | 38 | G4 Searchable log retention | todo | | |
