@@ -656,3 +656,536 @@ code.reveal {
   flex: 1;
   min-width: 0;
 }
+
+/* ============================ M1: global frame (sidebar + shell) ============================ */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.shell {
+  display: flex;
+  align-items: flex-start;
+  min-height: 100vh;
+}
+.content {
+  flex: 1;
+  min-width: 0; /* let children (tables, code) shrink instead of forcing the page wide */
+  display: flex;
+  flex-direction: column;
+}
+
+/* slim top bar — the sidebar carries nav now, so this holds only the user menu */
+.topbar {
+  padding: 10px 22px;
+  gap: 12px;
+}
+.topbar-spacer {
+  flex: 1;
+}
+.hamburger {
+  display: none;
+  background: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1;
+  padding: 5px 10px;
+}
+.hamburger:hover {
+  border-color: var(--border-hover);
+}
+
+/* sidebar */
+.sidebar {
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
+  width: 232px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 14px;
+  border-right: 1px solid var(--border);
+  background: var(--surface-raised);
+  overflow-y: auto;
+}
+.shell.collapsed .sidebar {
+  width: 62px;
+  padding: 16px 10px;
+  align-items: stretch;
+}
+.shell.collapsed .sidebar-brand-text,
+.shell.collapsed .sidebar-link-text,
+.shell.collapsed .sidebar-search-text,
+.shell.collapsed .sidebar-kbd,
+.shell.collapsed .org-switcher {
+  display: none;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: -0.01em;
+  color: inherit;
+  text-decoration: none;
+  padding: 4px 8px 10px;
+}
+.shell.collapsed .sidebar-brand {
+  justify-content: center;
+  padding: 4px 0 10px;
+}
+
+/* org switcher */
+.org-switcher {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 6px 10px;
+}
+.org-switcher-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+.org-switcher select {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: inherit;
+  font-size: 13px;
+  font-family: inherit;
+}
+.org-switcher select:hover:not(:disabled) {
+  border-color: var(--border-hover);
+}
+.org-rail {
+  text-align: center;
+  font-size: 15px;
+  padding: 4px 0 10px;
+  opacity: 0.8;
+}
+
+/* palette launcher */
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.sidebar-search:hover {
+  border-color: var(--border-hover);
+  color: var(--text);
+}
+.shell.collapsed .sidebar-search {
+  justify-content: center;
+}
+.sidebar-search-text {
+  flex: 1;
+  text-align: left;
+}
+.sidebar-kbd {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-faint);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+/* nav */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 14px;
+  border-left: 2px solid transparent;
+}
+.sidebar-link:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.sidebar-link.on {
+  color: var(--accent);
+  background: var(--ok-bg);
+  border-left-color: var(--accent);
+}
+.sidebar-glyph {
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.shell.collapsed .sidebar-link {
+  justify-content: center;
+  gap: 0;
+  border-left: 0;
+}
+.shell.collapsed .sidebar-link.on {
+  border-left: 0;
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.sidebar-collapse {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: none;
+  border: 0;
+  color: var(--text-faint);
+  font-size: 13px;
+  margin-top: 6px;
+}
+.sidebar-collapse:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.shell.collapsed .sidebar-collapse {
+  justify-content: center;
+}
+
+.sidebar-scrim {
+  display: none;
+}
+
+/* narrow viewports: the sidebar becomes an overlay drawer */
+@media (max-width: 860px) {
+  .hamburger {
+    display: inline-flex;
+  }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 70;
+    width: 258px;
+    transform: translateX(-102%);
+    transition: transform 0.18s ease;
+    box-shadow: var(--shadow);
+  }
+  .sidebar.open {
+    transform: none;
+  }
+  /* on mobile the drawer is always full (never the collapsed rail) */
+  .shell.collapsed .sidebar {
+    width: 258px;
+    padding: 16px 14px;
+  }
+  .shell.collapsed .sidebar-brand-text,
+  .shell.collapsed .sidebar-link-text,
+  .shell.collapsed .sidebar-search-text,
+  .shell.collapsed .sidebar-kbd,
+  .shell.collapsed .org-switcher {
+    display: revert;
+  }
+  .sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: var(--overlay);
+    z-index: 65;
+  }
+}
+
+/* ============================ M1: user menu ============================ */
+
+.usermenu {
+  position: relative;
+}
+.usermenu-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 4px 8px 4px 4px;
+  color: var(--text);
+}
+.usermenu-trigger:hover {
+  border-color: var(--border-strong);
+}
+.usermenu-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.usermenu-email {
+  font-size: 13px;
+  color: var(--text-muted);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usermenu-caret {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+.usermenu-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 220px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 6px;
+  z-index: 40;
+  animation: fade 0.12s ease;
+}
+.usermenu-head {
+  padding: 8px 10px 10px;
+}
+.usermenu-email-full {
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-all;
+}
+.usermenu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+.usermenu-item:hover {
+  background: var(--surface);
+}
+.usermenu-item.danger {
+  color: var(--danger-fg);
+}
+.usermenu-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 4px;
+}
+.usermenu-version {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px 8px;
+}
+
+/* ============================ M1: command palette ============================ */
+
+.modal:has(.palette) {
+  max-width: 560px;
+  padding: 0;
+  overflow: hidden;
+}
+.modal:has(.palette) > h3 {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  margin: -1px;
+}
+.palette {
+  display: flex;
+  flex-direction: column;
+  max-height: 60vh;
+}
+.palette-input {
+  width: 100%;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 16px 18px;
+  color: var(--text);
+  font-size: 15px;
+  font-family: inherit;
+}
+.palette-input:focus {
+  outline: none;
+}
+.palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+}
+.palette-opt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.palette-opt.active {
+  background: var(--ok-bg);
+}
+.palette-opt.active .palette-opt-label {
+  color: var(--accent);
+}
+.palette-opt-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-opt-hint {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  flex-shrink: 0;
+}
+.palette-empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ============================ M1: breadcrumbs ============================ */
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.crumb {
+  color: var(--text-muted);
+  text-decoration: none;
+}
+.crumb:hover {
+  color: var(--accent);
+}
+.crumb.current {
+  color: var(--text);
+  font-weight: 600;
+}
+.crumb-sep {
+  color: var(--text-faint);
+}
+
+/* ============================ M1: first-run onboarding ============================ */
+
+.onboarding {
+  max-width: 760px;
+  margin: 24px auto;
+}
+.onboarding-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 6px;
+}
+.onboarding-lead {
+  margin: 0 0 24px;
+  font-size: 15px;
+}
+.onboarding-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+.onboarding-step {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+  background: var(--surface-raised);
+}
+.onboarding-step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.onboarding-step-head h2 {
+  margin: 0;
+  font-size: 15px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
+}
+.onboarding-num {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--ok-bg);
+  color: var(--accent);
+  border: 1px solid var(--ok-border);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.onboarding-step .dropzone {
+  margin: 12px 0 0;
+}
+.onboarding-hint {
+  margin: 12px 0 0;
+  font-size: 12px;
+}
+.onboarding-foot {
+  margin-top: 22px;
+  font-size: 13px;
+}

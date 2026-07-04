@@ -11,12 +11,13 @@ import { useToast } from "../components/Toast.tsx";
 import { TypeBadge } from "../components/badges.tsx";
 import { UsageSummary, WorkloadGrid } from "../components/workloads.tsx";
 import { api, fmtStamp, orgLabel, pathFor, type AdminOrg, type AdminUser, type AuditRecord, type ListItem, type Me } from "../lib/api.ts";
-import { useDebounced } from "../lib/hooks.ts";
+import { useDebounced, useDocumentTitle } from "../lib/hooks.ts";
 import { POLL_LIST_MS } from "../lib/query.ts";
 
 type AdminTab = "tenants" | "users" | "audit";
 
 export function AdminPage({ me }: { me: Me }) {
+  useDocumentTitle("admin · drop");
   const [tab, setTab] = useState<AdminTab>("tenants");
   return (
     <section>

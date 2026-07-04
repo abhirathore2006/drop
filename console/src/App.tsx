@@ -1,13 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useSyncExternalStore } from "react";
-import { Link, Route, Switch, useLocation } from "wouter";
+import { useEffect, useState, useSyncExternalStore } from "react";
+import { Route, Switch, useLocation } from "wouter";
+import { Breadcrumbs } from "./components/Breadcrumbs.tsx";
+import { CommandPalette } from "./components/CommandPalette.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary.tsx";
-import { api, type Me } from "./lib/api.ts";
-import { useThemePreference } from "./lib/hooks.ts";
+import { Sidebar } from "./components/Sidebar.tsx";
+import { UserMenu } from "./components/UserMenu.tsx";
+import { api, type Me, type WorkloadType } from "./lib/api.ts";
+import { useDocumentTitle } from "./lib/hooks.ts";
 import { consumeReturnTo, sessionExpiry } from "./lib/query.ts";
 import { AdminPage } from "./pages/AdminPage.tsx";
+import { ActivityPage } from "./pages/ActivityPage.tsx";
 import { LoginGate } from "./pages/LoginGate.tsx";
+import { SettingsPage } from "./pages/SettingsPage.tsx";
 import { StackPage } from "./pages/StackPage.tsx";
+import { StacksPage } from "./pages/StacksPage.tsx";
+import { TemplatesPage } from "./pages/TemplatesPage.tsx";
 import { WorkloadDetailPage } from "./pages/WorkloadDetailPage.tsx";
 import { WorkloadsPage } from "./pages/WorkloadsPage.tsx";
 
@@ -21,38 +29,123 @@ const dec = (s: string): string => {
   }
 };
 
-const THEME_ICON = { system: "◐", light: "☀", dark: "☾" } as const;
+/** Sets document.title for routes whose page component doesn't set its own (detail + stack
+ *  pages, which this shell owns the framing of). Renders nothing. */
+function DocTitle({ title }: { title: string }) {
+  useDocumentTitle(title);
+  return null;
+}
 
-function Header({ me }: { me: Me }) {
+const COLLAPSE_KEY = "drop.console.sidebarCollapsed";
+
+function Shell({ me }: { me: Me }) {
   const [loc] = useLocation();
-  const [pref, setPref] = useThemePreference();
-  const cycle = () => setPref(pref === "system" ? "light" : pref === "light" ? "dark" : "system");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(COLLAPSE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleCollapse = () => {
+    setCollapsed((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
+      } catch {
+        /* storage unavailable */
+      }
+      return next;
+    });
+  };
+
+  // ⌘K / Ctrl+K opens the palette from anywhere.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Close the mobile drawer on navigation.
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [loc]);
+
   return (
-    <header>
-      <Link href="/" className="brand">
-        <span className="tri">▸</span> drop <span className="tag">console</span>
-      </Link>
-      <nav>
-        <Link href="/" className={loc === "/admin" ? "navlink" : "navlink on"}>
-          my workloads
-        </Link>
-        {me.admin && (
-          <Link href="/admin" className={loc === "/admin" ? "navlink on" : "navlink"}>
-            all tenants
-          </Link>
-        )}
-        <a className="navlink" href="/docs/" target="_blank" rel="noreferrer">
-          docs ↗
-        </a>
-        <button className="theme-toggle" onClick={cycle} title="theme (cycles system → light → dark)">
-          {THEME_ICON[pref]} {pref}
-        </button>
-        <span className="who">{me.email}</span>
-        <a className="navlink" href="/logout">
-          logout
-        </a>
-      </nav>
-    </header>
+    <div className={`shell${collapsed ? " collapsed" : ""}`}>
+      <Sidebar
+        me={me}
+        collapsed={collapsed}
+        onToggleCollapse={toggleCollapse}
+        mobileOpen={mobileOpen}
+        onCloseMobile={() => setMobileOpen(false)}
+        onOpenPalette={() => setPaletteOpen(true)}
+      />
+      <div className="content">
+        <header className="topbar">
+          <button className="hamburger" aria-label="menu" onClick={() => setMobileOpen(true)}>
+            ☰
+          </button>
+          <div className="topbar-spacer" />
+          <UserMenu me={me} />
+        </header>
+        <main>
+          <Breadcrumbs />
+          <ErrorBoundary resetKey={loc}>
+            <Switch>
+              <Route path="/admin">{me.admin ? <AdminPage me={me} /> : <WorkloadsPage />}</Route>
+              <Route path="/stacks">
+                <StacksPage />
+              </Route>
+              <Route path="/templates">
+                <TemplatesPage />
+              </Route>
+              <Route path="/activity">
+                <ActivityPage me={me} />
+              </Route>
+              <Route path="/settings">
+                <SettingsPage />
+              </Route>
+              <Route path="/site/:name">{(p) => <DetailRoute name={dec(p.name)} type="site" me={me} />}</Route>
+              <Route path="/app/:name">{(p) => <DetailRoute name={dec(p.name)} type="app" me={me} />}</Route>
+              <Route path="/database/:name">{(p) => <DetailRoute name={dec(p.name)} type="database" me={me} />}</Route>
+              <Route path="/bucket/:name">{(p) => <DetailRoute name={dec(p.name)} type="bucket" me={me} />}</Route>
+              <Route path="/stack/:name">
+                {(p) => (
+                  <>
+                    <DocTitle title={`${dec(p.name)} · stack · drop`} />
+                    <StackPage key={p.name} name={dec(p.name)} />
+                  </>
+                )}
+              </Route>
+              <Route>
+                <WorkloadsPage />
+              </Route>
+            </Switch>
+          </ErrorBoundary>
+        </main>
+      </div>
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} me={me} />
+    </div>
+  );
+}
+
+/** A workload detail route: sets the tab title (the detail page itself is owned by another
+ *  agent this round, so the title is set here) and renders the page. */
+function DetailRoute({ name, type, me }: { name: string; type: WorkloadType; me: Me }) {
+  return (
+    <>
+      <DocTitle title={`${name} · ${type} · drop`} />
+      <WorkloadDetailPage key={name} name={name} me={me} />
+    </>
   );
 }
 
@@ -74,24 +167,5 @@ export function App() {
   if (meQ.isError) return <LoginGate />;
   if (!me) return <div className="spin big">loading…</div>;
 
-  return (
-    <div>
-      <Header me={me} />
-      <main>
-        <ErrorBoundary resetKey={loc}>
-          <Switch>
-            <Route path="/admin">{me.admin ? <AdminPage me={me} /> : <WorkloadsPage />}</Route>
-            <Route path="/site/:name">{(p) => <WorkloadDetailPage key={p.name} name={dec(p.name)} me={me} />}</Route>
-            <Route path="/app/:name">{(p) => <WorkloadDetailPage key={p.name} name={dec(p.name)} me={me} />}</Route>
-            <Route path="/database/:name">{(p) => <WorkloadDetailPage key={p.name} name={dec(p.name)} me={me} />}</Route>
-            <Route path="/bucket/:name">{(p) => <WorkloadDetailPage key={p.name} name={dec(p.name)} me={me} />}</Route>
-            <Route path="/stack/:name">{(p) => <StackPage key={p.name} name={dec(p.name)} />}</Route>
-            <Route>
-              <WorkloadsPage />
-            </Route>
-          </Switch>
-        </ErrorBoundary>
-      </main>
-    </div>
-  );
+  return <Shell me={me} />;
 }

@@ -113,44 +113,8 @@ export function useWorkloadsQuery(pollMs: number | false = 15_000) {
   });
 }
 
-/** Stacks the caller can see (GET /v1/stacks) — shares the list polling cadence. */
+/** Stacks the caller can see (GET /v1/stacks) — shares the list polling cadence. Consumed by
+ *  the Stacks page, the command palette, and breadcrumbs. */
 export function useStacksQuery(pollMs: number | false = POLL_LIST_MS) {
   return useQuery({ queryKey: ["/v1/stacks"], queryFn: api.stacks, refetchInterval: pollMs });
-}
-
-/** C1: a Stacks grouping above the per-type workload grid. Cards link to the read-only canvas
- *  (/stack/<name>). Renders nothing until there is at least one stack (keeps the page uncluttered). */
-export function StacksSection() {
-  const q = useStacksQuery();
-  const stacks = q.data?.stacks ?? [];
-  if (!stacks.length) return null;
-  return (
-    <section>
-      <h2>
-        Stacks <span className="count">{stacks.length}</span>
-      </h2>
-      <div className="grid">
-        {stacks.map((s) => (
-          <Link key={s.name} href={`/stack/${encodeURIComponent(s.name)}`} className="card">
-            <div className="card-top">
-              <span className="dot" />
-              <span className="card-name">{s.name}</span>
-              <span className="badge badge-app">STACK</span>
-            </div>
-            <div className="card-owner">
-              {s.resources} resource{s.resources === 1 ? "" : "s"}
-            </div>
-            <div className="card-foot">
-              {s.org && (
-                <span className="card-org" title={`org: ${s.org.slug}`}>
-                  🏢 {orgLabel(s.org)}
-                </span>
-              )}
-              <span className="ver">v{s.specVersion}</span>
-            </div>
-          </Link>
-        ))}
-      </div>
-    </section>
-  );
 }

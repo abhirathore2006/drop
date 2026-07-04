@@ -67,7 +67,7 @@ describe("WorkloadsPage", () => {
     expect(r.getByText(/1 apps · 1 dbs · 2 buckets · 0 sites/)).toBeTruthy();
   });
 
-  test("renders the CLI empty state when there are no workloads", async () => {
+  test("renders first-run onboarding when there are no workloads", async () => {
     globalThis.fetch = (() => Promise.resolve(json({ sites: [] }))) as unknown as typeof fetch;
     const r = render(
       <QueryClientProvider client={makeQueryClient()}>
@@ -76,7 +76,9 @@ describe("WorkloadsPage", () => {
         </ToastProvider>
       </QueryClientProvider>,
     );
-    expect(await r.findByText("No workloads yet.")).toBeTruthy();
-    expect(r.getByText("drop deploy ./app")).toBeTruthy();
+    // both first-win paths are offered: the CLI install one-liner and the drop zone
+    expect(await r.findByText("install the CLI")).toBeTruthy();
+    expect(r.getByText("or drag a folder")).toBeTruthy();
+    expect(r.getByText(/curl -fsSL .*\/install\.sh \| sh/)).toBeTruthy();
   });
 });
