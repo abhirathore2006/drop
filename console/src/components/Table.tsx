@@ -6,6 +6,9 @@ export interface Column<T> {
   header: ReactNode;
   render: (row: T) => ReactNode;
   align?: "left" | "right";
+  /** Marks the header as sortable — renders a keyboard-operable sort button and an `aria-sort`
+   *  state on the `<th>` (M5 a11y). Wire `sort`/`onSort` on the Table to drive it. */
+  sortable?: boolean;
 }
 
 /** Keyset "load more" wiring for an unbounded, server-cursored list. `hasMore` comes from the query's
@@ -32,6 +35,12 @@ export interface TableProps<T> {
   maxBodyHeight?: number;
   /** Virtualize (window) past this many rows; below it every row is a real DOM node (cheap). */
   virtualizeThreshold?: number;
+  /** Current sort state (M5 a11y) — drives `aria-sort` and the header caret on `sortable` columns. */
+  sort?: { key: string; dir: "asc" | "desc" };
+  /** Called with a sortable column's key when its header is activated (click or Enter/Space). */
+  onSort?: (key: string) => void;
+  /** Accessible name for the table (`aria-label` on `<table>`), announced by screen readers. */
+  label?: string;
 }
 
 const OVERSCAN = 8;
@@ -41,7 +50,7 @@ const OVERSCAN = 8;
  *  `virtualizeThreshold` (default ~200) — a long list scrolls inside a fixed viewport rendering only the
  *  visible window plus spacers, so a 10k-row audit/events table stays a few hundred DOM nodes. Below the
  *  threshold the table is unchanged (no scroll container, every row rendered). */
-export function Table<T>({ columns, rows, rowKey, empty, loadMore, rowHeight = 40, maxBodyHeight = 560, virtualizeThreshold = 200 }: TableProps<T>) {
+export function Table<T>({ columns, rows, rowKey, empty, loadMore, rowHeight = 40, maxBodyHeight = 560, virtualizeThreshold = 200, sort, onSort, label }: TableProps<T>) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(maxBodyHeight);
@@ -66,14 +75,28 @@ export function Table<T>({ columns, rows, rowKey, empty, loadMore, rowHeight = 4
   };
 
   const table = (
-    <table className="tbl">
+    <table className="tbl" aria-label={label}>
       <thead>
         <tr>
-          {columns.map((c) => (
-            <th key={c.key} className={c.align === "right" ? "right" : undefined}>
-              {c.header}
-            </th>
-          ))}
+          {columns.map((c) => {
+            const active = sort?.key === c.key;
+            // aria-sort: only sortable headers advertise sortability; the active one carries direction.
+            const ariaSort = c.sortable ? (active ? (sort!.dir === "asc" ? "ascending" : "descending") : "none") : undefined;
+            return (
+              <th key={c.key} scope="col" aria-sort={ariaSort} className={c.align === "right" ? "right" : undefined}>
+                {c.sortable && onSort ? (
+                  <button type="button" className="tbl-sort" onClick={() => onSort(c.key)}>
+                    {c.header}
+                    <span aria-hidden="true" className="tbl-sort-caret">
+                      {active ? (sort!.dir === "asc" ? "▲" : "▼") : "↕"}
+                    </span>
+                  </button>
+                ) : (
+                  c.header
+                )}
+              </th>
+            );
+          })}
         </tr>
       </thead>
       <tbody>
@@ -114,7 +137,9 @@ export function Table<T>({ columns, rows, rowKey, empty, loadMore, rowHeight = 4
           {table}
         </div>
       ) : (
-        table
+        // Horizontal-scroll wrapper (M5 responsive): a wide table scrolls inside its own box on a
+        // phone instead of forcing the whole page to scroll sideways.
+        <div className="tbl-wrap">{table}</div>
       )}
       {loadMore?.hasMore && (
         <div className="tbl-more">

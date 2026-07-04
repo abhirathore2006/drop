@@ -5,6 +5,7 @@ import { startEventStream } from "./lib/events-stream.ts";
 import { Breadcrumbs } from "./components/Breadcrumbs.tsx";
 import { CommandPalette } from "./components/CommandPalette.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary.tsx";
+import { OfflineBanner } from "./components/OfflineBanner.tsx";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { UserMenu } from "./components/UserMenu.tsx";
 import { api, type Me, type WorkloadType } from "./lib/api.ts";
@@ -89,6 +90,7 @@ function Shell({ me }: { me: Me }) {
 
   return (
     <div className={`shell${collapsed ? " collapsed" : ""}`}>
+      <OfflineBanner />
       <Sidebar
         me={me}
         collapsed={collapsed}

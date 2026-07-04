@@ -68,7 +68,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish seed-templates login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down nuke dev-console keycloak keycloak-down
+.PHONY: help setup start stop restart status logs floci postgres publish seed-templates login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down nuke dev-console keycloak keycloak-down e2e-console
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -386,3 +386,14 @@ publish:
 # (the default with no .env). See scripts/seed-templates.mjs + docs/templates.html.
 seed-templates:
 	@$(LOADENV) DROP_API=http://localhost:$(API_PORT) $(NODE) scripts/seed-templates.mjs
+
+# (M5) Console golden-path Playwright e2e against a RUNNING local stack.
+#   PREREQ:  node build.mjs ui   (build the console into dist/ui, which the API serves at /)
+#            make start          (static-only: shell / theme / palette / drop-zone publish / tokens)  — OR —
+#            make up             (full platform: also runs the deploy → logs → rollback + template specs)
+# Specs that need compute (deploy/rollback) or seeded templates skip themselves cleanly when absent,
+# so this is safe to run against `make start`. Uses dev-auth (Bearer alice:alice@example.com) and the
+# bundled chromium. Config: console/playwright.config.ts.  `make e2e-console LIST=1` just lists specs.
+e2e-console:
+	@test -f dist/ui/index.html || { echo "✗ console not built — run 'node build.mjs ui' first"; exit 1; }
+	@$(LOADENV) $(NODE_BIN)/npx playwright test --config console/playwright.config.ts $(if $(LIST),--list,)

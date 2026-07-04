@@ -212,6 +212,9 @@ export function TerminalPanel({ d }: { d: Detail }) {
   return (
     <div className="sec">
       <StreamHeader title="shell" state={session === 0 ? "idle" : state} label={session === 0 ? "closed" : undefined} actions={actions} />
+      {/* Desktop-first (M5): the terminal wants a real keyboard + width; small viewports get a heads-up
+          (CSS-only, shown under 760px) rather than a cramped/broken layout. */}
+      <p className="desktop-only-note muted">The terminal is best used on a wider screen with a physical keyboard.</p>
       {error && <div className="err" style={{ marginTop: 8 }}>{error}</div>}
       {session === 0 ? (
         <p className="muted" style={{ margin: "4px 0 0" }}>

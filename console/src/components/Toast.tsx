@@ -43,7 +43,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       {items.length > 0 &&
         createPortal(
-          <div className="toasts">
+          // A polite live region: success toasts announce via role=status; errors escalate to
+          // role=alert (assertive) so failures interrupt. aria-live on the region keeps late-added
+          // toasts announced even in browsers that don't re-scan role changes.
+          <div className="toasts" aria-live="polite" aria-atomic="false">
             {items.map((t) => (
               <div key={t.id} className={`toast ${t.kind}`} role={t.kind === "error" ? "alert" : "status"}>
                 <span>{t.message}</span>

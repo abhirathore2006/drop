@@ -58,7 +58,7 @@ export function Sidebar({ me, collapsed, onToggleCollapse, mobileOpen, onCloseMo
           <kbd className="sidebar-kbd">⌘K</kbd>
         </button>
 
-        <nav className="sidebar-nav">
+        <nav className="sidebar-nav" aria-label="sections">
           {items.map((n) => {
             const on = n.match(loc);
             // (G3) The activity item carries the unread badge — OPEN warning/error incidents across the

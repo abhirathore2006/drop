@@ -13,7 +13,6 @@ import type { DroppedFile } from "../lib/dropFiles.ts";
 import { useDocumentTitle } from "../lib/hooks.ts";
 import { newSiteIntent } from "../lib/newSiteIntent.ts";
 import { currentOrg, filterByOrg, useOrgParam } from "../lib/org.ts";
-import { publishFiles } from "../lib/publish.ts";
 import { POLL_LIST_MS } from "../lib/query.ts";
 
 // M2: gate this zone behind the (not-yet-built) capabilities API once it lands. For now
@@ -39,8 +38,11 @@ function NewSitePublishZone() {
   }, [intent]);
 
   const publish = useMutation({
-    mutationFn: (name: string) => {
+    mutationFn: async (name: string) => {
       setProgress(0);
+      // Lazy chunk (M5 perf budget): the tar writer + fflate gzip load only when a publish fires,
+      // keeping tar/fflate out of the initial bundle.
+      const { publishFiles } = await import("../lib/publish.ts");
       return publishFiles(name, pending ?? [], setProgress);
     },
     onSuccess: async (res, name) => {

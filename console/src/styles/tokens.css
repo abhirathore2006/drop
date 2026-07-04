@@ -21,7 +21,7 @@
 
   --text: #e7e9ea;
   --text-muted: #8a9099;
-  --text-faint: #6b7280;
+  --text-faint: #7e8590; /* M5: raised from #6b7280 to clear WCAG AA 4.5:1 on surface/bg */
 
   --accent: #9be15d;
   --accent-glow: rgba(155, 225, 93, 0.4);
@@ -75,7 +75,7 @@
 
   --text: #1b2129;
   --text-muted: #5a6472;
-  --text-faint: #778291;
+  --text-faint: #68717d; /* M5: darkened from #778291 to clear WCAG AA 4.5:1 on surface/bg */
 
   --accent: #3f7d15;
   --accent-glow: rgba(96, 165, 48, 0.45);

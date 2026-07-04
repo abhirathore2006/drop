@@ -35,6 +35,73 @@ export const sessionExpiry = {
   },
 };
 
+// ── Offline / API-down detection (M5) ────────────────────────────────────────────────────────
+// A fetch that reaches the server and gets an HTTP status throws an ApiError; a fetch that can't
+// reach the server at all (DNS/connection/CORS/offline) rejects with a TypeError. We treat a run
+// of transport failures as "the API is unreachable" and surface a global banner; any successful
+// query/mutation clears it. AbortErrors (unmounts, cancelled polls) are ignored.
+const OFFLINE_STREAK = 2; // consecutive transport failures before we declare offline
+
+let offline = false;
+let netFailStreak = 0;
+const offlineListeners = new Set<() => void>();
+
+export const networkStatus = {
+  subscribe(fn: () => void): () => void {
+    offlineListeners.add(fn);
+    return () => {
+      offlineListeners.delete(fn);
+    };
+  },
+  getSnapshot(): boolean {
+    return offline;
+  },
+  /** Force the flag (the banner's recovery ping clears it; tests drive it directly). */
+  set(v: boolean): void {
+    if (v) return; // only "recovered → online" is set directly; going offline goes through reportError
+    netFailStreak = 0;
+    if (offline) {
+      offline = false;
+      offlineListeners.forEach((l) => l());
+    }
+  },
+};
+
+function isTransportError(err: unknown): boolean {
+  if (err instanceof ApiError) return false; // the server answered — not a transport failure
+  if (err instanceof DOMException && err.name === "AbortError") return false;
+  // fetch() rejects network failures as a TypeError ("Failed to fetch" / "Load failed").
+  return err instanceof TypeError;
+}
+
+/** Feed every query/mutation outcome here: a transport error advances the offline streak; any
+ *  success (or a real HTTP response) clears it. Exported for the recovery ping + unit tests. */
+export function reportNetworkResult(err: unknown): void {
+  if (err === null) {
+    netFailStreak = 0;
+    if (offline) {
+      offline = false;
+      offlineListeners.forEach((l) => l());
+    }
+    return;
+  }
+  if (!isTransportError(err)) {
+    // A real HTTP response also proves the API is reachable.
+    if (!(err instanceof ApiError)) return;
+    netFailStreak = 0;
+    if (offline) {
+      offline = false;
+      offlineListeners.forEach((l) => l());
+    }
+    return;
+  }
+  netFailStreak += 1;
+  if (netFailStreak >= OFFLINE_STREAK && !offline) {
+    offline = true;
+    offlineListeners.forEach((l) => l());
+  }
+}
+
 /** Remember where the user was; the login flow lands on "/" (server redirect), and App
  *  navigates back via consumeReturnTo() once /v1/me succeeds again. */
 export function rememberLocation(): void {
@@ -65,8 +132,20 @@ const on401 = (err: unknown): void => {
 
 export function makeQueryClient(): QueryClient {
   return new QueryClient({
-    queryCache: new QueryCache({ onError: on401 }),
-    mutationCache: new MutationCache({ onError: on401 }),
+    queryCache: new QueryCache({
+      onError: (err) => {
+        on401(err);
+        reportNetworkResult(err);
+      },
+      onSuccess: () => reportNetworkResult(null),
+    }),
+    mutationCache: new MutationCache({
+      onError: (err) => {
+        on401(err);
+        reportNetworkResult(err);
+      },
+      onSuccess: () => reportNetworkResult(null),
+    }),
     defaultOptions: {
       queries: {
         staleTime: 5_000,

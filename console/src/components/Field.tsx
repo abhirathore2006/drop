@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Button } from "./Button.tsx";
 
 /** Key/value display row (detail panels). */
@@ -11,12 +11,18 @@ export function KV({ label, children }: { label: string; children: ReactNode }) 
   );
 }
 
-/** Form field wrapper with inline validation error. */
-export function Field({ error, children }: { error?: string | null; children: ReactNode }) {
+/** Form field wrapper with inline validation error. When `errorId` is supplied the error node
+ *  carries that id so the control can point `aria-describedby` at it; the error is a `role=alert`
+ *  live region so it's announced the moment it appears (M5 a11y). */
+export function Field({ error, errorId, children }: { error?: string | null; errorId?: string; children: ReactNode }) {
   return (
     <div className="field">
       {children}
-      {error && <div className="field-err">{error}</div>}
+      {error && (
+        <div className="field-err" id={errorId} role="alert">
+          {error}
+        </div>
+      )}
     </div>
   );
 }
@@ -34,6 +40,7 @@ export interface AddRowProps {
 export function AddRow({ placeholder, cta, validate, busy = false, onSubmit }: AddRowProps) {
   const [v, setV] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const errId = useId();
   const submit = () => {
     const val = v.trim();
     if (!val) return;
@@ -44,7 +51,7 @@ export function AddRow({ placeholder, cta, validate, busy = false, onSubmit }: A
     setV("");
   };
   return (
-    <Field error={err}>
+    <Field error={err} errorId={errId}>
       <form
         className="addrow"
         onSubmit={(e) => {
@@ -55,6 +62,9 @@ export function AddRow({ placeholder, cta, validate, busy = false, onSubmit }: A
         <input
           value={v}
           placeholder={placeholder}
+          aria-label={placeholder}
+          aria-invalid={err ? true : undefined}
+          aria-describedby={err ? errId : undefined}
           onChange={(e) => {
             setV(e.target.value);
             if (err) setErr(null);

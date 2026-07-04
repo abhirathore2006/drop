@@ -26,6 +26,9 @@ export default defineConfig(({ command }) => ({
   base: command === "build" ? "/ui/" : "/",
   plugins: [react()],
   resolve: { alias: { "@": resolve(root, "src") } },
-  build: { outDir: resolve(root, "../dist/ui"), emptyOutDir: true },
+  // `manifest: true` emits dist/ui/.vite/manifest.json — the entry/import/dynamic-import graph the
+  // M5 perf budget (scripts/check-bundle.mjs) reads to sum the INITIAL (non-lazy) JS and assert the
+  // heavy libs (canvas/xterm/uPlot/fflate) stay in lazy chunks.
+  build: { outDir: resolve(root, "../dist/ui"), emptyOutDir: true, manifest: true },
   server: { port: 5173, proxy },
 }));

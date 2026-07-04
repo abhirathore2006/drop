@@ -7,7 +7,6 @@ import { useToast } from "../../components/Toast.tsx";
 import { api, fmtStamp, shortVersion, type Detail } from "../../lib/api.ts";
 import { cap } from "../../lib/caps.ts";
 import type { DroppedFile } from "../../lib/dropFiles.ts";
-import { publishFiles } from "../../lib/publish.ts";
 import { ConfirmDialog } from "../../components/ConfirmDialog.tsx";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
@@ -19,8 +18,10 @@ function PublishDropZone({ name, canPublish }: { name: string; canPublish: boole
   const [progress, setProgress] = useState<number | null>(null);
 
   const publish = useMutation({
-    mutationFn: (files: DroppedFile[]) => {
+    mutationFn: async (files: DroppedFile[]) => {
       setProgress(0);
+      // Lazy chunk (M5 perf budget): tar writer + fflate load only when publishing.
+      const { publishFiles } = await import("../../lib/publish.ts");
       return publishFiles(name, files, setProgress);
     },
     onSuccess: async (res) => {

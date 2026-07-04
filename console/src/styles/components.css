@@ -1989,3 +1989,109 @@ code.reveal {
 .node-metric-chip .nm-err {
   color: var(--danger-fg);
 }
+
+/* ============================ M5: quality bar (a11y + responsive + resilience) ============ */
+
+/* Horizontal-scroll wrapper so a wide table scrolls inside its own box on a phone instead of
+ * widening the whole page (.content has min-width:0 so this actually shrinks). */
+.tbl-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Sortable table header: a bare-looking, keyboard-operable button that carries the aria-sort
+ * state on its <th> and shows a direction caret. */
+.tbl-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.tbl-sort:hover {
+  color: var(--text);
+}
+.tbl-sort-caret {
+  font-size: 9px;
+  color: var(--text-faint);
+}
+
+/* Offline / API-down banner — fixed so showing/hiding it never shifts the layout. */
+.offline-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100; /* above the mobile sidebar drawer (z 70) + its scrim (z 65) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn-border);
+  box-shadow: var(--shadow);
+}
+.offline-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn-fg);
+  animation: offline-pulse 1.2s ease-in-out infinite;
+}
+@keyframes offline-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .offline-dot {
+    animation: none;
+  }
+}
+
+/* Phone breakpoint (≤640px): keep list / detail / logs / activity usable down to 375px. The
+ * sidebar is already the M1 drawer (its own ≤860px rule); this tightens the content column and
+ * stacks the densest rows. Canvas + terminal stay desktop-first via .desktop-only-note. */
+@media (max-width: 640px) {
+  main {
+    padding: 16px 14px;
+  }
+  .topbar {
+    padding: 8px 14px;
+  }
+  /* Detail key/value rows stack (label above value) so long values don't crush the 96px label. */
+  .kv {
+    flex-direction: column;
+    gap: 2px;
+  }
+  .kv .k {
+    width: auto;
+  }
+  /* Filter / action bars wrap instead of overflowing off-screen. */
+  .adminbar {
+    flex-wrap: wrap;
+  }
+  /* Section tabs scroll sideways rather than stacking into a tall pile. */
+  .tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+  /* The workload name wraps rather than forcing horizontal page scroll. */
+  .dname {
+    flex-wrap: wrap;
+    font-size: 21px;
+  }
+}
