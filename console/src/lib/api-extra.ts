@@ -147,9 +147,30 @@ export interface EnvList {
   environments: EnvSummary[];
 }
 
+/** (F2) GET /v1/features — the console's capability probe. `llmEnabled` gates the AI-intent prompt box.
+ *  Lives here (not on the `Me` type in api.ts, owned by another agent) as a tiny dedicated endpoint. */
+export interface Features {
+  llmEnabled: boolean;
+}
+
+/** (F2) POST /v1/stacks/generate response — a PROPOSED, unapplied stack spec (sanitized server-side) plus
+ *  optional AI/edge-review notes. The spec loads into the C2 editor as pending changes; it is NEVER applied
+ *  by this call — the human reviews on the canvas, then Apply → dry-run → confirm → execute. */
+export interface GeneratedStack {
+  spec: EditorSpec;
+  notes?: string[];
+}
+
 export const apiExtra = {
   /** The stack's editable spec + spec_version (C2 editor bootstrap). */
   stackDetail: (name: string) => req<StackDetail>("GET", `/v1/stacks/${encodeURIComponent(name)}`),
+  // ---- (F2) AI intent ----
+  /** Which optional features this deployment has enabled (AI intent probe). Retry off + treat a 404/501 as
+   *  "off" so an older API or a disabled feature simply hides the prompt box. */
+  features: () => req<Features>("GET", "/v1/features"),
+  /** Turn a natural-language prompt into a PROPOSED stack spec. Returns the sanitized spec + notes; the spec
+   *  is NEVER executed here — it seeds the C2 editor as pending changes for human review before Apply. */
+  generateStack: (prompt: string, org?: string) => req<GeneratedStack>("POST", "/v1/stacks/generate", { prompt, ...(org ? { org } : {}) }),
   // ---- Environments (E3) ----
   /** The C1 graph scoped to an environment ('' / "default" = the default env). Mirrors api.stackGraph
    *  but adds the `?env=` scope (api.ts is owned by a concurrent agent, so the env variant lives here). */

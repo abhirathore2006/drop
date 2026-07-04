@@ -34,6 +34,7 @@ import {
   newResource,
   rebaseState,
   redo,
+  seedEditorState,
   siteNameOf,
   suggestKey,
   undo,
@@ -41,6 +42,7 @@ import {
   type EditableField,
   type EditorOp,
   type EditorResource,
+  type EditorSpec,
   type EditorState,
   type ResourceKind,
 } from "../lib/stack-editor.ts";
@@ -55,10 +57,14 @@ const KIND_FIELD_HINT: Record<EditableField, { label: string; placeholder: strin
   dir: { label: "build dir", placeholder: "./dist (CLI-side; informational)" },
 };
 
-export function StackEditor({ name, baseGraph, onExit }: { name: string; baseGraph: StackGraph; onExit: () => void }) {
+export function StackEditor({ name, baseGraph, onExit, seed }: { name: string; baseGraph: StackGraph; onExit: () => void; seed?: EditorSpec }) {
   const toast = useToast();
   const qc = useQueryClient();
-  const detailQ = useQuery({ queryKey: ["/v1/stacks", name, "detail"], queryFn: () => apiExtra.stackDetail(name), refetchOnWindowFocus: false });
+  // (F2) New-stack (seed) mode: an AI-generated spec becomes the editor's pending changes on an EMPTY base
+  // (version 0), so there's no stored stack to fetch — every resource shows as a proposed "create" and Apply
+  // is the create path (POSTs to /v1/stacks/:name/up for a stack that doesn't exist yet). Otherwise fetch the
+  // existing stack's spec + version to edit.
+  const detailQ = useQuery({ queryKey: ["/v1/stacks", name, "detail"], queryFn: () => apiExtra.stackDetail(name), refetchOnWindowFocus: false, enabled: !seed });
 
   const [state, setState] = useState<EditorState | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -67,10 +73,11 @@ export function StackEditor({ name, baseGraph, onExit }: { name: string; baseGra
   const [prune, setPrune] = useState(false);
   const [dropped, setDropped] = useState<DroppedOp[] | null>(null);
 
-  // Initialize the editor state once the spec arrives.
-  const ready = state !== null && detailQ.data;
-  if (detailQ.data && state === null) {
-    setState(initEditor(detailQ.data.spec, detailQ.data.specVersion));
+  // Initialize the editor state once the base is available (a seeded spec, or the fetched stack detail).
+  const ready = state !== null && (!!seed || !!detailQ.data);
+  if (state === null) {
+    if (seed) setState(seedEditorState(seed));
+    else if (detailQ.data) setState(initEditor(detailQ.data.spec, detailQ.data.specVersion));
   }
 
   const base = state?.baseSpec;

@@ -40,7 +40,7 @@ import { stripStackSpec } from "../templates/strip.ts";
 import { appManifests, releaseJobManifest, tenantManifests, appUseEnvName, appUseUrl, type ExposedWorkload } from "../kube/manifests.ts";
 import { TcpEndpointStore, PortPoolExhaustedError, type TcpEndpoint } from "../edge-tcp/store.ts";
 import { PreviewStore, validatePreviewLabel } from "../previews/store.ts";
-import { databaseManifests, poolerManifest, poolerName, type PoolerMode } from "../kube/cnpg.ts";
+import { databaseManifests, recoveryDatabaseManifests, poolerManifest, poolerName, type PoolerMode } from "../kube/cnpg.ts";
 import { cacheManifests, cacheHost } from "../kube/valkey.ts";
 import { sanitizeAuthConfig, type AuthConfig } from "../auth-config.ts";
 import { authManifests, authExternalUrl, type AuthManifestContext } from "../auth-resource/manifests.ts";
@@ -62,6 +62,7 @@ import type { AuditStore, AuditEntry } from "../audit/store.ts";
 import { EventStore, type EmitInput } from "../events/store.ts";
 import { AppConfigStore, ConfigValidationError } from "../appconfig/store.ts";
 import { searchLogObjects, makeMatcher, parseTs } from "../logs/search.ts";
+import { makeLlmClient, type LlmClient } from "../ai/client.ts";
 
 export interface Deps {
   cfg: Config;
@@ -97,6 +98,10 @@ export interface Deps {
   // PGlite); the default is the real pg connector, which reads the `<db>-app` creds and dials
   // `<db>-rw.<ns>.svc` — reachable ONLY in-cluster (the query route 501s out-of-cluster before it runs).
   queryExecutor?: SqlQueryExecutor;
+  // (F2) The AI-intent LLM client port. Tests inject a fake (a scripted `generateSpec`); prod defaults to
+  // `makeLlmClient(cfg)` (built lazily per request only when cfg.llmEnabled). Absent + feature off → the
+  // generate route 501s before any call. Never receives secrets — only the user's prompt + the schema.
+  llm?: LlmClient;
   now?: () => Date;
 }
 
@@ -153,7 +158,19 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const rows = await previews.listForSite(name);
     // (E2) `hasDb` (a --with-db clone) is surfaced so `drop preview ls` + the console can badge it; `kind`
     // lets a client tell an app preview from a site one. Both default sensibly for E1 site rows.
-    return rows.map((p) => ({ label: p.label, versionId: p.versionId, url: previewUrl(name, p.label), createdBy: p.createdBy, createdAt: p.createdAt, expiresAt: p.expiresAt, kind: p.kind, hasDb: p.hasDb }));
+    // (L2) `branchedFrom`/`branchedAt` surface a --from-backup branch's provenance (present only when set)
+    // so the console renders "branched from <db>@<ts>".
+    return rows.map((p) => ({
+      label: p.label,
+      versionId: p.versionId,
+      url: previewUrl(name, p.label),
+      createdBy: p.createdBy,
+      createdAt: p.createdAt,
+      expiresAt: p.expiresAt,
+      kind: p.kind,
+      hasDb: p.hasDb,
+      ...(p.branchedFrom ? { branchedFrom: p.branchedFrom, branchedAt: p.branchedAt } : {}),
+    }));
   };
   const app = new Hono<AuthEnv>();
   // In-flight DB password rotations, keyed by name. Serializes per database so two concurrent
@@ -599,6 +616,12 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // the badge is correct whatever org the switcher is on (including "all orgs").
     return c.json({ email, admin: await isPlatformAdmin(email), unresolvedEvents: await events.countUnresolvedForUser(email) });
   });
+
+  // (F2) Capability probe for the console: which optional features this deployment has turned on. Kept as a
+  // tiny dedicated endpoint (rather than a field on /v1/me) because the console's `Me` type lives in
+  // console/src/lib/api.ts, which another agent owns — a separate endpoint keeps the console change additive
+  // (a new query in api-extra.ts) and out of that file. `llmEnabled` gates the AI-intent prompt box.
+  app.get("/v1/features", (c) => c.json({ llmEnabled: d.cfg.llmEnabled }));
 
   // ---- organisations (logical resource grouping + org-level permissions) ----
   app.get("/v1/orgs", async (c) => {
@@ -1200,6 +1223,15 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       const ns = site.namespace;
       const orgId = site.orgId;
       const withDb = c.req.query("with_db") === "true" || c.req.query("with_db") === "1";
+      // (L2) `--from-backup` branches the --with-db clone from the parent db's Barman backup instead of
+      // creating it EMPTY (opt-in, never default). `--at <ISO>` is an optional point-in-time (PITR); it
+      // only means anything with `--from-backup`. Validate the shape up front so bad flags 400 cheaply.
+      const fromBackup = c.req.query("from_backup") === "true" || c.req.query("from_backup") === "1";
+      const atRaw = c.req.query("at");
+      if (fromBackup && !withDb) return c.json({ error: "--from-backup requires --with-db (there is no clone to branch without it)" }, 400);
+      if (atRaw !== undefined && !fromBackup) return c.json({ error: "--at (point-in-time) requires --from-backup" }, 400);
+      const targetTime = atRaw !== undefined ? new Date(atRaw) : undefined;
+      if (targetTime && isNaN(targetTime.getTime())) return c.json({ error: `invalid --at timestamp "${atRaw}": expected an ISO date-time` }, 400);
       const previewName = `${name}-p-${previewLabel}`;
       const existing = await previews.get(name, previewLabel!); // a re-deploy of the SAME label reuses its workload/db slot
       // Quota: an app preview is a live workload. Previews live OUTSIDE the `sites` table, so add the
@@ -1214,35 +1246,84 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       }
       await applyTenantWithExposed(kube, ns); // namespace + NetworkPolicy + quota + LimitRange
       // --with-db: clone the parent's FIRST bound database SPEC (storage/extensions/hibernation) into a
-      // fresh, EMPTY CNPG cluster `<name>-p-<label>-db`. Same-org (the parent's db was org-validated in the
-      // uses loop above). L2: seed it from the parent db (from-backup / data copy) — v1 ships an EMPTY db.
+      // fresh CNPG cluster `<name>-p-<label>-db`. Same-org (the parent's db was org-validated in the uses
+      // loop above). (L2) `--from-backup` makes it a RECOVERY BRANCH of the parent db's Barman backup (real
+      // data, governed by the parent db's manage tier) instead of the default EMPTY clone.
       const dbUse = (appCfg.uses ?? []).find((u) => u.database);
       let previewDbName: string | undefined;
       if (withDb) {
         if (!dbUse?.database) return c.json({ error: "--with-db needs the app to bind a database (uses: [{ database }]) to clone its spec from" }, 400);
+        // (L2) Governance — branching PROD DATA is materially different from an empty clone: it copies the
+        // parent db's rows into the preview. So `--from-backup` requires the parent DB's MANAGE tier
+        // (`db:create` — the same verb the db lifecycle enforces) ON THE PARENT DATABASE RESOURCE, not just
+        // `deploy` on the app. The branch has no independent ACL (it is not a `sites` row — it's a CNPG
+        // cluster reached only through this preview's redirected `uses` + its own creds), so it INHERITS
+        // the parent db's governance: you may only branch data you already manage. An empty --with-db clone
+        // keeps E2's rule (deploy on the app is enough — no prod data leaves the parent).
+        if (fromBackup) {
+          const parentDbSite = await d.meta.getSitePlain(dbUse.database); // validated to exist + same-org in the uses loop above
+          const dbActor = await actorFor(c.get("identity"), parentDbSite);
+          if (!can(dbActor, "db:create")) {
+            return c.json({ error: `branching "${dbUse.database}" from backup requires manage (db:create) permission on the PARENT database, not just deploy on the app` }, 403);
+          }
+        }
         const local = !!d.cfg.s3Endpoint;
         if (!local && !d.cfg.dbBackupRoleArn) return c.json({ error: "database backups not configured: set DROP_DB_BACKUP_ROLE_ARN (IRSA role)" }, 501);
         previewDbName = `${previewName}-db`;
-        const dbExists = !!existing?.hasDb; // a re-deploy keeps the SAME empty clone — never re-rotate its creds
+        const dbExists = !!existing?.hasDb; // a re-deploy keeps the SAME clone — never re-rotate its creds / re-bootstrap
         const dbVersions = await d.meta.listVersions(dbUse.database);
         const parentDbCfg = dbVersions.find((v) => v.config)?.config as { storage?: string; hibernation?: "none" | "scheduled"; extensions?: string[] } | undefined;
         const dsCap = await quotas.resolvedMaxDbStorage(orgId ?? "");
         const cloneCfg = sanitizeDatabaseConfig({ storage: parentDbCfg?.storage, hibernation: parentDbCfg?.hibernation, extensions: parentDbCfg?.extensions }, dsCap.bytes, d.cfg.dbExtensionAllowlist)!;
+        // Storage: a branch is a FULL COPY — the recovered PVC is the SAME requested size as the source, so
+        // this existing budget check (cloneCfg.storage == the parent's storage) already accounts for it and
+        // 429s over budget, exactly as the empty clone does.
         if (!dbExists) {
           const budgetErr = await checkStorageBudget(orgId ?? "", ns, storageToBytes(cloneCfg.storage) ?? 0);
           if (budgetErr) return c.json({ error: budgetErr }, 429);
         }
         const backupEndpoint = d.cfg.dbBackupEndpoint ?? d.cfg.s3Endpoint;
         const storeEgress = local && d.cfg.dbBackupEgressCidr && backupEndpoint ? { cidr: d.cfg.dbBackupEgressCidr, port: Number(new URL(backupEndpoint).port) || 443 } : undefined;
-        const dbManifests = databaseManifests(cloneCfg, {
+        const baseDbCtx = {
           name: previewDbName,
           namespace: ns,
           destinationPath: `s3://${d.cfg.s3Bucket}/databases/${ns}/${previewDbName}`,
-          ...(dbExists ? {} : { appPassword: generateDbPassword() }), // creds set once, at first clone
+          ...(dbExists ? {} : { appPassword: generateDbPassword() }), // creds set once, at first clone (the branch's OWN password)
           apiServerCidrs: d.cfg.blockedEgressCidrs,
           ...(local ? { s3: { endpointURL: backupEndpoint, accessKeyId: d.cfg.s3KeyId, secretAccessKey: d.cfg.s3Secret }, objectStoreEgress: storeEgress } : { iamRoleArn: d.cfg.dbBackupRoleArn }),
-        });
+        };
+        let dbManifests;
+        if (fromBackup) {
+          // Guard: CNPG recovery from an object store needs at least one COMPLETED base backup to restore
+          // from (else the recovered cluster would never come up). Fail loud with a 409 instead of leaving a
+          // stuck cluster. On a re-deploy of an existing branch we skip this — the clone is already recovered.
+          if (!dbExists) {
+            const backups = await kube.listDatabaseBackups(ns, dbUse.database);
+            if (!backups.some((b) => b.phase === "completed")) {
+              return c.json({ error: `cannot branch "${dbUse.database}": no completed backup to recover from yet (trigger a backup first, then retry --from-backup)` }, 409);
+            }
+          }
+          // Recovery bootstrap: read the PARENT db's Barman backup objects (never its live volume). The
+          // source's backup root + creds mirror how databaseManifests wrote them; `serverName` == the parent
+          // db name (its Barman server dir under the root). recoveryTarget is the --at point-in-time if given.
+          dbManifests = recoveryDatabaseManifests(cloneCfg, baseDbCtx, {
+            source: {
+              clusterName: dbUse.database,
+              destinationPath: `s3://${d.cfg.s3Bucket}/databases/${ns}/${dbUse.database}`,
+              ...(local ? { s3: { endpointURL: backupEndpoint, accessKeyId: d.cfg.s3KeyId, secretAccessKey: d.cfg.s3Secret } } : { iamRoleArn: d.cfg.dbBackupRoleArn }),
+              ...(targetTime ? { targetTime: targetTime.toISOString() } : {}),
+            },
+          });
+        } else {
+          dbManifests = databaseManifests(cloneCfg, baseDbCtx); // E2: a fresh EMPTY database from the parent's SPEC only
+        }
         await kube.applyDatabase(ns, previewDbName, dbManifests);
+        // (L2) audit the branch action itself (distinct from preview.create) WITH the source db + the
+        // point-in-time — only for a first-time from-backup branch (a re-deploy re-points the app, it does
+        // not re-branch the immutable, already-recovered data).
+        if (fromBackup && !dbExists) {
+          await audit({ actor: email, action: "db.branch", target: previewDbName, targetType: "database", orgId, detail: { sourceDb: dbUse.database, targetTime: targetTime ? targetTime.toISOString() : "latest", label: previewLabel, preview: previewName } });
+        }
       }
       // The preview's uses point at the SAME resources as the parent (read-only reuse), except a
       // --with-db preview's database use is redirected to its OWN empty clone.
@@ -1275,11 +1356,26 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       const expiresAt = new Date(now().getTime() + clampExpireDays(c.req.query("expire_days")) * 24 * 60 * 60 * 1000);
       // version_id holds the deployed IMAGE ref (an app preview has no static version row — it never
       // writes to the parent's version history); kind='app' + has_db drive the sweep + rm teardown.
-      await previews.upsert(name, previewLabel!, appCfg.image, email, expiresAt, { kind: "app", hasDb: withDb });
-      await audit({ actor: email, action: "preview.create", target: name, targetType: "app", orgId, detail: { label: previewLabel, image: appCfg.image, withDb, ...(previewDbName ? { db: previewDbName } : {}), expiresAt: expiresAt.toISOString() } });
+      // (L2) provenance: for a from-backup branch, record the SOURCE db + the point-in-time (the --at
+      // target, or the branch-creation time when recovering the latest backup) so the console/API can show
+      // "branched from <db>@<ts>". Null for an empty --with-db clone (a re-point to a plain deploy clears it).
+      // `branchedAt` is computed ONCE (Date) so the stored row and the response return the same instant.
+      const isBranch = withDb && fromBackup && !!dbUse;
+      const branchedAt = isBranch ? targetTime ?? now() : undefined;
+      const branchProvenance = isBranch ? { branchedFrom: dbUse!.database, branchedAt } : {};
+      await previews.upsert(name, previewLabel!, appCfg.image, email, expiresAt, { kind: "app", hasDb: withDb, ...branchProvenance });
+      await audit({ actor: email, action: "preview.create", target: name, targetType: "app", orgId, detail: { label: previewLabel, image: appCfg.image, withDb, fromBackup, ...(previewDbName ? { db: previewDbName } : {}), ...(isBranch ? { branchedFrom: dbUse!.database } : {}), expiresAt: expiresAt.toISOString() } });
       return c.json({
         name,
-        preview: { label: previewLabel, url: previewUrl(name, previewLabel!), image: appCfg.image, withDb, ...(previewDbName ? { db: previewDbName } : {}), expiresAt: expiresAt.toISOString() },
+        preview: {
+          label: previewLabel,
+          url: previewUrl(name, previewLabel!),
+          image: appCfg.image,
+          withDb,
+          ...(previewDbName ? { db: previewDbName } : {}),
+          ...(isBranch ? { branchedFrom: dbUse!.database, branchedAt: branchedAt!.toISOString() } : {}),
+          expiresAt: expiresAt.toISOString(),
+        },
       });
     }
 
@@ -3748,6 +3844,64 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       out.push({ name: s.name, org: await orgOf(s.orgId), specVersion: s.specVersion, resources: Object.keys(s.spec.resources).length, fromTemplate: s.fromTemplate, updatedAt: s.updatedAt });
     }
     return c.json({ stacks: out });
+  });
+
+  // ---- POST /v1/stacks/generate {prompt, org?} : (F2) AI intent — turn a natural-language prompt into a
+  // PROPOSED stack spec, inside the console, for humans without an MCP client. Deliberately THIN: it calls the
+  // operator-configured LLM (off by default) with a versioned in-repo prompt template + the stack JSON schema
+  // (the structured-output contract), then runs the raw output THROUGH sanitizeStackConfig (junk ignored,
+  // never trusted) and returns { spec, notes? }. GUARDRAILS enforced here:
+  //   (1) OFF BY DEFAULT — 501 unless DROP_LLM_URL is set; a self-hosted Drop never calls out silently.
+  //   (2) NEVER executes — the spec is returned only; it lands in the C2 editor as proposed, unapplied
+  //       pending-changes and reaches the cluster ONLY via the normal Apply → dry-run → confirm path. This
+  //       route makes NO cluster calls (no d.kube use), so a generated spec can never touch live state here.
+  //   (3) NEVER sees secrets — the LLM receives only the user's prompt + the public schema; the returned
+  //       spec is sanitized (secret-looking / unknown fields are stripped by sanitizeStackConfig).
+  // Authz: any authenticated org member (generating a proposal is harmless — it is not applied). The
+  // deterministic F1 detect + the MCP tools already cover the CLI/agent path, so F2 is console+API only (no CLI).
+  app.post("/v1/stacks/generate", async (c) => {
+    const email = c.get("identity").email;
+    if (!d.cfg.llmEnabled) return c.json({ error: "AI intent is not configured (set DROP_LLM_URL)" }, 501);
+    await ensureUser(email);
+    let body: { prompt?: unknown; org?: unknown };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+    if (!prompt) return c.json({ error: "a prompt is required" }, 400);
+    if (prompt.length > 4000) return c.json({ error: "prompt too long (max 4000 chars)" }, 400);
+    // Authz: any authenticated member. When an org is named, require membership (a proposal is harmless, but
+    // we still gate who spends the operator's LLM budget); otherwise the caller's own scope is implied.
+    const orgSlug = typeof body.org === "string" ? body.org : undefined;
+    if (orgSlug) {
+      const org = await d.orgs.getOrgBySlug(orgSlug);
+      if (!org) return c.json({ error: `no such org: ${orgSlug}` }, 404);
+      if (!(await d.orgs.roleOf(org.id, email)) && !(await isPlatformAdmin(email))) return c.json({ error: `not a member of org ${orgSlug}` }, 403);
+    }
+    // Call the operator-configured LLM (built lazily; only the prompt + schema go out). A provider/transport
+    // error is a clean 502 — the client never leaks the API key or the raw body.
+    const llm = d.llm ?? makeLlmClient(d.cfg);
+    let raw: unknown;
+    try {
+      raw = await llm.generateSpec(prompt);
+    } catch (e) {
+      console.error(`stacks/generate: LLM call failed: ${(e as Error).message}`);
+      return c.json({ error: "the AI provider failed to respond — try again" }, 502);
+    }
+    // UNTRUSTED → sanitize. A secret-looking or otherwise unknown field is dropped; an unknown resource type
+    // is ignored. If nothing usable survives, that's a clear 422 (the model didn't produce a stack).
+    const spec = sanitizeStackConfig(raw);
+    if (!spec) return c.json({ error: "the AI did not return a usable stack — try rephrasing your request" }, 422);
+    // Notes shown under the guardrail banner: the model's own optional note + a NON-FATAL edge review. A bad
+    // edge doesn't block the proposal (the C2 editor prunes dangling edges and Apply re-validates) — we just
+    // surface it so the human catches it on the canvas.
+    const notes: string[] = [];
+    if (typeof (raw as { notes?: unknown }).notes === "string") notes.push((raw as { notes: string }).notes.slice(0, 1000));
+    const edgeErr = validateStackEdges(spec);
+    if (edgeErr) notes.push(`review: ${edgeErr}`);
+    return c.json({ spec, notes: notes.length ? notes : undefined });
   });
 
   // ---- GET /v1/stacks/:name : spec + resources + per-resource live status [+ ?env=<env> — E3] ----

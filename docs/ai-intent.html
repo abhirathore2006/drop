@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI intent · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="ai-intent.html" class="active">AI intent</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="observability.html">Observability</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>AI intent</h1>
+<p class="lead">Describe what you want to deploy in plain language and let an LLM draft a <a href="stacks.html">stack</a> for you — <strong>inside Drop's own console</strong>. The generated spec lands in the visual editor as a <em>proposed, unapplied</em> change: you review it on the canvas, then Apply → dry-run → confirm, exactly as with any hand-authored stack. It is a drafting aid, never an autopilot.</p>
+
+<div class="note"><span class="lbl">Off by default</span><p>AI intent is <strong>disabled unless the operator sets <code>DROP_LLM_URL</code></strong>. A self-hosted Drop <strong>never</strong> calls out to a third-party LLM on its own — turning this on is an explicit, deliberate operator action. With it unset, the prompt box is hidden and <code>POST /v1/stacks/generate</code> returns <code>501</code>.</p></div>
+
+<h2>Where it fits</h2>
+<p>Drop already offers two intent-first paths to provisioning: the deterministic <code>drop detect</code> flow and the <a href="cli-mcp.html">MCP tools</a> an agent can drive. AI intent is deliberately <strong>thin</strong> — it adds the same idea <em>in the console</em>, for humans who don't have an MCP client wired up. All the value it leans on — the stack schema, the visual editor, the reconcile plan — was already built. There is no new CLI surface: the CLI/agent path is covered by <code>detect</code> + MCP.</p>
+
+<h2>Enabling it (operators)</h2>
+<p>Point Drop at any OpenAI- or Anthropic-style chat endpoint that can return structured JSON. Drop speaks both shapes behind one adapter — pick your provider, set the model, done. The endpoint receives <strong>only</strong> the user's prompt and Drop's public stack schema; it never receives any secret.</p>
+<table>
+<thead><tr><th>Variable</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>DROP_LLM_URL</code></td><td>The endpoint URL — an OpenAI-style <code>/chat/completions</code> or an Anthropic-style <code>/v1/messages</code>. <strong>Unset ⇒ the whole feature is off.</strong></td></tr>
+<tr><td><code>DROP_LLM_API_KEY</code></td><td>The provider API key. Sent as the provider's auth header (<code>Authorization: Bearer …</code> for OpenAI-style, <code>x-api-key</code> for Anthropic-style). Never logged.</td></tr>
+<tr><td><code>DROP_LLM_MODEL</code></td><td>The model id the endpoint expects (provider-agnostic — you choose it).</td></tr>
+<tr><td><code>DROP_LLM_STYLE</code></td><td><code>openai</code> or <code>anthropic</code>. Optional — defaults to <code>openai</code>, or is inferred from the URL (a <code>/v1/messages</code> path implies <code>anthropic</code>).</td></tr>
+<tr><td><code>DROP_LLM_TIMEOUT_MS</code></td><td>Per-request timeout for the LLM call (default <code>30000</code>).</td></tr>
+<tr><td><code>DROP_LLM_MAX_RESPONSE_BYTES</code></td><td>Upper bound on the response body Drop will read (default 256&nbsp;KiB) — a DoS guard against a hostile/broken endpoint.</td></tr>
+</tbody>
+</table>
+<p>Provider-agnostic on purpose: run it against a hosted model, a gateway, or a model you host yourself — Drop only needs an endpoint that speaks one of the two shapes and returns JSON.</p>
+
+<h2>The flow</h2>
+<ol>
+<li><strong>Describe.</strong> On the <em>Stacks</em> page a prompt box appears (only when the feature is enabled). Type what you want — e.g. <em>"a Node API with a Postgres database and a static site front-end"</em> — and press <strong>Generate</strong>.</li>
+<li><strong>Draft.</strong> Drop calls the configured LLM with a versioned, in-repo prompt template plus the stack JSON schema as the structured-output contract, then runs the raw result through the same <code>stack-config</code> sanitizer the CLI uses — junk is dropped, unknown fields ignored.</li>
+<li><strong>Review on the canvas.</strong> The sanitized spec loads into the editor as <em>proposed, unapplied</em> pending changes: every resource shows as a "create". A banner reminds you it is <strong>AI-generated — review before applying.</strong> Edit nodes, fix wiring, drag edges — it is an ordinary editor session now.</li>
+<li><strong>Apply → dry-run → confirm.</strong> When it looks right, Apply runs a dry-run reconcile plan; you confirm it, and only then does Drop execute it — the exact same path as <code>drop up</code>.</li>
+</ol>
+<div class="note"><span class="lbl">Note</span><p>Nothing is created by the <em>Generate</em> step. The spec is a proposal held in your browser until you explicitly Apply and confirm the plan.</p></div>
+
+<h2>Guardrails</h2>
+<ul>
+<li><strong>Never trusted.</strong> The model's raw output always passes through <code>sanitizeStackConfig</code>. Unknown fields, secret-looking fields, and unknown resource types are stripped before you ever see the spec.</li>
+<li><strong>Never executes on its own.</strong> A generated spec reaches the cluster only through the visual editor's Apply → dry-run → confirm gate. The generate endpoint makes no cluster calls.</li>
+<li><strong>Never sees secrets.</strong> The prompt template and schema carry no secret material, and the endpoint receives only your prompt plus the public schema. Secrets are managed separately through Drop's write-only secret path and are never put in a stack spec.</li>
+<li><strong>Versioned prompt.</strong> The system prompt lives in the repository and is versioned — it is not user-editable, so what the model is asked is auditable and consistent across a deployment.</li>
+</ul>
+
+<div class="cards">
+  <a href="stacks.html"><div class="d">Related →</div><div class="t">Stacks &amp; the visual editor</div></a>
+  <a href="configuration.html"><div class="d">Reference →</div><div class="t">Configuration (drop.yaml)</div></a>
+  <a href="cli-mcp.html"><div class="d">Agent path →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+  </article></main>
+</div>
+</body>
+</html>

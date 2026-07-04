@@ -103,6 +103,21 @@ export interface Config {
   // --- `drop exec` interactive shell (J3; reuses the tunnel-ticket TTL) ---
   execIdleTimeoutMs: number; // DROP_EXEC_IDLE_TIMEOUT_MS — destroy an idle exec session after this long with no bytes (default 15 min)
   maxExecPerUser: number; // DROP_MAX_EXEC_PER_USER — per-user concurrent-exec-session cap (default 3, in-process)
+  // --- (F2) AI intent layer — an operator-configured LLM endpoint that turns a natural-language prompt into
+  //     a PROPOSED Drop stack spec inside the console (for humans without an MCP client). OFF BY DEFAULT:
+  //     when DROP_LLM_URL is unset the feature is disabled EVERYWHERE (POST /v1/stacks/generate → 501, the
+  //     console prompt box hides, /v1/features reports llmEnabled:false). This is a HARD requirement — a
+  //     self-hosted Drop must NEVER silently call out to a third-party LLM; enabling it is an explicit
+  //     operator action. The generated spec is only ever a proposal: it goes through sanitizeStackConfig and
+  //     is applied via the normal C2 review path, and the endpoint receives ONLY the user's prompt + the
+  //     public stack schema — never any secret. ---
+  llmUrl?: string; // DROP_LLM_URL — the chat/completions (OpenAI-style) or /v1/messages (Anthropic-style) endpoint. Unset ⇒ feature OFF.
+  llmApiKey?: string; // DROP_LLM_API_KEY — sent as the provider's auth header (Bearer / x-api-key); never logged.
+  llmModel?: string; // DROP_LLM_MODEL — the model id the endpoint expects (operator-chosen; provider-agnostic).
+  llmStyle: "openai" | "anthropic"; // DROP_LLM_STYLE — request/response shape; default "openai" (or inferred from the URL).
+  llmTimeoutMs: number; // DROP_LLM_TIMEOUT_MS — per-request timeout for the LLM call (default 30s).
+  llmMaxResponseBytes: number; // DROP_LLM_MAX_RESPONSE_BYTES — bound on the LLM response body we read (default 256 KiB).
+  llmEnabled: boolean; // DERIVED: true iff DROP_LLM_URL is set — the single gate the route + /v1/features read.
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -231,6 +246,25 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxTunnelsPerUser: Number(env.DROP_MAX_TUNNELS_PER_USER ?? "5") || 5,
     execIdleTimeoutMs: Number(env.DROP_EXEC_IDLE_TIMEOUT_MS ?? String(15 * 60 * 1000)) || 15 * 60 * 1000,
     maxExecPerUser: Number(env.DROP_MAX_EXEC_PER_USER ?? "3") || 3,
+    // (F2) AI intent — OFF BY DEFAULT. `llmEnabled` is derived from DROP_LLM_URL alone: with it unset the
+    // whole feature is disabled and Drop never calls out. Provider shape: an explicit DROP_LLM_STYLE wins;
+    // otherwise it is inferred from the URL (Anthropic's `/v1/messages` path is the tell), defaulting to the
+    // OpenAI `/chat/completions` shape.
+    ...(() => {
+      const llmUrl = env.DROP_LLM_URL || undefined;
+      const styleRaw = (env.DROP_LLM_STYLE || "").toLowerCase();
+      const llmStyle: "openai" | "anthropic" =
+        styleRaw === "anthropic" ? "anthropic" : styleRaw === "openai" ? "openai" : llmUrl && /\/v1\/messages\b/.test(llmUrl) ? "anthropic" : "openai";
+      return {
+        llmUrl,
+        llmApiKey: env.DROP_LLM_API_KEY || undefined,
+        llmModel: env.DROP_LLM_MODEL || undefined,
+        llmStyle,
+        llmTimeoutMs: Number(env.DROP_LLM_TIMEOUT_MS ?? "30000") || 30000,
+        llmMaxResponseBytes: Number(env.DROP_LLM_MAX_RESPONSE_BYTES ?? String(256 * 1024)) || 256 * 1024,
+        llmEnabled: Boolean(llmUrl),
+      };
+    })(),
   };
 }
 

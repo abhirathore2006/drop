@@ -413,6 +413,19 @@ export interface EditorState {
 export function initEditor(baseSpec: EditorSpec, baseVersion: number): EditorState {
   return { baseSpec: clone(baseSpec), baseVersion, history: [[]], cursor: 0 };
 }
+
+/** (F2) Seed the editor from an AI-generated spec: an EMPTY base (version 0) plus one `addResource` op per
+ *  resource (each op carries the resource's full body — including its own uses/env_from/db edges, which
+ *  applyOps folds and specEdges derives). Every resource is thus a PROPOSED, unapplied "create" the human
+ *  reviews on the canvas before Apply → dry-run → confirm → execute (which creates the new stack via the
+ *  SAME `/v1/stacks/:name/up` contract). The generated spec is never trusted blindly — it already passed the
+ *  server sanitizer, and Apply re-runs the full plan/authz. Ordering is irrelevant: addResource only sets
+ *  keys and applyOps prunes any edge whose target isn't present (all targets are, since every key is added). */
+export function seedEditorState(spec: EditorSpec): EditorState {
+  const base: EditorSpec = { name: spec.name, resources: {} };
+  const ops: EditorOp[] = Object.entries(spec.resources).map(([key, resource]) => ({ op: "addResource", key, resource: clone(resource) }));
+  return { baseSpec: base, baseVersion: 0, history: [[], ops], cursor: 1 };
+}
 export function currentOps(s: EditorState): EditorOp[] {
   return s.history[s.cursor] ?? [];
 }
