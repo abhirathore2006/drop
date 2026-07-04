@@ -14,7 +14,8 @@ import { TunnelTicketStore } from "../src/tokens/tunnel-tickets.ts";
 import { PreviewStore } from "../src/previews/store.ts";
 import { MetricsStore } from "../src/metrics/store.ts";
 import { UptimePoller } from "../src/metrics/uptime.ts";
-import { createDbTunnelHandler } from "../src/api/db-tunnel.ts";
+import { createDbTunnelHandler, writeHttpError } from "../src/api/db-tunnel.ts";
+import { createExecHandler } from "../src/api/exec-bridge.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
 import { TokenVerifier } from "../src/auth/token-verifier.ts";
@@ -111,28 +112,48 @@ const server = serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });
 
-// (A3) db:proxy — the authenticated psql tunnel. A Node-level 'upgrade' listener redeems a single-use
-// tunnel ticket, then splices the WebSocket to the DB Service in-cluster. Attaching a listener is also
-// what makes the HTTP server surface upgrades instead of dropping them — the handler REJECTS every
-// upgrade that isn't `/v1/databases/:name/tunnel`, so nothing else on the API gains a WS surface.
+// WebSocket upgrade dispatcher — a ROUTE TABLE over the two upgrade surfaces the API serves. Attaching
+// ANY 'upgrade' listener is also what makes the HTTP server surface upgrades instead of dropping them,
+// so the dispatcher REJECTS (404) every path that isn't a known WS endpoint — nothing else on the API
+// gains a WS surface.
 //
-// Dial posture (documented, honest): DROP_TUNNEL_DIRECT=1 (the normal in-cluster prod deployment) dials
-// the DB Service DNS `<db>-rw.<ns>.svc:5432` directly. Locally the API runs OUTSIDE the cluster with no
-// route to that Service, so the tunnel returns 501 — resolveTarget returns null (a portforward-subresource
-// path over the kube API server is possible future work; v1 does NOT shell out to kubectl). CNPG serves
-// TLS at the database layer, so a client asking for TLS still gets an end-to-end encrypted session over
-// the tunnel; the local hop from psql to the CLI listener is plain loopback.
-server.on(
-  "upgrade",
-  createDbTunnelHandler({
-    meta,
-    tickets,
-    resolveTarget: (site) => (cfg.tunnelDirect ? { host: `${site.name}-rw.${site.namespace}.svc`, port: 5432 } : null),
-    audit: (e) => audit.record(e).catch((err) => console.error(`audit ${e.action}:`, (err as Error).message)),
-    idleTimeoutMs: cfg.tunnelIdleTimeoutMs,
-    maxTunnelsPerUser: cfg.maxTunnelsPerUser,
-  }),
-);
+//   • (A3) db:proxy — `/v1/databases/:name/tunnel`: redeem a single-use tunnel ticket, splice the
+//     WebSocket to the DB Service in-cluster. Dial posture (honest): DROP_TUNNEL_DIRECT=1 (the normal
+//     in-cluster prod deployment) dials `<db>-rw.<ns>.svc:5432` directly; locally the API runs OUTSIDE
+//     the cluster with no route, so resolveTarget returns null and the tunnel 501s. CNPG serves TLS at
+//     the DB layer, so a TLS client still gets an end-to-end encrypted session; the local hop is loopback.
+//   • (J3) drop exec — `/v1/apps/:name/exec`: redeem a single-use EXEC ticket, open the kube exec
+//     stream (v4.channel.k8s.io) into the app's first ready pod, and bridge stdin/stdout/stderr/resize.
+const auditBestEffort = (e: any) => audit.record(e).catch((err) => console.error(`audit ${e.action}:`, (err as Error).message));
+const tunnelHandler = createDbTunnelHandler({
+  meta,
+  tickets,
+  resolveTarget: (site) => (cfg.tunnelDirect ? { host: `${site.name}-rw.${site.namespace}.svc`, port: 5432 } : null),
+  audit: auditBestEffort,
+  idleTimeoutMs: cfg.tunnelIdleTimeoutMs,
+  maxTunnelsPerUser: cfg.maxTunnelsPerUser,
+});
+const execHandler = createExecHandler({
+  meta,
+  tickets,
+  kube,
+  audit: auditBestEffort,
+  idleTimeoutMs: cfg.execIdleTimeoutMs,
+  maxExecPerUser: cfg.maxExecPerUser,
+});
+const upgradeRoutes: { re: RegExp; handler: (req: any, socket: any, head: Buffer) => void }[] = [
+  { re: /^\/v1\/databases\/[^/]+\/tunnel$/, handler: tunnelHandler },
+  { re: /^\/v1\/apps\/[^/]+\/exec$/, handler: execHandler },
+];
+server.on("upgrade", (req, socket, head) => {
+  socket.on("error", () => socket.destroy());
+  const url = (req.url ?? "/") as string;
+  const qIdx = url.indexOf("?");
+  const path = qIdx === -1 ? url : url.slice(0, qIdx);
+  const route = upgradeRoutes.find((r) => r.re.test(path));
+  if (!route) return writeHttpError(socket, 404, "not a websocket endpoint");
+  route.handler(req, socket, head);
+});
 
 // (E1) Expiry sweep — the API's first housekeeping loop (none existed before previews). Deletes
 // previews whose expires_at has passed. Bytes are VERSION bytes, already covered by the existing

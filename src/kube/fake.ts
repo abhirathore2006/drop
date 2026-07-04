@@ -13,6 +13,65 @@ import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 import type { CacheManifests } from "./valkey.ts";
 import type { AuthManifests } from "../auth-resource/manifests.ts";
+import type { KubeExecSession } from "./exec.ts";
+
+/** (J3) A scriptable exec double: it BOTH satisfies KubeExecSession (so the server bridge splices it
+ *  like a real one) AND exposes test drivers (emitStdout/emitStderr/emitError/endRemote) + records what
+ *  the bridge wrote (stdinChunks/resizes). A test grabs one via `FakeKube.onExec` (or `lastExec`) and
+ *  drives both directions with no cluster. */
+export class FakeExecSession implements KubeExecSession {
+  readonly stdinChunks: Buffer[] = []; // everything the bridge wrote to stdin (channel 0)
+  readonly resizes: { cols: number; rows: number }[] = []; // every resize the bridge sent (channel 4)
+  closed = false;
+  private dataCb?: (stream: "stdout" | "stderr", data: Buffer) => void;
+  private errorCb?: (statusJson: string) => void;
+  private closeCb?: (reason: string) => void;
+
+  // --- KubeExecSession (driven BY the bridge) ---
+  write(data: Buffer): void {
+    this.stdinChunks.push(Buffer.from(data));
+  }
+  resize(cols: number, rows: number): void {
+    this.resizes.push({ cols, rows });
+  }
+  onData(cb: (stream: "stdout" | "stderr", data: Buffer) => void): void {
+    this.dataCb = cb;
+  }
+  onError(cb: (statusJson: string) => void): void {
+    this.errorCb = cb;
+  }
+  onClose(cb: (reason: string) => void): void {
+    this.closeCb = cb;
+  }
+  close(): void {
+    this.endRemote("client");
+  }
+
+  // --- test drivers (the "remote process") ---
+  /** Concatenation of everything written to stdin, as a UTF-8 string (test convenience). */
+  get stdin(): string {
+    return Buffer.concat(this.stdinChunks).toString("utf8");
+  }
+  emitStdout(data: string | Buffer): void {
+    this.dataCb?.("stdout", Buffer.from(data));
+  }
+  emitStderr(data: string | Buffer): void {
+    this.dataCb?.("stderr", Buffer.from(data));
+  }
+  /** Emit a channel-3 status JSON (the shape kube sends at exit). */
+  emitExit(code: number): void {
+    this.errorCb?.(code === 0 ? JSON.stringify({ status: "Success" }) : JSON.stringify({ status: "Failure", reason: "NonZeroExitCode", details: { causes: [{ reason: "ExitCode", message: String(code) }] } }));
+  }
+  emitError(statusJson: string): void {
+    this.errorCb?.(statusJson);
+  }
+  /** Close from the remote side (process exited / socket dropped). */
+  endRemote(reason = "remote"): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.closeCb?.(reason);
+  }
+}
 
 // In-memory KubeClient for tests (mirrors FakeBlob). Records every apply so tests
 // can assert what would have been sent to the cluster.
@@ -240,6 +299,23 @@ export class FakeKube implements KubeClient {
       else opts.signal.addEventListener("abort", onAbort, { once: true });
     }
     return stream;
+  }
+
+  // (J3) exec doubles. Every openExec is recorded (execCalls); `execNoPod` forces the "no ready pod"
+  // (null) path; otherwise a fresh FakeExecSession is returned, stored as `lastExec`, and handed to the
+  // optional `onExec` hook so a test can drive both directions.
+  readonly execCalls: { namespace: string; name: string; command: string[]; tty: boolean }[] = [];
+  execNoPod = false;
+  lastExec: FakeExecSession | null = null;
+  onExec?: (session: FakeExecSession, meta: { namespace: string; name: string; command: string[]; tty: boolean }) => void;
+  async openExec(namespace: string, name: string, command: string[], opts: { tty?: boolean } = {}): Promise<KubeExecSession | null> {
+    const meta = { namespace, name, command, tty: !!opts.tty };
+    this.execCalls.push(meta);
+    if (this.execNoPod) return null;
+    const session = new FakeExecSession();
+    this.lastExec = session;
+    this.onExec?.(session, meta);
+    return session;
   }
 
   // Release-Job doubles. Tests SCRIPT the next release outcome by pushing onto `scriptedReleases`

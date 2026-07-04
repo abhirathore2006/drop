@@ -244,12 +244,17 @@ export interface PreviewsTable {
 export interface TunnelTicketsTable {
   id: string;
   token_hash: string; // sha256 hex of the full `drop_tt_…` secret — the lookup key (never the secret)
-  site_name: string; // the database this ticket authorizes a tunnel to
+  site_name: string; // the workload this ticket authorizes: a database (tunnel) or an app (exec)
   email: string; // the user the ticket was issued to (the audited actor at redemption)
   expires_at: Ts; // 60s TTL from issuance (injectable clock)
   used_at: Ts | null; // null = unredeemed; set once at redemption (single-use latch)
   created_at: Ts; // set from the store's injectable clock (the column also has a now() default)
+  kind: ColumnType<TicketKind, TicketKind | undefined, TicketKind>; // (J3) 'tunnel' (A3) | 'exec' (J3); db-default 'tunnel'
+  command: ColumnType<string[] | null, string | null | undefined, string | null>; // (J3) exec argv bound at issue (json); null for a tunnel
 }
+
+/** A ticket's kind (J3): `tunnel` is the A3 db:proxy psql splice; `exec` is the J3 shell bridge. */
+export type TicketKind = "tunnel" | "exec";
 
 /** Per-host edge traffic rollup (G2). One row per (site_name, minute) — the edge accumulates
  *  requests/bytes/status-classes/latency in-process and UPSERTs additively every ~15s. `site_name` is

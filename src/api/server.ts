@@ -1382,6 +1382,22 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return c.json({ name, user: "app", password }); // returned ONCE — store it now
   });
 
+  // (J3) Resolve an APP for an action (exec-ticket). Existence → TYPE (a non-app is a 409 carrying the
+  // plan's rationale: a database's SQL surface is `drop db proxy` (A3), and a shell on the CNPG operand
+  // pod is an operator action, not a tenant one) → authz. The compute (501) check is left to the caller
+  // so a database name still 409s here rather than being masked by a 501.
+  const resolveApp = async (c: any, action: Action): Promise<{ site: Site; email: string } | { err: Response }> => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return { err: c.json({ error: "no such app" }, 404) };
+    if (site.type !== "app") {
+      return { err: c.json({ error: `exec applies to apps only, not a ${site.type} — for a database use \`drop db proxy\` (an authenticated psql tunnel); a shell on the operand pod is an operator action, not a tenant one` }, 409) };
+    }
+    if (!can(await actorFor(c.get("identity"), site), action)) return { err: c.json({ error: "not permitted" }, 403) };
+    return { site, email };
+  };
+
   // ---- managed-database backups + hibernation (Future.md #3; restore deferred to db:migrate) ----
   // Resolve a database workload + authorize the caller for `action` (compute must be enabled).
   const resolveDb = async (c: any, action: Action): Promise<{ site: Site; email: string } | { err: Response }> => {
@@ -1504,6 +1520,40 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       expiresAt,
       wsPath: `/v1/databases/${r.site.name}/tunnel`,
       note: "single-use, 60s TTL — present it as ?ticket=… on a WebSocket upgrade to wsPath (the API dials the DB in-cluster)",
+    });
+  });
+
+  // ---- `drop exec` shell tickets (J3) ----
+  // Mint a short-lived, single-use ticket for an interactive shell into a running app pod. Gated at
+  // `exec` (owner/editor, org owner/admin/member — NOT viewer). STRICTER FRAMING than logs: a shell can
+  // `env` the container, so an app's WRITE-ONLY injected secrets become readable — see the permission
+  // description + docs. The command is BOUND INTO THE TICKET here, so the WS upgrade (which runs outside
+  // Hono) can't escalate to a different command than the one just authorized. Default `/bin/sh`. NOT
+  // audited here (issuance can be speculative); the REDEMPTION — the actual session — is audited
+  // (`app.exec`, with the command, in the exec bridge). Apps only: a non-app 409s (resolveApp), and a
+  // compute-off instance 501s (checked after the type gate so a database name still gets its 409).
+  app.post("/v1/apps/:name/exec-ticket", async (c) => {
+    const r = await resolveApp(c, "exec");
+    if ("err" in r) return r.err;
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const body = (await c.req.json().catch(() => ({}))) as { command?: unknown };
+    let command = ["/bin/sh"];
+    if (body.command !== undefined) {
+      if (!Array.isArray(body.command) || body.command.some((s) => typeof s !== "string")) {
+        return c.json({ error: "command must be an array of strings (argv), e.g. [\"/bin/bash\"]" }, 400);
+      }
+      if (body.command.length === 0) return c.json({ error: "command must not be empty (omit it to default to /bin/sh)" }, 400);
+      if (body.command.length > 64) return c.json({ error: "command has too many arguments (max 64)" }, 400);
+      command = body.command as string[];
+    }
+    const { ticket, expiresAt } = await tickets.issue(r.site.name, r.email, { kind: "exec", command });
+    return c.json({
+      app: r.site.name,
+      ticket, // shown once — the CLI uses it immediately for the WS upgrade, then it's spent
+      expiresAt,
+      command,
+      wsPath: `/v1/apps/${r.site.name}/exec`,
+      note: "single-use, 60s TTL — present it as ?ticket=… on a WebSocket upgrade to wsPath; the command is bound to this ticket and cannot be changed at upgrade",
     });
   });
 
@@ -2713,7 +2763,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // validateStackEdges as a same-stack database). JWT secret generated only on first create.
   const applyAuthResource = async (spec: StackSpec, mapping: Record<string, string>, res: StackResource, siteName: string, ns: string, isCreate: boolean): Promise<void> => {
     const db = siteNameForKey(spec, mapping, res.db!); // validateStackEdges guarantees res.db exists + is a database
-    const cfg = sanitizeAuthConfig({ providers: res.providers, redirect_urls: res.redirect_urls, jwt_ttl: res.jwt_ttl, signup: res.signup, site_url: res.site_url })!;
+    const cfg = sanitizeAuthConfig({ providers: res.providers, redirect_urls: res.redirect_urls, jwt_ttl: res.jwt_ttl, signup: res.signup, site_url: res.site_url, rbac: res.rbac })!;
     await ensureTenant(ns);
     const jwtSecret = isCreate ? generateJwtSecret() : (await d.kube!.readAuthJwtSecret(ns, siteName)) == null ? generateJwtSecret() : undefined;
     await provisionAuth({ name: siteName, namespace: ns, db, cfg, jwtSecret, publishedBy: "stack" });

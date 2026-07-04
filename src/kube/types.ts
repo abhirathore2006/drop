@@ -3,6 +3,7 @@ import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 import type { CacheManifests } from "./valkey.ts";
 import type { AuthManifests } from "../auth-resource/manifests.ts";
+import type { KubeExecSession } from "./exec.ts";
 
 // The cluster boundary. The API depends on this port, never on a concrete k8s
 // client — so deploy logic is testable with FakeKube (no cluster), exactly as
@@ -43,6 +44,11 @@ export interface KubeClient {
   listNamespaceDatabaseStatuses(namespace: string): Promise<Record<string, DatabaseStatus>>;
   /** Recent log lines from the workload's pods (newest pod), for crash diagnostics. "" if none. */
   getWorkloadLogs(namespace: string, name: string, tailLines?: number): Promise<string>;
+  /** (J3) Open an interactive `exec` stream into an app's FIRST READY pod over the kube API server's
+   *  `v4.channel.k8s.io` WebSocket subprotocol (`drop exec`). Resolves null when no pod can be found
+   *  (mirrors getWorkloadLogsStream's pod resolution — apps only). `command` is the argv to run (e.g.
+   *  `["/bin/sh"]`); `tty` requests a PTY. The API bridge splices this to the caller's WebSocket. */
+  openExec(namespace: string, name: string, command: string[], opts?: { tty?: boolean }): Promise<KubeExecSession | null>;
   /** Follow a workload's logs (kube `follow=true`), starting `tailLines` back (G1, `drop logs -f`).
    *  v1: follows the FIRST READY pod only — no fan-out/multiplexing across replicas of a multi-pod
    *  app (documented behavior; a future console live-tail may fan out to N pods). Returns null if no

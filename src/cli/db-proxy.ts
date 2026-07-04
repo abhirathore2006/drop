@@ -36,8 +36,9 @@ async function fetchTicket(session: TunnelSession, db: string): Promise<{ ticket
 
 /** Open the WebSocket upgrade against the API and resolve with the raw tunnel socket (+ any early
  *  bytes in `head`). A non-101 response (e.g. an expired ticket → 401, a non-in-cluster API → 501) is
- *  surfaced as an error carrying the server's status + body. */
-function openUpgrade(apiBase: string, wsPath: string, ticket: string): Promise<{ socket: Socket; head: Buffer }> {
+ *  surfaced as an error carrying the server's status + body. Exported so `drop exec` (J3) reuses the
+ *  exact same hand-rolled client dial (no `ws` dependency) against its own `?ticket=` WS endpoint. */
+export function openUpgrade(apiBase: string, wsPath: string, ticket: string): Promise<{ socket: Socket; head: Buffer }> {
   const u = new URL(apiBase);
   const isHttps = u.protocol === "https:";
   const port = Number(u.port) || (isHttps ? 443 : 80);

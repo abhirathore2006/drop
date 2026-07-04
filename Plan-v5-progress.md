@@ -40,8 +40,8 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 18 | J2 Generic OIDC login | done | see log | Keycloak live-tested; break-glass scrypt; zero-migration Helm-verified |
 | 19 | G2 Edge metrics · G2b uptime checks | done | see log | p95=max merge honesty; keep_warm; crash-loop history → G3 |
 | 20 | M2 Permission-aware UI + capabilities | done | see log | capabilitiesFor one-pass; fixed pooler+rollback gating drift |
-| 21 | K1 Managed auth resource | todo | | |
-| 22 | C2 Canvas editing | todo | | |
+| 21 | K1 Managed auth resource | done | 095496e | HS256 v1 (no OSS JWKS); edge exemption module; gotrue v2.170.0 pinned |
+| 22 | C2 Canvas editing | done | a2a864a | pure ops+rebase model; legal-edge lockstep caught auth kind mid-flight |
 | 23 | J3 `drop exec` | todo | | |
 | 24 | K2 App RBAC + SDK | todo | | |
 | 25 | M4 Data-heavy views | todo | | |

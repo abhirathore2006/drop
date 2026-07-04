@@ -8,6 +8,7 @@ import { defaultSessionPath, loadSession, saveSession, type Session } from "./se
 import { loadConfig, saveConfig, resolveApiBase, resolveUpdateUrl } from "./config.ts";
 import { Client } from "./client.ts";
 import { runDbProxy } from "./db-proxy.ts";
+import { runExec } from "./exec.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate, loadAuthCreate } from "./resolve-name.ts";
@@ -15,6 +16,7 @@ import { buildAndPushImage } from "./build-push.ts";
 import { runStackUp } from "./stack.ts";
 import { runDetect, serializeDetectedStack, writeDetectedStack } from "./detect.ts";
 import { parseStackConfig } from "../stack-config.ts";
+import { rbacSeedSql } from "../auth-resource/rbac-seed.ts";
 import { CONFIG_FILE_YAML } from "../site-config.ts";
 import { validateName } from "../names.ts";
 import { VERSION } from "../version.ts";
@@ -711,6 +713,26 @@ export function buildProgram(): Command {
     .command("rotate-keys <name>")
     .description("Re-mint the auth resource's JWT signing secret (owner only; bound apps get the previous secret too for a grace window)")
     .action(async (name: string) => show(await (await client()).authRotateKeys(name)));
+  // (K2) rbac-seed — print the app-RBAC schema + GoTrue claims-hook function to apply against the
+  // bound database. The SQL is deterministic + idempotent; the API has no tenant-DB SQL path in v1
+  // (the I4 SQL console is later) and the DB may pre-exist, so this is applied by the operator via psql
+  // (e.g. through `drop db proxy`). The GOTRUE_HOOK_* env is already wired when the resource has rbac: true.
+  auth
+    .command("rbac-seed <name>")
+    .description("Print the app-RBAC seed SQL (roles/permissions tables + JWT claims hook) to apply to the bound DB (auth.rbac must be on)")
+    .action((name: string) => {
+      const err = validateName(name);
+      if (err) throw new Error(err);
+      // Printed to STDOUT so it pipes cleanly into psql; guidance goes to STDERR.
+      process.stdout.write(rbacSeedSql(name));
+      process.stderr.write(
+        `\n  ℹ apply once against ${name}'s bound database as the \`app\` role. Open an authenticated tunnel\n` +
+          `      drop db proxy <db>            # prints a local port, e.g. 55432\n` +
+          `    then pipe this SQL into psql on that port:\n` +
+          `      drop auth rbac-seed ${name} | psql "postgres://app@127.0.0.1:<port>/app"\n` +
+          `  ℹ ensure the resource was created with  auth.rbac: true  so the claims hook is wired.\n`,
+      );
+    });
   const authUsers = auth.command("users").description("Admin the auth resource's end users (owner/admin; audited)");
   authUsers
     .command("ls <name>")
@@ -948,6 +970,22 @@ export function buildProgram(): Command {
       }
       const res = (await (await client()).logs(name, { tail: opts.tail, release: opts.release })) as { logs: string };
       process.stdout.write(res.logs.endsWith("\n") || res.logs === "" ? res.logs : res.logs + "\n");
+    });
+
+  // (J3) `drop exec <app> [-- cmd…]` — an authenticated interactive shell into a running app pod. Each
+  // session rides a fresh single-use ticket over an authenticated WebSocket to the API, which authorizes
+  // (per-user `exec`), audits (with the command), opens the kube exec stream, and bridges. Default
+  // `/bin/sh`. WARNING (surfaced in docs): a shell can `env` the container, so an app's write-only
+  // injected secrets become readable — `exec` is editor+ and above `logs` for exactly that reason.
+  program
+    .command("exec <app> [command...]")
+    .description("Open an interactive shell (or run a command) in the app's running container (per-user authz + audit)")
+    .action(async (appName: string, command: string[]) => {
+      const err = validateName(appName);
+      if (err) throw new Error(err);
+      const cmd = command && command.length ? command : ["/bin/sh"];
+      const code = await runExec({ session: await session(), app: appName, command: cmd });
+      process.exit(code);
     });
 
   program

@@ -457,6 +457,26 @@ const m0014_edge_metrics: Migration = {
   },
 };
 
+// (J3) `drop exec` reuses the single-use ticket machinery. Two additive columns generalize
+// `tunnel_tickets` from db:proxy-only to a KINDED ticket: `kind` discriminates a `tunnel` ticket
+// (the A3 psql splice) from an `exec` ticket (the J3 shell bridge), and `command` binds the exact
+// argv an exec ticket authorizes — so a redeemed WS upgrade can't escalate to a DIFFERENT command
+// than the one `can("exec")` was checked against at issuance. `kind` defaults to 'tunnel' so every
+// pre-existing row (and the unchanged A3 issue path) keeps its meaning with no backfill. `command`
+// is null for tunnel tickets (a psql tunnel has no argv).
+const m0015_exec_tickets: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .alterTable("tunnel_tickets")
+      .addColumn("kind", "text", (c) => c.notNull().defaultTo("tunnel")) // 'tunnel' (A3) | 'exec' (J3)
+      .addColumn("command", "jsonb") // exec argv (string[]) bound at issuance; null for a tunnel ticket
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -475,6 +495,7 @@ export class InlineMigrations implements MigrationProvider {
       "0012_previews": m0012_previews,
       "0013_tunnel_tickets": m0013_tunnel_tickets,
       "0014_edge_metrics": m0014_edge_metrics,
+      "0015_exec_tickets": m0015_exec_tickets,
     };
   }
 }

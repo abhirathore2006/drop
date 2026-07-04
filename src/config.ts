@@ -94,6 +94,9 @@ export interface Config {
   tunnelTicketTtlMs: number; // DROP_TUNNEL_TICKET_TTL_MS — single-use tunnel-ticket lifetime (default 60s)
   tunnelIdleTimeoutMs: number; // DROP_TUNNEL_IDLE_TIMEOUT_MS — destroy an idle tunnel after this long with no bytes (default 5 min)
   maxTunnelsPerUser: number; // DROP_MAX_TUNNELS_PER_USER — per-user concurrent-tunnel cap (default 5, in-process)
+  // --- `drop exec` interactive shell (J3; reuses the tunnel-ticket TTL) ---
+  execIdleTimeoutMs: number; // DROP_EXEC_IDLE_TIMEOUT_MS — destroy an idle exec session after this long with no bytes (default 15 min)
+  maxExecPerUser: number; // DROP_MAX_EXEC_PER_USER — per-user concurrent-exec-session cap (default 3, in-process)
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -213,6 +216,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     tunnelTicketTtlMs: Number(env.DROP_TUNNEL_TICKET_TTL_MS ?? "60000") || 60000,
     tunnelIdleTimeoutMs: Number(env.DROP_TUNNEL_IDLE_TIMEOUT_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
     maxTunnelsPerUser: Number(env.DROP_MAX_TUNNELS_PER_USER ?? "5") || 5,
+    execIdleTimeoutMs: Number(env.DROP_EXEC_IDLE_TIMEOUT_MS ?? String(15 * 60 * 1000)) || 15 * 60 * 1000,
+    maxExecPerUser: Number(env.DROP_MAX_EXEC_PER_USER ?? "3") || 3,
   };
 }
 

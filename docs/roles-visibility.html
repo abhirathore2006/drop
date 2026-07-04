@@ -78,6 +78,7 @@
   <tbody>
     <tr><td><code>read</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td></tr>
     <tr><td><code>logs</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
+    <tr><td><code>exec</code> (interactive shell — apps only)</td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
     <tr><td><code>publish</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
     <tr><td><code>deploy</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
     <tr><td><code>db:create</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td><td><span class="ck">✓</span></td></tr>
@@ -105,6 +106,7 @@
   <tbody>
     <tr><td><code>read</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td></tr>
     <tr><td><code>logs</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
+    <tr><td><code>exec</code> (interactive shell — apps only)</td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
     <tr><td><code>publish</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
     <tr><td><code>deploy</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
     <tr><td><code>db:create</code></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="ck">✓</span></td><td><span class="cx">—</span></td></tr>
@@ -128,6 +130,8 @@
 <div class="note"><span class="lbl">Note</span><p><code>can(actor, action)</code> is the single authority check used everywhere. Platform admins are all-powerful on every site; a non-member can do nothing. <strong>transfer</strong> hands ownership to another member and demotes the old owner to <code>editor</code> — so there is still exactly one site owner.</p></div>
 
 <div class="note warn"><span class="lbl">Warn</span><p><strong><code>logs</code> is gated <em>above</em> plain <code>read</code>/viewer.</strong> Pod logs can echo env-injected secrets (an app's <code>DATABASE_PASSWORD</code> and friends are exposed to the process as environment variables), so reading them is an <strong>editor+</strong> action even though a viewer can already see the app's status. A viewer is deliberately metadata-only and never sees the credential-bearing log stream.</p></div>
+
+<div class="note warn"><span class="lbl">Warn</span><p><strong><code>exec</code> (<code>drop exec &lt;app&gt;</code>) is framed <em>stricter</em> than <code>logs</code> — a shell in the container makes an app's write-only secrets readable.</strong> An interactive shell can <code>env</code> the process, and injected credentials (the <code>DATABASE_PASSWORD</code>, API keys, and friends set as write-only secrets) are environment variables to it — so anyone who can <code>exec</code> can read them all on demand. Where <code>logs</code> merely <em>might</em> surface a secret a process prints, <code>exec</code> hands over the whole environment. It is therefore an <strong>editor+</strong> permission (never a viewer), applies to <strong>apps only</strong> (a database's SQL surface is the authenticated <code>drop db proxy</code> tunnel; a shell on the managed-Postgres pod is an operator, not tenant, action), and <strong>every session is audited with the exact command</strong> (<code>app.exec</code>). Service tokens obtain it via the <code>exec:&lt;app&gt;</code> scope. See <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for <code>drop exec</code>.</p></div>
 
 <div class="note warn"><span class="lbl">Warn</span><p>App <strong>secrets are write-only and owner/admin-only.</strong> Setting, rotating, or deleting a secret is the <code>configure</code> permission (same gate as visibility and the DB password). Editors can <code>deploy</code> and restart apps but cannot manage secrets, and <strong>no role can read a secret value back</strong> — the API/MCP/CLI only ever return key names and metadata. See <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a> for <code>drop secrets set --stdin / ls / rm</code>.</p></div>
 

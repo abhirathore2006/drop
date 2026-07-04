@@ -18,6 +18,7 @@ import {
   type ReleaseResult,
 } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
+import { openKubeExecStream, type KubeExecSession } from "./exec.ts";
 import { databaseBackupManifest, databasePasswordJob, DEFAULT_OPERAND_IMAGE, PWSET_SECRET, poolerName, type DatabaseManifests } from "./cnpg.ts";
 import type { CacheManifests } from "./valkey.ts";
 import type { AuthManifests } from "../auth-resource/manifests.ts";
@@ -583,6 +584,28 @@ export class KubeApiClient implements KubeClient {
       return await this.openLogStream(namespace, pod, tail, undefined, opts.signal);
     }
     return null;
+  }
+
+  /** (J3) Open an interactive exec stream into an app's first ready pod. Resolves the pod the SAME way
+   *  as getWorkloadLogsStream (app label, prefer a ready pod), then opens the v4.channel.k8s.io
+   *  WebSocket against the API server (src/kube/exec.ts) with the SAME cert/token auth `call` uses.
+   *  Returns null if no pod is found. The container filter is `<app>` (an app's container is named for
+   *  the app, exactly as the logs path assumes). */
+  async openExec(namespace: string, name: string, command: string[], opts: { tty?: boolean } = {}): Promise<KubeExecSession | null> {
+    const pr = await this.call("GET", `/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(`app.kubernetes.io/name=${name}`)}`);
+    if (pr.status >= 300) return null;
+    const pods = (JSON.parse(pr.body).items ?? []) as any[];
+    if (!pods.length) return null;
+    const target = pods.find((p) => (p.status?.containerStatuses ?? []).some((cs: any) => cs.ready)) ?? pods[0];
+    const pod = target.metadata.name as string;
+    const qs = new URLSearchParams();
+    for (const arg of command) qs.append("command", arg); // repeated ?command= per argv element
+    qs.set("container", name);
+    qs.set("stdin", "true");
+    qs.set("stdout", "true");
+    qs.set("stderr", "true");
+    qs.set("tty", opts.tty ? "true" : "false");
+    return openKubeExecStream(this.conn, `/api/v1/namespaces/${namespace}/pods/${pod}/exec?${qs.toString()}`);
   }
 
   /** Recent restart count + crash reason for a Deployment's pods (Deployment .status has neither). */

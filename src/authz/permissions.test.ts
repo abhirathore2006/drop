@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { can, capabilitiesFor, ACTIONS, type Action, type Actor } from "./permissions.ts";
+import { can, capabilitiesFor, parseScope, scopeAllows, ACTIONS, type Action, type Actor } from "./permissions.ts";
 
 const ALL: Action[] = ["read", "publish", "rollback", "configure", "share", "transfer", "delete"];
 const owner: Actor = { email: "o@x.com", platformRole: "member", siteRole: "owner", orgRole: null };
@@ -41,6 +41,29 @@ test("connect is the deploy/ship tier: owner + editor + org member yes, viewer n
   expect(can(orgViewer, "connect")).toBe(false);
 });
 
+test("exec is the deploy/ship tier, ABOVE viewer: owner + editor + org member yes, viewer no (J3)", () => {
+  expect(can(owner, "exec")).toBe(true);
+  expect(can(editor, "exec")).toBe(true); // an editor opens a debug shell — a routine dev action
+  expect(can(viewer, "exec")).toBe(false); // STRICTER than logs: a shell env-dumps write-only secrets
+  expect(can(stranger, "exec")).toBe(false);
+  const orgMember: Actor = { email: "m@x.com", platformRole: "member", siteRole: null, orgRole: "member" };
+  expect(can(orgMember, "exec")).toBe(true);
+  const orgViewer: Actor = { email: "ov@x.com", platformRole: "member", siteRole: null, orgRole: "viewer" };
+  expect(can(orgViewer, "exec")).toBe(false);
+});
+
+test("exec is a first-class token scope (exec:<app> parses + grants like other verbs) (J3)", () => {
+  expect(parseScope("exec:myapp")).toEqual({ verb: "exec", resource: "myapp" });
+  expect(parseScope("exec")).toEqual({ verb: "exec", resource: "*" });
+  expect(scopeAllows(["exec:myapp"], "exec", "myapp")).toBe(true);
+  expect(scopeAllows(["exec:myapp"], "exec", "other")).toBe(false); // scoped to myapp only
+  expect(scopeAllows(["exec"], "exec", "anyapp")).toBe(true); // bare verb → all apps
+  expect(scopeAllows(["logs:myapp"], "exec", "myapp")).toBe(false); // logs doesn't imply exec
+  // a token actor with exec:myapp can exec myapp only, fenced to its org
+  const tok: Actor = { email: "token:ci@acme", platformRole: "member", siteRole: null, orgRole: null, token: { scopes: ["exec:myapp"], orgId: "org1", resourceName: "myapp", resourceOrgId: "org1" } };
+  expect(can(tok, "exec")).toBe(true);
+});
+
 test("viewer can only read", () => {
   expect(can(viewer, "read")).toBe(true);
   for (const a of ["publish", "rollback", "configure", "share", "transfer", "delete"] as const)
@@ -63,7 +86,7 @@ test("capabilitiesFor: owner + admin get the FULL verb set; it stays in ACTIONS 
 });
 
 test("capabilitiesFor: editor is the ship tier (no configure/share/transfer/delete)", () => {
-  expect(capabilitiesFor(editor)).toEqual(["read", "logs", "publish", "deploy", "db:create", "connect", "rollback", "expose"]);
+  expect(capabilitiesFor(editor)).toEqual(["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "rollback", "expose"]);
 });
 
 test("capabilitiesFor: viewer is read-only; a non-member gets nothing", () => {

@@ -69,6 +69,9 @@ function AppInfoPanel({ d }: { d: Detail }) {
           </Button>
         )}
       </KV>
+      {/* M3: an "open shell" button goes HERE — gated on cap(d, "exec") (the J3 verb), it opens the
+          xterm.js terminal panel that bridges to `GET /v1/apps/:name/exec` over a WebSocket. The API
+          + CLI transport already exist (J3); only the browser terminal UI is deferred to M3. */}
     </div>
   );
 }

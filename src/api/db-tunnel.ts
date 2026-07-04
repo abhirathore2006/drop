@@ -65,8 +65,9 @@ const REASON: Record<number, string> = {
 };
 
 /** Write a plain HTTP error to the raw upgrade socket and close it — the client never sees a 101, so a
- *  rejected tunnel never half-opens (identical posture to the edge WS proxy's pre-upgrade rejection). */
-function writeHttpError(socket: Socket, status: number, body: string): void {
+ *  rejected tunnel never half-opens (identical posture to the edge WS proxy's pre-upgrade rejection).
+ *  Exported so the J3 exec bridge + the bin/api.ts route-table dispatcher share one rejection shape. */
+export function writeHttpError(socket: Socket, status: number, body: string): void {
   if (socket.destroyed) return;
   const msg =
     `HTTP/1.1 ${status} ${REASON[status] ?? "Error"}\r\n` +

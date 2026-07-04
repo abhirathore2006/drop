@@ -65,7 +65,7 @@ test("redeem is single-use: the first redemption wins, a replay returns null", a
   const { db } = await fix();
   const store = new TunnelTicketStore(db);
   const { ticket } = await store.issue("mydb", "alice@x.com");
-  expect(await store.redeem(ticket, "mydb")).toEqual({ email: "alice@x.com", siteName: "mydb" });
+  expect(await store.redeem(ticket, "mydb")).toEqual({ email: "alice@x.com", siteName: "mydb", kind: "tunnel", command: null });
   expect(await store.redeem(ticket, "mydb")).toBeNull(); // spent — replay-proof
   await db.destroy();
 });
@@ -105,6 +105,71 @@ test("unknown / non-ticket secrets → null (never throws)", async () => {
   const store = new TunnelTicketStore(db);
   expect(await store.redeem("garbage", "mydb")).toBeNull();
   expect(await store.redeem(TICKET_PREFIX + "deadbeef", "mydb")).toBeNull();
+  await db.destroy();
+});
+
+// ---- (J3) exec tickets: KIND + COMMAND binding -------------------------------------------------
+
+async function appFix() {
+  const db = await makeTestDb();
+  await new UserStore(db).upsertOnLogin("alice@x.com", null);
+  const orgs = new OrgStore(db);
+  const org = await orgs.ensurePersonalOrg("alice@x.com");
+  const meta = new MetaStore(db);
+  await meta.claimSite("myapp", "alice@x.com", "app", { id: org.id, namespace: org.namespace });
+  await meta.claimSite("otherapp", "alice@x.com", "app", { id: org.id, namespace: org.namespace });
+  return { db };
+}
+
+test("exec ticket: issue with kind+command; redeem(kind='exec') returns the BOUND command", async () => {
+  const { db } = await appFix();
+  const store = new TunnelTicketStore(db);
+  const { ticket } = await store.issue("myapp", "alice@x.com", { kind: "exec", command: ["/bin/bash", "-lc", "echo hi"] });
+  const redeemed = await store.redeem(ticket, "myapp", "exec");
+  expect(redeemed).toEqual({ email: "alice@x.com", siteName: "myapp", kind: "exec", command: ["/bin/bash", "-lc", "echo hi"] });
+  await db.destroy();
+});
+
+test("exec ticket is single-use: a replay returns null", async () => {
+  const { db } = await appFix();
+  const store = new TunnelTicketStore(db);
+  const { ticket } = await store.issue("myapp", "alice@x.com", { kind: "exec", command: ["/bin/sh"] });
+  expect(await store.redeem(ticket, "myapp", "exec")).not.toBeNull();
+  expect(await store.redeem(ticket, "myapp", "exec")).toBeNull(); // spent
+  await db.destroy();
+});
+
+test("exec ticket is bound to the app: a myapp ticket cannot exec otherapp (and stays unspent)", async () => {
+  const { db } = await appFix();
+  const store = new TunnelTicketStore(db);
+  const { ticket } = await store.issue("myapp", "alice@x.com", { kind: "exec", command: ["/bin/sh"] });
+  expect(await store.redeem(ticket, "otherapp", "exec")).toBeNull(); // wrong app → no match
+  expect(await store.redeem(ticket, "myapp", "exec")).not.toBeNull(); // still works for myapp
+  await db.destroy();
+});
+
+test("KIND is enforced: an exec ticket can't be redeemed on the tunnel path (and vice versa)", async () => {
+  const { db } = await appFix();
+  const store = new TunnelTicketStore(db);
+  const exec = await store.issue("myapp", "alice@x.com", { kind: "exec", command: ["/bin/sh"] });
+  // Redeeming an exec ticket as a tunnel (default kind) fails → the ticket stays unspent.
+  expect(await store.redeem(exec.ticket, "myapp")).toBeNull(); // wrong kind (tunnel != exec)
+  expect(await store.redeem(exec.ticket, "myapp", "exec")).not.toBeNull(); // correct kind still works
+
+  // And a plain tunnel ticket can't be redeemed as exec.
+  const tun = await store.issue("myapp", "alice@x.com"); // kind defaults to 'tunnel'
+  expect(await store.redeem(tun.ticket, "myapp", "exec")).toBeNull(); // wrong kind (exec != tunnel)
+  expect(await store.redeem(tun.ticket, "myapp")).not.toBeNull();
+  await db.destroy();
+});
+
+test("a plain (A3) tunnel ticket carries kind='tunnel' and command=null", async () => {
+  const { db } = await fix();
+  const store = new TunnelTicketStore(db);
+  const { ticket } = await store.issue("mydb", "alice@x.com");
+  const r = await store.redeem(ticket, "mydb");
+  expect(r?.kind).toBe("tunnel");
+  expect(r?.command).toBeNull();
   await db.destroy();
 });
 
