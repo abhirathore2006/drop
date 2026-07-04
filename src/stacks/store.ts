@@ -99,6 +99,15 @@ export class StackStore {
       .execute();
   }
 
+  /** (D2) Re-pin the template provenance version after a successful `stack.upgrade` to the target. */
+  async setProvenanceVersion(id: string, fromTemplateVersion: string): Promise<void> {
+    await this.db
+      .updateTable("stacks")
+      .set({ from_template_version: fromTemplateVersion, updated_at: sql`now()` })
+      .where("id", "=", id)
+      .execute();
+  }
+
   async delete(id: string): Promise<void> {
     await this.db.deleteFrom("stacks").where("id", "=", id).execute(); // cascades stack_resources
   }

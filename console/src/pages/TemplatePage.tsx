@@ -1,3 +1,9 @@
+// D2 note: the plan asked for an optional "update available" chip on this page's INSTANCES. The template
+// page does not (and cannot cheaply) enumerate the stacks derived from a template — there is no
+// list-stacks-by-template endpoint, so surfacing that chip needs a NEW query per instance. Per the D2
+// brief ("skip if it needs new queries — note it"), it is deferred. The update signal lives where it is
+// cheap: the StackPage's /outdated banner (one call, on the page that can act on it).
+//
 // D1: the template detail page at /template/:slug (deep-linked from docs-site badges + the catalog).
 // Three panes: a rendered README, a variables form (required/default/secret — secret inputs are
 // type=password), and a READ-ONLY canvas preview (the C1 StackCanvas fed the template spec — nodes only,

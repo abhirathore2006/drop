@@ -135,3 +135,82 @@ describe("StackPage edit mode (C2)", () => {
     expect(within(planTable).getAllByText("database").length).toBeGreaterThan(0);
   });
 });
+
+// D2 upstream-diff smoke: a mocked /outdated with an upstream change (one conflict + one clean upgrade +
+// one added resource) → the banner shows → the review view renders per-resource diff badges → the Upgrade
+// button is gated until the conflict is resolved → resolving + Upgrade opens the dry-run plan modal.
+const OUTDATED = {
+  upToDate: false,
+  templateDerived: true,
+  template: "kit",
+  fromVersion: "1",
+  latestVersion: "2",
+  diff: {
+    upstreamChanged: true,
+    hasLocalDrift: true,
+    conflicts: ["db"],
+    resources: [
+      { key: "db", class: "conflict", conflict: true, badge: "conflict", fields: [{ field: "storage", class: "conflict", pinned: "1Gi", latest: "512Mi", current: "256Mi" }], inPinned: true, inLatest: true, inCurrent: true },
+      { key: "api", class: "upstream-only", conflict: false, badge: "changed", fields: [{ field: "image", class: "upstream-only", pinned: "web:1", latest: "web:2" }], inPinned: true, inLatest: true, inCurrent: true },
+      { key: "cache", class: "added-upstream", conflict: false, badge: "added", fields: [], inPinned: false, inLatest: true, inCurrent: false },
+    ],
+  },
+  current: { name: "shop", resources: { db: { type: "database", storage: "256Mi" }, api: { type: "app", image: "web:1" } } },
+  latest: { name: "shop", resources: { db: { type: "database", storage: "512Mi" }, api: { type: "app", image: "web:2" }, cache: { type: "cache", memory: "256Mi" } } },
+};
+const UPGRADE_PLAN = {
+  dryRun: true,
+  template: "kit",
+  fromVersion: "1",
+  toVersion: "2",
+  autoApplied: ["api", "cache"],
+  plan: [
+    { action: "update", key: "api", kind: "app", siteName: "shop-api", reason: "image changed upstream" },
+    { action: "create", key: "cache", kind: "cache", siteName: "shop-cache", reason: "added upstream" },
+  ],
+};
+
+describe("StackPage update banner + diff view (D2)", () => {
+  beforeEach(() => {
+    globalThis.fetch = ((input: RequestInfo | URL) => {
+      const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+      const path = raw.split("?")[0]!;
+      if (path.includes("/outdated")) return Promise.resolve(json(OUTDATED));
+      if (path.endsWith("/upgrade")) return Promise.resolve(json(raw.includes("dry_run") ? UPGRADE_PLAN : { ...UPGRADE_PLAN, dryRun: false, specVersion: 2, stack: "shop" }));
+      if (path.includes("/graph")) return Promise.resolve(json(graph));
+      return Promise.resolve(json({}));
+    }) as unknown as typeof fetch;
+  });
+
+  test("banner shows when an update is available and flags the conflict count", async () => {
+    const r = renderPage();
+    const banner = await r.findByTestId("update-banner");
+    expect(within(banner).getByText("kit")).toBeTruthy();
+    expect(within(banner).getByText(/1 conflict/)).toBeTruthy();
+  });
+
+  test("review view renders per-resource diff badges; Upgrade is gated until the conflict is resolved", async () => {
+    const r = renderPage();
+    fireEvent.click(await r.findByRole("button", { name: "Review update" }));
+
+    // every changed resource shows its badge in the always-rendered diff legend
+    expect((await r.findByTestId("diff-badge-db")).textContent).toBe("conflict");
+    expect(r.getByTestId("diff-badge-api").textContent).toBe("changed");
+    expect(r.getByTestId("diff-badge-cache").textContent).toBe("added");
+
+    // the conflict is unresolved → Upgrade disabled
+    const upgradeBtn = r.getByTestId("upgrade-btn") as HTMLButtonElement;
+    expect(upgradeBtn.disabled).toBe(true);
+
+    // resolve db=take-upstream → Upgrade enabled
+    fireEvent.click(r.getByTestId("take-upstream-db"));
+    expect((r.getByTestId("upgrade-btn") as HTMLButtonElement).disabled).toBe(false);
+
+    // Upgrade → dry-run plan modal shows the update + create steps
+    fireEvent.click(r.getByTestId("upgrade-btn"));
+    const planTable = await r.findByTestId("upgrade-plan-table", {}, { timeout: 4000 });
+    expect(within(planTable).getByText("update")).toBeTruthy();
+    expect(within(planTable).getByText("create")).toBeTruthy();
+    expect(r.getByTestId("confirm-upgrade")).toBeTruthy();
+  });
+});

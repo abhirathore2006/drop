@@ -11,16 +11,21 @@ import { StackNodeBody } from "../components/StackNodeBody.tsx";
 import { stackNodePath, type GraphNode, type GraphPlanStep, type StackGraph } from "../lib/api.ts";
 import { layoutNodes, pendingByKey } from "../lib/graph.ts";
 
-type StackNodeData = { node: GraphNode; pending?: GraphPlanStep["action"]; preview?: boolean };
+// (D2) `diffBadge` — a template-upgrade badge (added/changed/removed/conflict) overlaid on a node in the
+// upstream-diff view. Kept OUT of StackNodeBody (rendered here, in the canvas wrapper) so the badge is an
+// additive canvas-only concern and the shared node body is untouched.
+type DiffBadge = "added" | "changed" | "removed" | "conflict" | "unchanged";
+type StackNodeData = { node: GraphNode; pending?: GraphPlanStep["action"]; preview?: boolean; diffBadge?: DiffBadge };
 
 // Custom node: the (xyflow-free) body plus the two connection Handles (left target, right source) for the
 // left-to-right layered layout. Handles are non-connectable (read-only) but must exist so edges attach.
 function StackNode({ data }: NodeProps) {
-  const { node, pending, preview } = data as StackNodeData;
+  const { node, pending, preview, diffBadge } = data as StackNodeData;
   return (
     <>
       <Handle type="target" position={Position.Left} isConnectable={false} />
       <StackNodeBody node={node} pending={pending} preview={preview} />
+      {diffBadge && diffBadge !== "unchanged" && <span className={`snode-diff snode-diff-${diffBadge}`}>{diffBadge}</span>}
       <Handle type="source" position={Position.Right} isConnectable={false} />
     </>
   );
@@ -30,7 +35,9 @@ const nodeTypes = { stack: StackNode };
 
 // `preview` (D1): a template preview — nodes-only, no live status, and clicking a node does nothing (the
 // resources don't exist yet). Otherwise identical to the C1 stack canvas.
-export default function StackCanvas({ graph, preview }: { graph: StackGraph; preview?: boolean }) {
+// `diffBadges` (D2): key→badge for the upstream-diff view (added/changed/removed/conflict per node). An
+// ADDITIVE optional prop — omitted, the canvas behaves exactly as before.
+export default function StackCanvas({ graph, preview, diffBadges }: { graph: StackGraph; preview?: boolean; diffBadges?: Record<string, DiffBadge> }) {
   const [, navigate] = useLocation();
 
   const { nodes, edges } = useMemo(() => {
@@ -40,7 +47,7 @@ export default function StackCanvas({ graph, preview }: { graph: StackGraph; pre
       id: n.key,
       type: "stack",
       position: pos[n.key] ?? { x: 0, y: 0 },
-      data: { node: n, pending: pending[n.key], preview } satisfies StackNodeData,
+      data: { node: n, pending: pending[n.key], preview, diffBadge: diffBadges?.[n.key] } satisfies StackNodeData,
       // read-only affordances
       draggable: false,
       connectable: false,
@@ -55,7 +62,7 @@ export default function StackCanvas({ graph, preview }: { graph: StackGraph; pre
       className: `sedge sedge-${e.kind}`,
     }));
     return { nodes, edges };
-  }, [graph]);
+  }, [graph, preview, diffBadges]);
 
   return (
     <ReactFlow

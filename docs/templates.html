@@ -99,6 +99,42 @@
 <p>The <strong>Templates</strong> tab lists every template you can see as cards (name, description, visibility badge). Each card deep-links to <code>/template/&lt;slug&gt;</code> — a page that renders the README, a variables form (required, defaults, and <em>secret fields as password inputs</em>), a read-only canvas preview of the stack graph, and a <strong>Deploy this stack</strong> button that instantiates it and drops you on the new stack's canvas.</p>
 <p>That deep link is stable, so a docs page or README can carry a "Deploy on Drop" badge pointing straight at <code>https://&lt;your-drop&gt;/template/&lt;slug&gt;</code>.</p>
 
+<h2>Staying up to date — the upstream diff</h2>
+<p>A template keeps improving after you instantiate it. Because the stack recorded its <strong>provenance</strong> (<code>from_template</code>, <code>from_template_version</code>) at <code>drop new</code> time, Drop can compare it against the template's latest version and show you exactly what changed — like Dependabot, but for your infrastructure spec. Crucially it is a <strong>three-way</strong> diff, so <em>upstream</em> changes are separated from <em>your local drift</em>:</p>
+<table>
+<thead><tr><th>Axis</th><th>Comparison</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><strong>upstream</strong></td><td>template@pinned → template@latest</td><td>what the template author changed since you deployed.</td></tr>
+<tr><td><strong>local drift</strong></td><td>template@pinned → your current spec</td><td>what <em>you</em> changed on the stack after deploying (a <code>drop up</code> edit, a scale bump…).</td></tr>
+</tbody>
+</table>
+<p>Every top-level resource key — and every field within it — falls into one of four classes:</p>
+<table>
+<thead><tr><th>Class</th><th>Upstream moved?</th><th>Local moved?</th><th>On upgrade</th></tr></thead>
+<tbody>
+<tr><td><code>unchanged</code></td><td>no</td><td>no</td><td>nothing to do.</td></tr>
+<tr><td><code>upstream-only</code></td><td>yes</td><td>no</td><td><strong>applied automatically</strong>.</td></tr>
+<tr><td><code>local-only</code></td><td>no</td><td>yes</td><td><strong>preserved</strong> — your drift is kept.</td></tr>
+<tr><td><code>conflict</code></td><td>yes</td><td>yes (differently)</td><td>needs a <strong>per-key resolution</strong>.</td></tr>
+</tbody>
+</table>
+<p>Resources added or removed upstream are surfaced too (added upstream → created; removed upstream → dropped, unless you had modified it, which is a conflict). This is a <strong>spec-level</strong> diff, per top-level key — not a textual three-way merge. The stack spec is small and structured, so keep it that way.</p>
+<div class="note"><span class="lbl">Note</span><p>The instantiate-time variable values are not persisted (secrets never are), so a variable-driven field is compared against the template version's <strong>default</strong>. A value you overrode at <code>drop new</code> time therefore reads as <em>local drift</em> — which it accurately is: a divergence from the template default that the upgrade will preserve.</p></div>
+
+<h3><code>drop stack outdated</code></h3>
+<pre><code><span class="tok-c">$ drop stack outdated</span>                <span class="tok-c"># list every template-derived stack + an "update available" flag</span>
+<span class="tok-c">$ drop stack outdated shop</span>           <span class="tok-c"># the full three-way diff for one stack</span></code></pre>
+<p>With a name it renders a per-key table — <em>upstream</em> vs <em>local drift</em> vs <em>conflict</em> — so you can see at a glance what an upgrade would pull and what it would leave alone. The console shows the same signal as an <strong>"update available" banner</strong> on the stack page (it calls the same <code>/outdated</code> endpoint) whenever the stack is behind its template's latest.</p>
+
+<h3><code>drop stack upgrade</code></h3>
+<pre><code><span class="tok-c">$ drop stack upgrade shop --dry-run</span>                    <span class="tok-c"># the reconcile plan, nothing applied</span>
+<span class="tok-c">$ drop stack upgrade shop</span>                              <span class="tok-c"># apply (prompts to confirm the plan)</span>
+<span class="tok-c">$ drop stack upgrade shop --to 3</span>                        <span class="tok-c"># upgrade to a specific version (default: latest)</span>
+<span class="tok-c">$ drop stack upgrade shop --take-upstream db --keep-local api</span></code></pre>
+<p>Upgrade applies every non-conflicting upstream change automatically and preserves your local drift. A <strong>conflict</strong> — the same resource key changed on both axes — must be resolved per key: <code>--take-upstream &lt;key&gt;</code> swaps in the template's version wholesale, <code>--keep-local &lt;key&gt;</code> keeps yours. An upgrade that leaves any conflict unresolved is refused (the API returns a <code>409</code> listing the unresolved keys) — nothing is applied until you decide. The merged spec then feeds the <strong>standard <code>drop up</code> dry-run plan</strong>, which you confirm before it executes; a successful upgrade re-pins <code>from_template_version</code> to the target and is audited as <code>stack.upgrade</code>. Resources the template dropped are flagged (not torn down) unless you pass <code>--prune</code>.</p>
+<div class="note warn"><span class="lbl">Conflict resolution is per top-level key</span><p>Choosing <code>--keep-local &lt;key&gt;</code> keeps your <em>entire</em> version of that resource, so any non-conflicting upstream field change on the <em>same</em> key is not applied to it (pick <code>--take-upstream</code> if you want the template's). Every other key still upgrades independently.</p></div>
+<p>In the console the banner opens a <strong>diff view</strong>: the C1 canvas re-fed the merged graph with <em>added / changed / removed / conflict</em> node badges, a per-conflict <em>take upstream / keep local</em> toggle, and an <strong>Upgrade</strong> button that runs the same dry-run plan modal before it executes.</p>
+
 <h2>Seeding the catalog</h2>
 <p>The two <a href="../examples/">examples</a> ship as ready-to-publish templates. With the API running locally (dev-auth on by default):</p>
 <pre><code><span class="tok-c">$ make seed-templates</span>       <span class="tok-c"># idempotent — publishes `guestbook` + `notes` if absent</span></code></pre>
