@@ -99,6 +99,60 @@ drop auth create login --db appdb --signup closed   <span class="tok-c"># admin-
 <div class="note"><span class="lbl">No anon / service-role API keys — a deviation from the Supabase split</span><p>Supabase clients expect a publishable “anon” key and a secret “service_role” key. <strong>OSS GoTrue has no such keys</strong> — its API is key-less and authorized purely by the JWT you present. So v1 injects <code>AUTH_URL</code> + <code>AUTH_JWT_SECRET</code> and stops there; there is no <code>AUTH_PUBLISHABLE_KEY</code>/<code>AUTH_SECRET_KEY</code> pair. Server-side, Drop mints a short-lived <em>service-role</em> JWT (signed with the resource secret) only to proxy the admin API — it never leaves the control plane.</p></div>
 <div class="note"><span class="lbl">Multiple auth resources</span><p>Bind more than one and each variable is prefixed with the resource key so they don't collide — e.g. <code>LOGIN_AUTH_URL</code>. A single binding is unprefixed. Inside a <a href="stacks.html">stack</a>, an <code>auth</code> resource declares its <code>db:</code> and apps reference it with <code>uses: [{ auth: &lt;key&gt; }]</code>.</p></div>
 
+<h2 id="rbac">Roles &amp; permissions for your app</h2>
+<div class="note"><span class="lbl">App roles are NOT Drop's platform roles</span><p>This is your <em>application's</em> authorization model — vocabulary you define (<code>admin</code>, <code>editor</code>, <code>billing:read</code>…), resolved for each end user and stamped into their JWT. It is entirely disjoint from the <a href="roles-visibility.html">platform roles</a> that decide who may operate Drop (owner/admin/editor on a workload). The two never mix, by design.</p></div>
+<p>Turn it on at create time — <code>auth.rbac: true</code> in the <code>auth:</code> config (or the stack's <code>auth</code> resource). This does two things: it plumbs GoTrue's <strong>custom access-token hook</strong> onto the engine, and it makes <code>drop auth rbac-seed</code> available to install the schema.</p>
+<pre><code><span class="tok-k">auth:</span>
+  <span class="tok-k">rbac:</span> true          <span class="tok-c"># seed the app RBAC schema + wire the JWT claims hook</span></code></pre>
+
+<h3 id="rbac-schema">The three tables (the Supabase pattern)</h3>
+<p>Two many-to-many hops — users ↔ roles ↔ permissions — seeded into your <strong>app's own</strong> bound Postgres:</p>
+<table class="tbl">
+<thead><tr><th>Table</th><th>Columns</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><code>app_roles</code></td><td><code>id</code>, <code>name</code> (unique)</td><td>Your role vocabulary.</td></tr>
+<tr><td><code>app_role_permissions</code></td><td><code>role_id</code>, <code>permission</code></td><td>The permissions each role grants.</td></tr>
+<tr><td><code>app_user_roles</code></td><td><code>user_id</code> (uuid), <code>role_id</code></td><td>Which users hold which roles (<code>user_id</code> = GoTrue's <code>auth.users.id</code>).</td></tr>
+</tbody>
+</table>
+
+<h3 id="rbac-hook">The claims hook</h3>
+<p>Alongside the tables, a Postgres function <code>public.drop_access_token_hook(event jsonb) returns jsonb</code> is created. GoTrue calls it on <strong>every issued JWT</strong> (via <code>GOTRUE_HOOK_CUSTOM_ACCESS_TOKEN_ENABLED</code> / <code>_URI</code>, plumbed automatically when <code>rbac: true</code>). It joins the two link tables on <code>event-&gt;&gt;'user_id'</code> and stamps the resolved arrays into the token claims:</p>
+<pre><code>{ <span class="tok-s">"sub"</span>: <span class="tok-s">"…"</span>, <span class="tok-s">"email"</span>: <span class="tok-s">"…"</span>, <span class="tok-k">"roles"</span>: [<span class="tok-s">"admin"</span>], <span class="tok-k">"permissions"</span>: [<span class="tok-s">"notes:write"</span>] }</code></pre>
+<div class="note"><span class="lbl">Engine compatibility (verified)</span><p>The pg-functions access-token hook is supported by the pinned engine <code>supabase/gotrue:v2.170.0</code> (2025-03-06); the hook infrastructure is present by v2.145.0 (2024-03-26). GoTrue's URI parser uses only the <em>schema</em> + <em>function</em> from <code>pg-functions://postgres/public/drop_access_token_hook</code> — the leading <code>postgres</code> segment is ignored — so the URI is correct even though your bound database is named <code>app</code>. GoTrue calls the function over its existing connection (as the <code>app</code> role, which owns the tables + function), so no cross-role grants are needed.</p></div>
+
+<h3 id="rbac-seed">Applying the seed (v1 — honest)</h3>
+<div class="note warn"><span class="lbl">The seed is applied by you via psql — not silently by the control plane</span><p>The plan called these "engine-provision assets". In practice the control plane has <strong>no SQL-execution path against a tenant database yet</strong> (that arrives with the SQL console), and the bound database may pre-exist the auth resource — so Drop will not silently run DDL against your data. Instead the seed ships as (a) exported SQL assets, (b) a CLI command that <strong>prints</strong> the SQL, and (c) the hook env, wired the moment you set <code>rbac: true</code>. All DDL is idempotent (<code>IF NOT EXISTS</code> / <code>CREATE OR REPLACE</code>), so re-running is safe.</p></div>
+<pre><code>drop db proxy appdb                                  <span class="tok-c"># authenticated tunnel; prints a local port</span>
+drop auth rbac-seed login | psql <span class="tok-s">"postgres://app@127.0.0.1:&lt;port&gt;/app"</span></code></pre>
+<p>Grant a user a role with plain SQL (the vocabulary is yours):</p>
+<pre><code><span class="tok-k">insert into</span> app_roles (name) <span class="tok-k">values</span> (<span class="tok-s">'admin'</span>) <span class="tok-k">on conflict do nothing</span>;
+<span class="tok-k">insert into</span> app_user_roles (user_id, role_id)
+  <span class="tok-k">select</span> <span class="tok-s">'&lt;user-uuid&gt;'</span>, id <span class="tok-k">from</span> app_roles <span class="tok-k">where</span> name = <span class="tok-s">'admin'</span>;</code></pre>
+
+<h3 id="sdk">Reading it in your app — <code>@drop/auth</code></h3>
+<p>The in-repo SDK <code>@drop/auth</code> (zero runtime dependencies) has two halves. The <strong>client</strong> wraps GoTrue's REST API, reading the injected <code>AUTH_URL</code>:</p>
+<pre><code><span class="tok-k">import</span> { createAuthClient } <span class="tok-k">from</span> <span class="tok-s">"@drop/auth"</span>;
+<span class="tok-k">const</span> auth = createAuthClient();                 <span class="tok-c">// AUTH_URL comes from the binding</span>
+<span class="tok-k">const</span> { access_token } = <span class="tok-k">await</span> auth.signIn(email, password);
+<span class="tok-c">// also: signUp(email,password), signOut(token), getUser(token), refresh(refreshToken)</span></code></pre>
+<p>The <strong>server</strong> half verifies an incoming request's token locally — HS256 with the injected <code>AUTH_JWT_SECRET</code> (and <code>AUTH_JWT_SECRET_PREVIOUS</code> during a rotation grace window) — and returns the user plus the hook's roles/permissions:</p>
+<pre><code><span class="tok-k">import</span> { verifyRequest } <span class="tok-k">from</span> <span class="tok-s">"@drop/auth"</span>;
+<span class="tok-k">const</span> { user, roles, permissions } = <span class="tok-k">await</span> verifyRequest(req);
+<span class="tok-k">if</span> (!roles.includes(<span class="tok-s">"admin"</span>)) <span class="tok-k">return</span> forbidden();</code></pre>
+<p><code>verifyRequest</code> is framework-agnostic: pass a raw token string, a Fetch <code>Request</code>, a <code>Headers</code>, a Node <code>req</code> (<code>{ headers }</code>), or a plain headers object — it finds the bearer token, and throws on an expired / tampered / missing one. It is async and server-only (it lazy-loads <code>node:crypto</code>, so client bundles that only use <code>createAuthClient</code> stay clean).</p>
+
+<h3 id="rbac-rls">Enforcing in Postgres RLS (a documented pattern, not machinery)</h3>
+<p>Because your app rows and your users live in the same bound Postgres, you can additionally enforce authorization <em>in the database</em> with Row-Level Security that reads the same claims. This is a <strong>pattern you own</strong> — Drop provisions neither the policies nor the claims injection:</p>
+<pre><code><span class="tok-c">-- 1) at the start of a request, after verifyRequest, put the claims into the session:</span>
+<span class="tok-k">select</span> set_config(<span class="tok-s">'request.jwt.claims'</span>, $1, <span class="tok-k">true</span>);   <span class="tok-c">-- $1 = JSON.stringify(claims)</span>
+
+<span class="tok-c">-- 2) policies then read them:</span>
+<span class="tok-k">alter table</span> notes <span class="tok-k">enable row level security</span>;
+<span class="tok-k">create policy</span> admins_write <span class="tok-k">on</span> notes <span class="tok-k">for all</span>
+  <span class="tok-k">using</span> ( (current_setting(<span class="tok-s">'request.jwt.claims'</span>, <span class="tok-k">true</span>)::jsonb -&gt; <span class="tok-s">'roles'</span>) ? <span class="tok-s">'admin'</span> );</code></pre>
+<div class="note"><span class="lbl">Pattern, not platform</span><p>Drop ships the roles/permissions tables + the claims hook. RLS policies that <em>reference</em> those claims — and the <code>set_config</code> that injects them per request (there is no PostgREST doing it for you) — are entirely yours to write. Documented here so the capability is discoverable.</p></div>
+
 <h2 id="providers">OAuth providers</h2>
 <p>Declare each provider's <strong>own</strong> client id under <code>auth.providers</code> (client ids are not secret — they live in the spec). The client <strong>secret</strong> is written out-of-band, never to the spec:</p>
 <pre><code><span class="tok-k">auth:</span>
@@ -122,7 +176,7 @@ drop auth create login --db appdb --signup closed   <span class="tok-c"># admin-
 <pre><code>drop auth users create login alice@example.com    <span class="tok-c"># prints a temp password ONCE</span>
 drop auth users ls login
 drop auth users rm login &lt;user-id&gt;</code></pre>
-<p>The console's <strong>Auth</strong> detail page shows providers, signup state, key age, and the same user admin (list / search / create-with-temp-password / disable / delete) with the created password shown once. <strong>MCP exposes <code>auth_create</code> and <code>auth_status</code> only</strong> — there is deliberately no end-user CRUD via agents in v1.</p>
+<p>The console's <strong>Auth</strong> detail page shows providers, signup state, key age, and the same user admin (list / search / create-with-temp-password / disable / delete) with the created password shown once. <strong>MCP exposes <code>auth_create</code>, <code>auth_status</code> and <code>auth_config</code> (read the config surface — never key material) only</strong> — there is deliberately no end-user CRUD via agents in v1.</p>
 
 <h2 id="edge-adr">ADR: the edge visibility exemption</h2>
 <div class="note warn"><span class="lbl">The single most security-sensitive change in the visibility model — reviewed as an ADR</span></div>

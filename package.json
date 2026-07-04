@@ -5,6 +5,9 @@
   "engines": {
     "node": ">=24"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "drop": "dist/drop.js",
     "drop-mcp": "dist/mcp.js"

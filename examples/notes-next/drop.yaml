@@ -24,11 +24,13 @@ app:
   #   drop start notes   # first boot, already has the password
   # Secrets are stored in the secret manager and injected as env vars — see ../DATABASE_APPS.md.
 
-# --- The SAME notes app, as a STACK (B2). One command provisions the database AND the app and wires the
-# app→database edge:  drop up examples/notes-next
+# --- The SAME notes app, as a STACK (B2) — the "Next.js + Postgres + Auth" golden path. One command
+# provisions the database, a managed auth resource AND the app, wiring every edge:  drop up examples/notes-next
 # This is additive — the `app:` section above still works with `drop deploy`. The stack creates a database
-# `notes-db` (key `db` → `<stack>-<key>`) and an app `notes-web`, building the image from this folder's
-# Dockerfile. `uses: [{ database: db }]` injects the CNPG `notes-db-app` secret + CA + PGSSLMODE=verify-full.
+# `notes-db` (key `db` → `<stack>-<key>`), an auth resource `notes-auth`, and an app `notes-web`, building
+# the image from this folder's Dockerfile.
+#   uses: [{ database: db }] → injects the CNPG `notes-db-app` secret + CA + PGSSLMODE=verify-full.
+#   uses: [{ auth: auth }]   → injects AUTH_URL + AUTH_JWT_SECRET (write-only path) so @drop/auth works.
 # Set PGPASSWORD after `up`:  drop db password notes-db --set-secret notes-web:PGPASSWORD && drop restart notes-web
 stack:
   name: notes
@@ -36,10 +38,16 @@ stack:
     db:
       type: database
       storage: 1Gi
+    auth:
+      type: auth
+      db: db # the GoTrue engine + your end users live in the `db` database (same stack)
+      rbac: true # seed the app roles/permissions tables + wire the JWT claims hook (see: drop auth rbac-seed)
+      signup: open
+      # redirect_urls: [ "https://notes-web.<your-base-domain>/auth/callback" ]  # only needed for OAuth providers
     web:
       type: app
       dir: . # build context → built + pushed through Drop at `up`
-      uses: [{ database: db }] # app→database edge; `db` resolves to the site name `notes-db`
+      uses: [{ database: db }, { auth: auth }] # app→database + app→auth edges (keys resolve to site names)
       scale: { min: 1, max: 2 }
       resources: { cpu: "500m", memory: "512Mi" }
       env:
@@ -48,4 +56,8 @@ stack:
         PGUSER: app
         PGDATABASE: app
         # PGSSLMODE is set to verify-full by the `uses` binding (with the mounted CA); PGPASSWORD is a
-        # write-only secret set after `up` (see the comment above).
+        # write-only secret set after `up` (see the comment above). AUTH_URL + AUTH_JWT_SECRET are
+        # injected by the `uses: [{ auth: auth }]` edge — never put them here.
+    # After `up`, seed the RBAC tables once (the API has no tenant-DB SQL path in v1):
+    #   drop db proxy notes-db            # prints a local port
+    #   drop auth rbac-seed notes-auth | psql "postgres://app@127.0.0.1:<port>/app"

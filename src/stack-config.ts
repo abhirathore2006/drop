@@ -81,6 +81,7 @@ export interface StackResource {
   jwt_ttl?: string;
   signup?: SignupMode;
   site_url?: string;
+  rbac?: boolean; // (K2) seed the app-RBAC schema + wire the GoTrue claims hook (see rbac-seed.ts)
 }
 
 export interface StackSpec {
@@ -169,6 +170,7 @@ function sanitizeAuth(sub: Record<string, unknown>): StackResource | undefined {
   if (ac.name && validateName(ac.name) === null) res.name = ac.name;
   if (ac.providers) res.providers = ac.providers;
   if (ac.site_url) res.site_url = ac.site_url;
+  if (ac.rbac) res.rbac = true; // (K2) carry the RBAC flag through so the stack reconcile wires the hook
   const db = str(sub.db, 63);
   if (db) res.db = db;
   return res;

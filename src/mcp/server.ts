@@ -145,6 +145,11 @@ export function buildMcp(): McpServer {
   // (A3) db:proxy — deliberately NO MCP tool. The tunnel is an interactive, long-lived raw-TCP session
   // for a human at a `psql` prompt (`drop db proxy <db>`); an agent opening a raw database socket is out
   // of scope v1 (an agent that needs data should go through a purpose-built query tool, not a byte pipe).
+  // (J3) `drop exec` — deliberately NO MCP tool, SAME posture as db:proxy. It is an interactive raw-byte
+  // terminal session (`drop exec <app>`), not a natural request/response surface; and because a shell can
+  // `env` an app's write-only secrets, a shell into a running container should be an explicit human
+  // action, not something an agent reaches for. Service tokens can still drive it via the `exec:<app>`
+  // scope on the CLI when a non-interactive automation genuinely needs it.
 
   // tenant object storage (buckets, I1)
   server.registerTool(
@@ -222,6 +227,15 @@ export function buildMcp(): McpServer {
     "auth_status",
     { description: "Show an auth resource's config surface (providers, signup, redirect URLs, key age) + live engine status. Never returns key material.", inputSchema: { name: z.string() } },
     async ({ name }) => run(() => getClient().then((c) => c.info(name))),
+  );
+  server.registerTool(
+    "auth_config",
+    {
+      description:
+        "Read an auth resource's declared configuration (providers, signup mode, redirect URLs, JWT TTL, rbac on/off, bound database) — the config surface only, NEVER any secret or key material. Read-only.",
+      inputSchema: { name: z.string() },
+    },
+    async ({ name }) => run(() => getClient().then((c) => c.authConfig(name))),
   );
 
   server.registerTool(

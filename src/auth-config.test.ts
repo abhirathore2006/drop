@@ -63,6 +63,15 @@ test("reserved K-mail smtp/email keys are ACCEPTED + STORED (ignored by the engi
   expect(c.email).toEqual({ from: "no-reply@x.com" });
 });
 
+test("rbac: only boolean true is stored; false/absent/junk → omitted (K2)", () => {
+  expect(sanitizeAuthConfig({ rbac: true })!.rbac).toBe(true);
+  expect(sanitizeAuthConfig({ rbac: false })!.rbac).toBeUndefined();
+  expect(sanitizeAuthConfig({ rbac: "true" })!.rbac).toBeUndefined(); // string junk → not enabled
+  expect(sanitizeAuthConfig({})!.rbac).toBeUndefined();
+  // round-trip: a config with rbac:true re-sanitizes identically
+  expect(sanitizeAuthConfig(sanitizeAuthConfig({ rbac: true }))).toEqual(sanitizeAuthConfig({ rbac: true }));
+});
+
 test("round-trip: re-sanitizing an AuthConfig yields the same AuthConfig", () => {
   const once = sanitizeAuthConfig({
     providers: { google: { client_id: "g" }, oidc: { client_id: "o", issuer: "https://i.example.com" } },

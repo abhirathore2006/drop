@@ -29,6 +29,10 @@ export interface AuthConfig {
   site_url?: string; // the app's canonical URL (GOTRUE_SITE_URL); defaults to the first redirect
   jwt_ttl: string; // access-token TTL, a duration string ("1h", "30m"); default "1h"
   signup: SignupMode; // "open" (default) — anyone may sign up; "closed" — admin-created users only
+  // (K2) App RBAC. When true, Drop plumbs the GoTrue custom-access-token hook env onto the engine and
+  // `drop auth rbac-seed <name>` prints the Supabase-pattern roles/permissions schema + claims-hook
+  // function to apply against the bound database. App-defined vocabulary; disjoint from platform can().
+  rbac?: boolean;
   // Reserved for K-mail (accepted + stored, NOT mapped to engine env in v1). Sanitized to a plain
   // string→string map so it round-trips unchanged; the engine ignores it until K-mail wires SMTP.
   smtp?: Record<string, string>;
@@ -116,6 +120,9 @@ export function sanitizeAuthConfig(input: unknown): AuthConfig | undefined {
 
   const ttl = str(raw.jwt_ttl ?? raw.jwtTtl, 16);
   if (ttl && DURATION_RE.test(ttl.trim())) cfg.jwt_ttl = ttl.trim();
+
+  // (K2) rbac is a plain boolean; only `true` is stored (round-trip safe — false/absent → omitted).
+  if (raw.rbac === true) cfg.rbac = true;
 
   if (Array.isArray(raw.redirect_urls ?? raw.redirectUrls)) {
     const seen = new Set<string>();

@@ -15,6 +15,7 @@
 import type { AuthConfig, AuthProviderKind } from "../auth-config.ts";
 import { jwtTtlSeconds } from "../auth-config.ts";
 import type { AdminOp, AdminRoute, AuthEngine, EngineEnvContext } from "./engine.ts";
+import { rbacHookEnv } from "./rbac-seed.ts";
 
 // Concrete pinned tag — see the module header. Exported so Helm/docs reference ONE source of truth.
 export const GOTRUE_IMAGE = "docker.io/supabase/gotrue:v2.170.0";
@@ -74,6 +75,10 @@ export class GoTrueEngine implements AuthEngine {
       env[`GOTRUE_EXTERNAL_${stem}_REDIRECT_URI`] = `${ctx.apiExternalUrl}/callback`;
       if (kind === "oidc" && p.issuer) env[`GOTRUE_EXTERNAL_${stem}_URL`] = p.issuer;
     }
+    // (K2) App RBAC: plumb the custom-access-token hook env whenever `rbac: true`. The hook function
+    // (public.drop_access_token_hook) is applied out-of-band via `drop auth rbac-seed` (v1); GoTrue
+    // tolerates a not-yet-created hook function at boot and activates it once it exists. See rbac-seed.ts.
+    if (cfg.rbac) Object.assign(env, rbacHookEnv());
     return env;
   }
 
