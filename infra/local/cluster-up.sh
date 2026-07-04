@@ -98,7 +98,8 @@ else
   fi
 fi
 # host alias k3s pods use to reach sibling containers (Floci) on the host — full mode only.
-HOST_ALIAS="host.docker.internal"; [ "$CE" = "podman" ] && HOST_ALIAS="host.containers.internal"
+# any podman flavor (incl. a wrapper like `podman --connection <root>`) resolves the podman alias
+HOST_ALIAS="host.docker.internal"; case "$CE" in podman*) HOST_ALIAS="host.containers.internal";; esac
 
 # ── k3s as a container (idempotent) ────────────────────────────────────────────
 # Reuse a running container; RESTART a stopped one (preserves the cluster — KEDA, apps, DBs,
