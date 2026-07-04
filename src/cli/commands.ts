@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { randomBytes } from "node:crypto";
 import { rm, readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
@@ -54,6 +55,11 @@ async function readStdin(): Promise<string> {
 
 /** Commander collector for repeatable options (`--var a --var b` → ["a","b"]). */
 const collect = (v: string, acc: string[]): string[] => (acc.push(v), acc);
+
+/** A short, DNS-safe, collision-resistant preview label when the user doesn't name one: "pr-3f9a2b". */
+function randomPreviewLabel(): string {
+  return `pr-${randomBytes(3).toString("hex")}`;
+}
 
 interface TemplateVarSpec { key: string; description?: string; default?: string; required: boolean; secret?: boolean }
 /** Parse a `--var key:description:default` declaration (the default may itself contain colons). */
@@ -199,17 +205,36 @@ export function buildProgram(): Command {
     .command("publish <dir> [name]")
     .description("Publish a built folder (name optional — taken from drop.yaml, else generated)")
     .option("--org <slug>", "create in this organisation (default: your personal org)")
-    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string }) => {
+    .option("--preview [label]", "publish as a PREVIEW at <name>--<label> (leaves the live site untouched); label defaults to a short random suffix")
+    .option("--expire-days <n>", "preview expiry in days, 1-30 (default 7); only with --preview", (v) => parseInt(v, 10))
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; preview?: string | boolean; expireDays?: number }) => {
       const { name, source } = await resolveSiteName(dir, nameArg);
       console.log(`  ▸ packing ${dir}`);
       const tarball = await packDir(dir);
-      console.log(`  ▸ dropping to ${name}…`);
-      const res = await (await client()).publish(name, tarball, opts.org);
-      console.log(`  ✓ live at ${res.url}`);
+      // Commander's `[label]` (optional-value option) gives `true` for a bare `--preview`.
+      const preview = opts.preview === undefined ? undefined : { label: typeof opts.preview === "string" ? opts.preview : randomPreviewLabel(), expireDays: opts.expireDays };
+      console.log(`  ▸ dropping to ${name}${preview ? ` (preview: ${preview.label})` : ""}…`);
+      const res = await (await client()).publish(name, tarball, opts.org, preview);
+      if (res.preview) {
+        console.log(`  ✓ preview live at ${res.preview.url}  (expires ${res.preview.expiresAt})`);
+      } else {
+        console.log(`  ✓ live at ${res.url}`);
+      }
       if (source === "generated") {
         console.log(`  tip: add  name: ${name}  under site: in drop.yaml to keep this URL across deploys.`);
       }
     });
+
+  // ---- previews (E1): labeled, expiring extra versions served at <name>--<label> ----
+  const previewCmd = program.command("preview").description("Manage static-site previews (drop publish --preview creates one)");
+  previewCmd
+    .command("ls <name>")
+    .description("List a site's active previews")
+    .action(async (name: string) => show(await (await client()).previewList(name)));
+  previewCmd
+    .command("rm <name> <label>")
+    .description("Remove a preview (audited)")
+    .action(async (name: string, label: string) => show(await (await client()).previewRemove(name, label)));
 
   program
     .command("deploy <dir> [name]")

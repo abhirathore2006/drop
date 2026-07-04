@@ -5,6 +5,7 @@ import { request as httpRequest } from "node:http";
 import { Readable } from "node:stream";
 import type { BlobStore } from "../blob/types.ts";
 import { MetaStore } from "../metastore/store.ts";
+import { PreviewStore } from "../previews/store.ts";
 import { DiskCache } from "./disk-cache.ts";
 import type { SiteConfig } from "../site-config.ts";
 import type { Visibility, WorkloadType } from "../metastore/types.ts";
@@ -25,6 +26,10 @@ export interface EdgeDeps {
   /** KEDA HTTP interceptor base URL (e.g. http://keda-add-ons-http-interceptor-proxy.keda:8080).
    *  type=app hostnames reverse-proxy here; the interceptor routes by Host and wakes the pod. */
   interceptorUrl?: string;
+  /** (E1) Preview registry — resolves `<site>--<label>` hosts to a specific version. Optional and
+   *  gracefully degraded, same posture as `interceptorUrl`: without it, every preview host 404s
+   *  rather than crashing an instance that hasn't wired one up. */
+  previews?: PreviewStore;
 }
 
 interface CacheEntry {
@@ -108,13 +113,29 @@ export function createEdge(d: EdgeDeps) {
     });
   }
 
+  /** Resolve + cache a host label's serving pointer. A plain site host resolves straight off
+   *  `sites`; a `<site>--<label>` PREVIEW host (E1) resolves through the previews registry to a
+   *  SPECIFIC version instead of `current_version`, while inheriting the parent site's
+   *  visibility/password/config verbatim (never its own — previews don't carry independent access
+   *  settings). The cache keys on the WHOLE resolved host label, so a preview naturally gets its own
+   *  entry keyed on (site,label) alongside the parent's own (unlabeled) entry — same TTL semantics,
+   *  including caching a miss (unknown site OR unknown/expired preview) for the TTL window. */
   async function current(name: string): Promise<CacheEntry> {
     const hit = cache.get(name);
     if (hit && now() < hit.exp) return hit;
-    const ptr = await d.meta.getPointer(name);
+    const preview = parsePreviewHost(name);
+    const ptr = await d.meta.getPointer(preview ? preview.site : name);
+    let type = ptr?.type ?? "site";
+    let version = ptr?.currentVersion ?? null;
+    if (preview) {
+      type = "site"; // E1 previews are static-site only; a non-site parent resolves to a miss below
+      const row = ptr && ptr.type === "site" && d.previews ? await d.previews.get(preview.site, preview.label) : null;
+      const expired = !row || new Date(row.expiresAt).getTime() <= now();
+      version = row && !expired ? row.versionId : null;
+    }
     const entry: CacheEntry = {
-      type: ptr?.type ?? "site",
-      version: ptr?.currentVersion ?? null,
+      type,
+      version,
       config: ptr?.config,
       visibility: ptr?.visibility ?? "public",
       passwordHash: ptr?.passwordHash ?? null,
@@ -168,27 +189,51 @@ export function createEdge(d: EdgeDeps) {
   // Health endpoint for k8s probes (obscure path → won't shadow real site assets).
   app.get("/_drop_health", (c) => c.text("ok"));
   app.all("*", async (c) => {
+    const res = await handleSiteRequest(c);
+    // (E1) Preview hosts (`<site>--<label>.<baseDomain>`) must never be indexed — stamp the header
+    // on EVERY response for a preview host (200s, redirects, denials, 404s alike), not just
+    // successful serves. Cheap + pure (no DB): re-derive the host label the same way
+    // handleSiteRequest did rather than threading a flag through every one of its return points.
+    const label = siteFromHost(c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "", d.baseDomain);
+    if (label && parsePreviewHost(label)) {
+      const headers = new Headers(res.headers);
+      headers.set("x-robots-tag", "noindex");
+      return new Response(res.body, { status: res.status, headers });
+    }
+    return res;
+  });
+
+  async function handleSiteRequest(c: Context): Promise<Response> {
     // Prefer the proxy-forwarded host (nginx locally, ALB/ingress in prod) so
     // the site name survives a reverse proxy; fall back to the direct Host header.
-    const name = siteFromHost(c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "", d.baseDomain);
-    if (!name) return notFound("site not found");
+    const rawLabel = siteFromHost(c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "", d.baseDomain);
+    if (!rawLabel) return notFound("site not found");
+    // (E1) A `<site>--<label>` host is a PREVIEW: `current()` resolves it through the previews
+    // registry to a specific version instead of current_version. `siteName` is always the PARENT
+    // site — byte storage (filesPrefix) and app-proxy routing are keyed on it, never on the
+    // combined host label.
+    const preview = parsePreviewHost(rawLabel);
+    const siteName = preview ? preview.site : rawLabel;
 
-    const { type, version, config: cfg, visibility, passwordHash } = await current(name);
+    const { type, version, config: cfg, visibility, passwordHash } = await current(rawLabel);
     const config = cfg ?? {};
     // type=app: reverse-proxy to the interceptor (KEDA wakes + routes by Host). Apps
     // don't use the static-site machinery below (S3 bytes, redirects, SPA fallback).
     if (type === "app") {
       if (!version) return notFound("app not found or not deployed");
-      return proxyToApp(c, name);
+      return proxyToApp(c, siteName);
     }
-    if (!version) return notFound("site not found or nothing published");
-    const prefix = d.meta.filesPrefix(name, version);
+    if (!version) {
+      return notFound(preview ? `preview "${preview.label}" not found or expired` : "site not found or nothing published");
+    }
+    const prefix = d.meta.filesPrefix(siteName, version);
 
     const urlPath = "/" + posix.normalize("/" + c.req.path).replace(/^\/+/, "");
     const cors = corsHeaders(c.req.header("origin"), config.cors);
 
     // 0+1. Visibility (private fails closed — viewer auth lands in a later feature) +
-    // password gate, via the shared helper the WS upgrade path reuses verbatim.
+    // password gate, via the shared helper the WS upgrade path reuses verbatim. A preview inherits
+    // the PARENT site's gate verbatim (E1) — same visibility/password, never its own.
     const denial = checkAccessGate({ visibility, passwordHash, config }, c.req.header("authorization"));
     if (denial) return new Response(denial.body, { status: denial.status, headers: denial.headers });
     // 2. CORS preflight
@@ -230,7 +275,7 @@ export function createEdge(d: EdgeDeps) {
       if (res) return res;
     }
     return notFound("not found");
-  });
+  }
 
   return app;
 }
@@ -251,6 +296,20 @@ export function siteFromHost(host: string, baseDomain: string): string | null {
   const label = h.slice(0, -suffix.length);
   if (!label || label.includes(".")) return null;
   return label;
+}
+
+/** Split a resolved site-host label on the E1 preview separator: `<site>--<label>` → {site,label}.
+ *  `--` is reserved in BOTH site names (src/names.ts) and preview labels (src/previews/store.ts)
+ *  precisely so this split is always unambiguous — neither half can itself contain "--". Returns
+ *  null for a plain (non-preview) host, or for a malformed split (an empty half) — which just falls
+ *  through to an ordinary "not found" rather than ever being treated as a valid preview. */
+export function parsePreviewHost(label: string): { site: string; label: string } | null {
+  const i = label.indexOf("--");
+  if (i < 0) return null;
+  const site = label.slice(0, i);
+  const previewLabel = label.slice(i + 2);
+  if (!site || !previewLabel) return null;
+  return { site, label: previewLabel };
 }
 
 /** The inputs the access gate needs — the lean pointer fields, no request object. */

@@ -2216,3 +2216,99 @@ test("revoke: a revoked token stops authenticating (subsequent request → 401)"
   expect((await call(app, "POST", "/v1/apps/myapp", token, { image: "x:3" })).status).toBe(401);
   await db.destroy();
 });
+
+// ---- previews (E1) -------------------------------------------------------------------------------
+
+const pubPreview = (app: any, tok: string, name: string, label: string, body: Buffer, expireDays?: number) => {
+  const q = new URLSearchParams({ preview: label });
+  if (expireDays != null) q.set("expire_days", String(expireDays));
+  return app.request(`/v1/sites/${name}/versions?${q.toString()}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${tok}`, "content-type": "application/gzip" },
+    body,
+  });
+};
+
+test("preview publish: creates a version but leaves current_version UNTOUCHED; the row is upserted; audited", async () => {
+  const { app, meta, audit, db } = await mk();
+  expect((await pub(app, "alice", "myapp", await tgz({ "index.html": "v1" }))).status).toBe(200);
+  const before = (await meta.getSitePlain("myapp"))!.currentVersion;
+
+  const res = await pubPreview(app, "alice", "myapp", "pr-1", await tgz({ "index.html": "preview-bytes" }));
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.preview.label).toBe("pr-1");
+  expect(body.preview.url).toBe("https://myapp--pr-1.drop.example.com");
+  expect(typeof body.preview.expiresAt).toBe("string");
+
+  const after = (await meta.getSitePlain("myapp"))!.currentVersion;
+  expect(after).toBe(before); // current_version untouched
+
+  const list = await meta.listVersions("myapp");
+  expect(list.some((v) => v.id === body.preview.versionId)).toBe(true); // the version WAS stored
+
+  // re-publishing the SAME label re-points it (upsert), not a second row
+  const res2 = await pubPreview(app, "alice", "myapp", "pr-1", await tgz({ "index.html": "preview-bytes-2" }));
+  const body2 = await res2.json();
+  const previewsResp = await (await call(app, "GET", "/v1/sites/myapp/previews", "alice")).json();
+  expect(previewsResp.previews).toHaveLength(1);
+  expect(previewsResp.previews[0].versionId).toBe(body2.preview.versionId);
+
+  const entries = (await audit.list({ action: "preview.create" })).entries;
+  expect(entries.length).toBe(2); // one per publish (re-point still audits)
+  expect(entries[0]!.target).toBe("myapp");
+  expect(entries[0]!.detail).toMatchObject({ label: "pr-1" });
+  await db.destroy();
+});
+
+test("preview publish: label validation 400s (before the upload is even read)", async () => {
+  const { app, db } = await mk();
+  for (const bad of ["", "-abc", "abc-", "Abc", "a".repeat(21), "pr--1"]) {
+    const res = await pubPreview(app, "alice", "myapp", bad, await tgz({ "index.html": "x" }));
+    expect(res.status).toBe(400);
+  }
+  await db.destroy();
+});
+
+test("preview publish: ?expire_days is honored within range, clamped outside it", async () => {
+  const { app, db } = await mk();
+  const days = async (label: string, n?: number) => {
+    const res = await pubPreview(app, "alice", "myapp", label, await tgz({ "index.html": "x" }), n);
+    const body = await res.json();
+    return (new Date(body.preview.expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
+  };
+  expect(await days("a", 3)).toBeCloseTo(3, 0); // honored
+  expect(await days("b", 0)).toBeCloseTo(1, 0); // clamped up to the 1-day floor
+  expect(await days("c", 999)).toBeCloseTo(30, 0); // clamped down to the 30-day ceiling
+  expect(await days("d", undefined)).toBeCloseTo(7, 0); // default
+  await db.destroy();
+});
+
+test("preview rm: removes it (audited); unknown label 404; same authz tier as publish", async () => {
+  const { app, audit, db } = await mk();
+  await pubPreview(app, "alice", "myapp", "pr-1", await tgz({ "index.html": "x" }));
+  expect((await call(app, "DELETE", "/v1/sites/myapp/previews/nope", "alice")).status).toBe(404);
+  const rm = await call(app, "DELETE", "/v1/sites/myapp/previews/pr-1", "alice");
+  expect(rm.status).toBe(200);
+  expect((await rm.json()).removed).toBe(true);
+  // it's gone
+  const list = await (await call(app, "GET", "/v1/sites/myapp/previews", "alice")).json();
+  expect(list.previews).toHaveLength(0);
+  const entries = (await audit.list({ action: "preview.delete" })).entries;
+  expect(entries).toHaveLength(1);
+  expect(entries[0]!.detail).toMatchObject({ label: "pr-1" });
+  // viewer (read-only) cannot remove — publish tier required
+  await pubPreview(app, "alice", "myapp", "pr-2", await tgz({ "index.html": "x" }));
+  await call(app, "POST", "/v1/sites/myapp/collaborators", "alice", { email: "bob@example.com", role: "viewer" });
+  expect((await call(app, "DELETE", "/v1/sites/myapp/previews/pr-2", "bob")).status).toBe(403);
+  await db.destroy();
+});
+
+test("preview GET is embedded in the site detail response too", async () => {
+  const { app, db } = await mk();
+  await pubPreview(app, "alice", "myapp", "pr-1", await tgz({ "index.html": "x" }));
+  const detail = await (await call(app, "GET", "/v1/sites/myapp", "alice")).json();
+  expect(detail.previews).toHaveLength(1);
+  expect(detail.previews[0].label).toBe("pr-1");
+  await db.destroy();
+});

@@ -58,3 +58,19 @@ test("`update` is a top-level command (self-updates the CLI)", () => {
 test("the program exposes a version (drop --version / -v)", () => {
   expect(buildProgram().version()).toBe(VERSION);
 });
+
+test("publish carries --preview/--expire-days (E1); `preview` is a group with ls/rm", () => {
+  const p = buildProgram();
+  const publish = p.commands.find((c) => c.name() === "publish")!;
+  expect(publish.options.some((o) => o.long === "--preview")).toBe(true);
+  expect(publish.options.some((o) => o.long === "--expire-days")).toBe(true);
+
+  const top = p.commands.map((c) => c.name());
+  expect(top).toContain("preview");
+  const preview = p.commands.find((c) => c.name() === "preview")!;
+  const subs = preview.commands.map((c) => c.name());
+  expect(subs).toContain("ls");
+  expect(subs).toContain("rm");
+  // ls/rm identify a globally-unique resource name → no --org (mirrors share/rm/rollback etc.)
+  expect(preview.commands.find((c) => c.name() === "ls")!.options.some((o) => o.long === "--org")).toBe(false);
+});

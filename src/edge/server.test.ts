@@ -1,8 +1,9 @@
 import { test, expect } from "bun:test";
 import * as http from "node:http";
-import { createEdge } from "./server.ts";
+import { createEdge, parsePreviewHost } from "./server.ts";
 import { FakeBlob } from "../blob/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
+import { PreviewStore } from "../previews/store.ts";
 import { UserStore } from "../users/store.ts";
 import { OrgStore } from "../orgs/store.ts";
 import { makeTestDb } from "../db/testdb.ts";
@@ -259,4 +260,85 @@ test("disk cache: second request (even a fresh instance) skips S3", async () => 
   expect(r.status).toBe(200);
   expect(await r.text()).toBe("console.log(1)");
   expect(fileGets).toBe(1); // served from disk the 2nd time — no extra S3 read
+});
+
+// ---- previews (E1) ------------------------------------------------------------------------------
+
+/** myapp: current_version=v1 ("current"), plus a "pr1" preview pointing at v2 ("preview"). */
+async function setupPreview(expiresAt = new Date(Date.now() + 60_000)) {
+  const { db, meta, blob, orgs } = await base();
+  await claim(meta, orgs, "myapp", "alice@example.com");
+  const p1 = meta.filesPrefix("myapp", "v1");
+  await blob.put(p1 + "index.html", Buffer.from("current"), 7, "text/html");
+  const p2 = meta.filesPrefix("myapp", "v2");
+  await blob.put(p2 + "index.html", Buffer.from("preview"), 7, "text/html");
+  await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
+  const previews = new PreviewStore(db);
+  await previews.upsert("myapp", "pr1", "v2", "alice@example.com", expiresAt);
+  return { db, meta, blob, previews };
+}
+
+test("parsePreviewHost splits <site>--<label>; null for a plain host or a malformed split", () => {
+  expect(parsePreviewHost("myapp--pr1")).toEqual({ site: "myapp", label: "pr1" });
+  expect(parsePreviewHost("myapp")).toBeNull();
+  expect(parsePreviewHost("--pr1")).toBeNull(); // empty site half
+  expect(parsePreviewHost("myapp--")).toBeNull(); // empty label half
+});
+
+test("preview host serves the PREVIEW version's bytes; the main host still serves current", async () => {
+  const { meta, blob, previews } = await setupPreview();
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", previews });
+  const main = await edge.request("/", { headers: { host: "myapp.drop.example.com", accept: "text/html" } });
+  expect(main.status).toBe(200);
+  expect(await main.text()).toBe("current");
+  const pv = await edge.request("/", { headers: { host: "myapp--pr1.drop.example.com", accept: "text/html" } });
+  expect(pv.status).toBe(200);
+  expect(await pv.text()).toBe("preview");
+});
+
+test("unknown preview label -> 404 (not the parent's current bytes)", async () => {
+  const { meta, blob, previews } = await setupPreview();
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", previews });
+  const res = await edge.request("/", { headers: { host: "myapp--nope.drop.example.com", accept: "text/html" } });
+  expect(res.status).toBe(404);
+  expect(await res.text()).not.toContain("current");
+});
+
+test("expired preview -> 404", async () => {
+  const { meta, blob, previews } = await setupPreview(new Date(Date.now() - 1000)); // already expired
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", previews });
+  const res = await edge.request("/", { headers: { host: "myapp--pr1.drop.example.com", accept: "text/html" } });
+  expect(res.status).toBe(404);
+});
+
+test("previews store not configured -> preview host 404s gracefully (no crash)", async () => {
+  const { meta, blob } = await setupPreview();
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com" }); // no `previews`
+  const res = await edge.request("/", { headers: { host: "myapp--pr1.drop.example.com", accept: "text/html" } });
+  expect(res.status).toBe(404);
+});
+
+test("X-Robots-Tag: noindex is present on EVERY preview response (200 and 404); absent on the main host", async () => {
+  const { meta, blob, previews } = await setupPreview();
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", previews });
+  const ok = await edge.request("/", { headers: { host: "myapp--pr1.drop.example.com", accept: "text/html" } });
+  expect(ok.headers.get("x-robots-tag")).toBe("noindex");
+  const missing = await edge.request("/", { headers: { host: "myapp--nope.drop.example.com", accept: "text/html" } });
+  expect(missing.status).toBe(404);
+  expect(missing.headers.get("x-robots-tag")).toBe("noindex");
+  const main = await edge.request("/", { headers: { host: "myapp.drop.example.com", accept: "text/html" } });
+  expect(main.headers.get("x-robots-tag")).toBeNull();
+});
+
+test("preview inherits the PARENT site's visibility/password gate (never its own)", async () => {
+  const { meta, blob, previews } = await setupPreview();
+  const { hashPassword } = await import("../site-config.ts");
+  await meta.setVisibility("myapp", "password", hashPassword("opensesame"));
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", previews });
+  const no = await edge.request("/", { headers: { host: "myapp--pr1.drop.example.com" } });
+  expect(no.status).toBe(401);
+  const tok = "Basic " + Buffer.from("anyuser:opensesame").toString("base64");
+  const ok = await edge.request("/", { headers: { host: "myapp--pr1.drop.example.com", authorization: tok } });
+  expect(ok.status).toBe(200);
+  expect(await ok.text()).toBe("preview");
 });

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Previews · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="templates.html">Templates</a>
+      <a href="buckets.html">Buckets (object storage)</a>
+      <a href="previews.html" class="active">Previews</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <a href="tokens.html">CI tokens (service accounts)</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Previews</h1>
+<p class="lead">A <strong>preview</strong> is a labeled, expiring extra version of a static site, served at its own hostname alongside — never instead of — the site's normal live version. Publish a build under a label (a branch name, a PR number, anything DNS-safe) and it's reachable at <code>&lt;name&gt;--&lt;label&gt;.drop.example.com</code> immediately, without touching what <code>&lt;name&gt;.drop.example.com</code> is currently serving. This is the "static previews" slice (E1) — app previews (a full parallel deployment, not just bytes) are a separate, later piece.</p>
+
+<h2 id="flow">The flow</h2>
+<pre><code><span class="tok-c"># publish a preview under a label (defaults to a short random suffix if you omit one)</span>
+$ drop publish ./dist myapp --preview pr-42
+  ▸ packing ./dist
+  ▸ dropping to myapp (preview: pr-42)…
+  <span class="tok-s">✓ preview live at https://myapp--pr-42.drop.example.com  (expires 2026-07-11T00:00:00.000Z)</span>
+
+<span class="tok-c"># myapp.drop.example.com is UNCHANGED — still serving whatever it served before</span>
+
+$ drop preview ls myapp
+$ drop preview rm myapp pr-42</code></pre>
+<p>Re-publishing the <strong>same label</strong> re-points it at the new build (an upsert, not a second preview) — exactly what a CI job does on every push to a pull request: one label per PR, always pointing at its latest commit.</p>
+
+<h2 id="hostname">The hostname scheme</h2>
+<p>A preview lives at <code>&lt;name&gt;--&lt;label&gt;.&lt;baseDomain&gt;</code> — the double hyphen is the separator between the site name and the preview label. It rides the same flat wildcard certificate as every other Drop hostname (<code>*.drop.example.com</code>) — no new DNS or TLS to provision. Because the separator has to be unambiguous, <strong>both halves are constrained</strong>:</p>
+<ul>
+  <li><strong>Site names</strong> may never contain <code>--</code> (reserved — see <a href="configuration.html">Configuration</a>). This is enforced at claim/publish time, instance-wide.</li>
+  <li><strong>Preview labels</strong> are a DNS-safe label, 1–20 characters, and may not themselves contain <code>--</code>.</li>
+</ul>
+<p>Given those two rules, the edge can always split a request host on its <em>first</em> <code>--</code> and get exactly the right site + label back out — no ambiguity, no parsing games.</p>
+
+<h2 id="expiry">Expiry</h2>
+<p>Every preview has an <code>expires_at</code>, defaulting to <strong>7 days</strong> from publish. Override it with <code>?expire_days</code> — the CLI exposes it as <code>--expire-days</code>, clamped to <strong>1–30</strong>:</p>
+<pre><code>$ drop publish ./dist myapp --preview pr-42 --expire-days 1</code></pre>
+<p>A background sweep in the API deletes expired preview rows on a short interval (default every 5 minutes, <code>DROP_PREVIEW_SWEEP_INTERVAL_MS</code>). Requesting an expired (or never-existed) label returns a plain <code>404</code> — the same response whether the label never existed or has simply aged out, so a probe can't distinguish the two.</p>
+<div class="note"><span class="lbl">A preview's bytes are VERSION bytes</span><p>A preview doesn't get its own storage — it's a pointer at an ordinary published version. That version's bytes are cleaned up by Drop's existing version-retention housekeeping (<code>keepVersions</code>), the same as any other version, <strong>without any awareness of a live preview still pointing at it</strong>. In practice this only bites a preview that outlives many other publishes to the same site before its own <code>expires_at</code> arrives — publish a fresh preview (or shorten <code>--expire-days</code>) if that matters for your workflow. The sweep's job is narrower and simpler: it only ever removes the preview <em>pointer</em> once its own clock runs out.</p></div>
+
+<h2 id="noindex">Never indexed</h2>
+<p>Every response served from a preview hostname — 200s, redirects, 404s, auth challenges, all of it — carries <code>X-Robots-Tag: noindex</code>. Preview URLs are throwaway by design (a PR number, a random suffix); nothing about them should ever land in a search index or a crawler's cache.</p>
+
+<h2 id="visibility">Visibility &amp; access inheritance</h2>
+<p>A preview is <strong>not</strong> a separate resource with its own access settings — it inherits the parent site's visibility and password gate <strong>verbatim</strong>. If <code>myapp</code> is <code>private</code>, <code>myapp--pr-42</code> is private too, with the identical 403. If it's password-protected, the same credentials that unlock <code>myapp.drop.example.com</code> unlock the preview. There is no way to make a preview more or less visible than its parent — one gate, applied consistently, is easier to reason about (and to audit) than a second one that could quietly drift.</p>
+
+<h2 id="ci">GitHub Action recipe: a URL per pull request</h2>
+<p>This extends the CI recipe from <a href="tokens.html">CI tokens</a> — same <code>DROP_TOKEN</code> service token, same install step, one more publish flag and a comment step:</p>
+<pre><code><span class="tok-c"># .github/workflows/preview.yml — a preview URL on every push to a PR</span>
+name: preview
+on:
+  pull_request:
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write   <span class="tok-c"># needed to post the PR comment</span>
+    env:
+      DROP_API: https://api.drop.example.com
+      DROP_TOKEN: ${{ secrets.DROP_TOKEN }}   <span class="tok-c"># a drop_st_… service token, scoped to publish:myapp-web</span>
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Drop CLI
+        run: curl -fsSL "$DROP_API/install.sh" | sh
+      - name: Build
+        run: npm ci &amp;&amp; npm run build
+      - name: Publish preview
+        id: preview
+        run: |
+          out=$(drop publish ./dist myapp-web --preview "pr-${{ github.event.pull_request.number }}")
+          echo "$out"
+          url=$(echo "$out" | grep -oE 'https://[^ ]+')
+          echo "url=$url" &gt;&gt; "$GITHUB_OUTPUT"
+      - name: Comment the preview URL on the PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `Preview: ${{ steps.preview.outputs.url }}`,
+            })</code></pre>
+<p>The label <code>pr-$PR</code> means every push to the same pull request re-points the <strong>same</strong> preview at its latest commit — one comment, always current, no accumulating stale URLs. See <a href="tokens.html">CI tokens (service accounts)</a> for minting a scoped <code>DROP_TOKEN</code> (grant it <code>publish:myapp-web</code>, nothing wider).</p>
+
+<div class="next">
+  <a href="tokens.html"><div class="d">← Back</div><div class="t">CI tokens (service accounts)</div></a>
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

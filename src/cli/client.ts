@@ -27,11 +27,25 @@ export class Client {
   private orgQ(org?: string) {
     return org ? `?org=${encodeURIComponent(org)}` : "";
   }
-  publish(name: string, tarball: Buffer | Uint8Array, org?: string) {
-    return this.req("POST", `/v1/sites/${name}/versions${this.orgQ(org)}`, {
+  publish(name: string, tarball: Buffer | Uint8Array, org?: string, preview?: { label: string; expireDays?: number }) {
+    const q = new URLSearchParams();
+    if (org) q.set("org", org);
+    if (preview) {
+      q.set("preview", preview.label);
+      if (preview.expireDays != null) q.set("expire_days", String(preview.expireDays));
+    }
+    const qs = q.toString();
+    return this.req("POST", `/v1/sites/${name}/versions${qs ? `?${qs}` : ""}`, {
       contentType: "application/gzip",
       body: tarball,
     });
+  }
+  // previews (E1): `list` mirrors GET .../previews; `remove` is audited server-side (preview.delete)
+  previewList(name: string) {
+    return this.req("GET", `/v1/sites/${name}/previews`);
+  }
+  previewRemove(name: string, label: string) {
+    return this.req("DELETE", `/v1/sites/${name}/previews/${encodeURIComponent(label)}`);
   }
   deploy(name: string, app: AppConfig, org?: string, noStart?: boolean) {
     const q = new URLSearchParams();

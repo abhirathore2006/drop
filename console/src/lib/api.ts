@@ -114,6 +114,15 @@ export interface Version {
   fileCount: number;
   bytes: number;
 }
+/** (E1) A labeled, expiring preview of a specific version, served at <site>--<label>.<baseDomain>. */
+export interface PreviewInfo {
+  label: string;
+  versionId: string;
+  url: string;
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string;
+}
 export interface SecretMeta {
   key: string;
   fingerprint: string;
@@ -140,6 +149,7 @@ export interface Detail {
   current: string | null;
   url: string;
   versions: Version[];
+  previews?: PreviewInfo[]; // (E1) active previews — present for type=site only
   status?: ServerStatus | null;
   tcp?: TcpExposure; // (A2b) present when the app/database is TCP-exposed
   app?: {
@@ -307,6 +317,10 @@ export const api = {
   restartApp: (name: string) => req("POST", `/v1/apps/${name}/restart`, {}),
   stopApp: (name: string) => req("POST", `/v1/apps/${name}/stop`, {}),
   startApp: (name: string) => req("POST", `/v1/apps/${name}/start`, {}),
+  // previews (E1) — creation is CLI/CI only this round (see SitePanels.tsx's E2 note); the console
+  // lists + removes them.
+  removePreview: (name: string, label: string) =>
+    req<{ removed: boolean; name: string; label: string }>("DELETE", `/v1/sites/${name}/previews/${encodeURIComponent(label)}`),
   // TCP (L4) exposure (A2b)
   expose: (name: string, mode: "sni" | "port", protocol?: string) =>
     req<{ name: string; tcp: TcpExposure; note?: string }>("POST", `/v1/sites/${name}/expose`, { mode, ...(protocol ? { protocol } : {}) }),

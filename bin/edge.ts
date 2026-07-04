@@ -3,6 +3,7 @@ import { loadConfig } from "../src/config.ts";
 import { S3Blob } from "../src/blob/s3.ts";
 import { makeDb } from "../src/db/db.ts";
 import { MetaStore } from "../src/metastore/store.ts";
+import { PreviewStore } from "../src/previews/store.ts";
 import { createEdge } from "../src/edge/server.ts";
 import { createWsUpgradeHandler } from "../src/edge/ws-proxy.ts";
 
@@ -17,6 +18,7 @@ const blob = new S3Blob({
 });
 const { db } = makeDb(cfg.databaseUrl); // read-only; the API owns migrations
 const meta = new MetaStore(db);
+const previews = new PreviewStore(db); // (E1) preview registry — read-only here (the API is the sole writer)
 
 const app = createEdge({
   meta,
@@ -25,6 +27,7 @@ const app = createEdge({
   diskCacheDir: cfg.edgeDiskCacheDir,
   diskCacheBytes: cfg.edgeDiskCacheBytes,
   interceptorUrl: cfg.interceptorUrl,
+  previews,
 });
 const server = serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-edge listening on :${cfg.httpPort} for *.${cfg.baseDomain}`);

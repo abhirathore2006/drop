@@ -10,6 +10,14 @@ export function validateName(name: string): string | null {
   if (!LABEL.test(name)) {
     return `invalid site name "${name}": must be a lowercase DNS label`;
   }
+  // Reserved for preview/environment hostnames (E1: `<name>--<label>.<baseDomain>`; E3 reuses the
+  // same convention for `<stack>--<env>-<key>`). LABEL alone does NOT prevent this — the middle
+  // character class permits repeated hyphens (e.g. "foo--bar" matches it) — so this is real,
+  // additional logic, not a redundant belt-and-suspenders check. Verified: names.test.ts asserts
+  // "foo--bar" would otherwise pass LABEL.
+  if (name.includes("--")) {
+    return `invalid site name "${name}": "--" is reserved for preview/environment hostnames (<name>--<label>)`;
+  }
   if (RESERVED.has(name)) return `site name "${name}" is reserved`;
   return null;
 }

@@ -216,6 +216,21 @@ export interface TemplateVersionsTable {
   created_at: Generated<Ts>;
 }
 
+/** A labeled, expiring preview of a SPECIFIC version (E1), served at `<site>--<label>.<baseDomain>`
+ *  alongside (never instead of) the parent's `current_version`. PK (site_name, label) — republishing
+ *  the same label re-points it at a new version (the API upserts). `version_id` deliberately carries
+ *  NO foreign key to `versions`: the existing publish-time pruneVersions/GC may reap an old version's
+ *  bytes+row before its preview's OWN `expires_at` passes — accepted, documented behavior (see
+ *  docs/previews.html), not new cross-feature protection. Cascades on the owning site's delete. */
+export interface PreviewsTable {
+  site_name: string;
+  label: string;
+  version_id: string;
+  created_by: string;
+  created_at: Ts; // set from the store's injectable clock (the column also has a now() default)
+  expires_at: Ts;
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -234,4 +249,5 @@ export interface Database {
   service_tokens: ServiceTokensTable;
   templates: TemplatesTable;
   template_versions: TemplateVersionsTable;
+  previews: PreviewsTable;
 }

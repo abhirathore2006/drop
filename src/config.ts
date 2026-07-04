@@ -57,6 +57,8 @@ export interface Config {
   tcpSharedPorts: TcpSharedPort[]; // DROP_TCP_SHARED_PORTS — used to derive the sni-mode connect port per protocol (default 5432:postgres)
   edgeTcpNamespace: string; // DROP_EDGE_TCP_NAMESPACE — where the edge-tcp Service lives (patched on port expose) + the NetworkPolicy source ns (default drop-system)
   edgeTcpService: string; // DROP_EDGE_TCP_SERVICE — the edge-tcp Service name whose port list the API patches on port expose (default drop-edge-tcp)
+  // --- previews (E1) ---
+  previewSweepIntervalMs: number; // DROP_PREVIEW_SWEEP_INTERVAL_MS — how often the API sweeps expired previews (default 5 min)
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -140,6 +142,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         edgeTcpService: env.DROP_EDGE_TCP_SERVICE ?? "drop-edge-tcp",
       };
     })(),
+    previewSweepIntervalMs: Number(env.DROP_PREVIEW_SWEEP_INTERVAL_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
   };
 }
 

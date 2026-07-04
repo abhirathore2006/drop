@@ -93,7 +93,7 @@ jobs:
         run: npm ci &amp;&amp; npm run build
       - name: Publish
         run: drop publish ./dist myapp-web --org acme</code></pre>
-<div class="note"><span class="lbl">Preview deploys</span><p>A <code>drop publish --preview</code> flag (per-branch/per-PR preview URLs driven by the same token) is on the roadmap — this recipe will grow a PR-preview job when previews land. See the previews guide (coming soon) for the pattern.</p></div>
+<div class="note"><span class="lbl">Preview deploys</span><p><code>drop publish --preview</code> (per-branch/per-PR preview URLs driven by the same token) has landed — see <a href="previews.html">Previews</a> for the full PR-preview GitHub Action recipe (same <code>DROP_TOKEN</code>, one more flag, plus a PR-comment step).</p></div>
 
 <h2 id="revoke">Revocation &amp; expiry</h2>
 <p>Every request re-checks the token against the database — a single indexed hash lookup — so control is <strong>immediate</strong>:</p>

@@ -10,6 +10,7 @@ import { UserStore } from "../src/users/store.ts";
 import { OrgStore } from "../src/orgs/store.ts";
 import { AuditStore } from "../src/audit/store.ts";
 import { ServiceTokenStore } from "../src/tokens/store.ts";
+import { PreviewStore } from "../src/previews/store.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
 import { TokenVerifier } from "../src/auth/token-verifier.ts";
@@ -94,10 +95,26 @@ const stacks = new StackStore(db);
 const bucket = makeBucketStore(cfg); // (I1) tenant object storage (floci-prefix locally)
 const quotas = new QuotaStore(db); // (item 10) per-org quota overrides
 const tokens = new ServiceTokenStore(db); // (J1) service accounts / scoped CI tokens
+const previews = new PreviewStore(db); // (E1) preview registry
 // Accept `Authorization: Bearer drop_st_…` alongside human logins. TokenVerifier goes FIRST in the
 // chain; it returns null for any non-service token so session/Google verification still runs after it.
 verifier = new ChainVerifier([new TokenVerifier(tokens, orgs), verifier]);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens });
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens, previews });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });
+
+// (E1) Expiry sweep — the API's first housekeeping loop (none existed before previews). Deletes
+// previews whose expires_at has passed. Bytes are VERSION bytes, already covered by the existing
+// publish-time pruneVersions/GC (src/api/server.ts) — this loop only drops the now-stale previews
+// POINTER row, nothing else. No audit event: a sweep is a system action, not a user one (consistent
+// with pruneVersions, which is likewise unaudited). Errors are logged, never thrown — a transient DB
+// hiccup on one tick must not crash the process; the next tick just tries again.
+setInterval(() => {
+  previews
+    .deleteExpired(new Date())
+    .then((removed) => {
+      if (removed.length) console.log(`preview sweep: removed ${removed.length} expired preview(s)`);
+    })
+    .catch((e) => console.error("preview sweep failed:", (e as Error).message));
+}, cfg.previewSweepIntervalMs).unref();

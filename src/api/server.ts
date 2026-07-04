@@ -36,6 +36,7 @@ import { substituteTemplate, sanitizeVariables } from "../templates/vars.ts";
 import { stripStackSpec } from "../templates/strip.ts";
 import { appManifests, releaseJobManifest, tenantManifests, type ExposedWorkload } from "../kube/manifests.ts";
 import { TcpEndpointStore, PortPoolExhaustedError, type TcpEndpoint } from "../edge-tcp/store.ts";
+import { PreviewStore, validatePreviewLabel } from "../previews/store.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
 import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus } from "../kube/types.ts";
 import { LockStore, LockHeldError } from "../metastore/lock.ts";
@@ -66,6 +67,7 @@ export interface Deps {
   templates?: TemplateStore; // (D1) template registry (templates + template_versions); defaults over `db`
   tcp?: TcpEndpointStore; // (A2b) TCP exposure registry (tcp_endpoints); defaults over `db`
   tokens?: ServiceTokenStore; // (J1) service accounts / scoped CI tokens; defaults over `db`
+  previews?: PreviewStore; // (E1) preview registry (previews); defaults over `db`
   now?: () => Date;
 }
 
@@ -85,8 +87,18 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const quotas = d.quotas ?? new QuotaStore(d.db); // (item 10) per-org quota overrides
   const tcp = d.tcp ?? new TcpEndpointStore(d.db); // (A2b) TCP exposure registry
   const tokens = d.tokens ?? new ServiceTokenStore(d.db); // (J1) service accounts / scoped CI tokens
+  const previews = d.previews ?? new PreviewStore(d.db); // (E1) preview registry
 
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
+  // (E1) The preview hostname, `<name>--<label>.<baseDomain>` — reserved via src/names.ts (site
+  // names) + src/previews/store.ts (labels), each forbidding "--" so the edge's split is unambiguous.
+  const previewUrl = (name: string, label: string) => `https://${name}--${label}.${d.cfg.baseDomain}`;
+  // Shared shape for a site's preview list — used by the dedicated GET route (`drop preview ls`)
+  // AND embedded into the site detail response (console panel), so the two can never drift.
+  const previewsFor = async (name: string) => {
+    const rows = await previews.listForSite(name);
+    return rows.map((p) => ({ label: p.label, versionId: p.versionId, url: previewUrl(name, p.label), createdBy: p.createdBy, createdAt: p.createdAt, expiresAt: p.expiresAt }));
+  };
   const app = new Hono<AuthEnv>();
   // In-flight DB password rotations, keyed by name. Serializes per database so two concurrent
   // rotations can't stomp the shared Job/Secret and diverge the role from the creds Secret.
@@ -541,6 +553,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const nameErr = validateName(name);
     if (nameErr) return c.json({ error: nameErr }, 400);
+    // (E1) ?preview=<label> publishes a version WITHOUT touching current_version — validate the
+    // label up front (before consuming the upload) so a bad label never costs a wasted body read.
+    const previewLabel = c.req.query("preview");
+    if (previewLabel !== undefined) {
+      const labelErr = validatePreviewLabel(previewLabel);
+      if (labelErr) return c.json({ error: labelErr }, 400);
+    }
 
     // resolve or claim
     let site = await d.meta.getSitePlain(name);
@@ -554,7 +573,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!site) return c.json({ error: "claim failed" }, 500);
     if (site.type !== "site") return c.json({ error: `name "${name}" is an ${site.type}, not a site` }, 409);
     const actor = await actorFor(c.get("identity"), site);
-    if (!can(actor, "publish")) return c.json({ error: `site is owned by ${site.owner}` }, 403);
+    if (!can(actor, "publish")) return c.json({ error: `site is owned by ${site.owner}` }, 403); // same authz as an ordinary publish (E1)
 
     if (!c.req.raw.body) return c.json({ error: "empty body" }, 400);
     const verId = newVersionId(now());
@@ -600,6 +619,36 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       bytes: result.bytes,
       config,
     });
+
+    if (previewLabel !== undefined) {
+      // (E1) Preview publish: the version above is stored exactly like any other — current_version
+      // is LEFT UNTOUCHED, so the live site keeps serving whatever it was serving before. The
+      // preview is reachable ONLY at its own <name>--<label> host. Re-publishing the same label
+      // re-points it (upsert) at this new version.
+      const expiresAt = new Date(now().getTime() + clampExpireDays(c.req.query("expire_days")) * 24 * 60 * 60 * 1000);
+      await previews.upsert(name, previewLabel, verId, email, expiresAt);
+      // Preview bytes are VERSION bytes — the SAME retention/GC (pruneVersions) applies to them as to
+      // any other version, unaware of any live preview still referencing it. A preview can therefore
+      // outlive its own version's bytes if enough OTHER versions get published first; that's accepted,
+      // documented behavior (see docs/previews.html) rather than new cross-feature protection.
+      void pruneVersions(d, name);
+      await audit({
+        actor: email,
+        action: "preview.create",
+        target: name,
+        targetType: site.type,
+        orgId: site.orgId,
+        detail: { label: previewLabel, versionId: verId, expiresAt: expiresAt.toISOString() },
+      });
+      return c.json({
+        url: siteUrl(name), // the site's own URL — unaffected, current_version untouched
+        version: verId,
+        files: result.files,
+        bytes: result.bytes,
+        preview: { label: previewLabel, url: previewUrl(name, previewLabel), versionId: verId, expiresAt: expiresAt.toISOString() },
+      });
+    }
+
     // commit point: flip the live pointer (+ denormalize config). A bundle that
     // carries basicAuth implies password visibility.
     const hasBasicAuth = !!config?.basicAuth && Object.keys(config.basicAuth.users).length > 0;
@@ -612,6 +661,30 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
     void pruneVersions(d, name);
     return c.json({ url: siteUrl(name), version: verId, files: result.files, bytes: result.bytes });
+  });
+
+  // ---- previews (E1): create is folded into publish (?preview=<label>); list + remove are dedicated ----
+  // List a site's active (unexpired-or-not-yet-swept) previews — `drop preview ls` + the console panel.
+  app.get("/v1/sites/:name/previews", async (c) => {
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (!can(await actorFor(c.get("identity"), site), "read")) return c.json({ error: "not permitted" }, 403);
+    return c.json({ name, previews: await previewsFor(name) });
+  });
+
+  // Remove one preview by label (idempotent 404 on unknown; same authz tier as creating one).
+  app.delete("/v1/sites/:name/previews/:label", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const label = c.req.param("label");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (!can(await actorFor(c.get("identity"), site), "publish")) return c.json({ error: "not permitted" }, 403);
+    const removed = await previews.remove(name, label);
+    if (!removed) return c.json({ error: `no such preview "${label}" on ${name}` }, 404);
+    await audit({ actor: email, action: "preview.delete", target: name, targetType: site.type, orgId: site.orgId, detail: { label } });
+    return c.json({ removed: true, name, label });
   });
 
   // ---- deploy (container app) ----
@@ -1367,6 +1440,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         /* leave endpoint/bucket/prefix empty + zero usage */
       }
       out.bucket = b;
+    } else if (site.type === "site") {
+      // (E1) Active previews — static sites only (a preview is created via publish?preview=, never
+      // deploy/db:create). Same shape as the dedicated GET .../previews route (previewsFor).
+      out.previews = await previewsFor(name);
     }
     // (A2b) TCP exposure state — surfaced on apps + databases so the console/CLI can show the connect
     // string. Registry-only (no cluster read): present iff the workload has an expose row.
@@ -2605,6 +2682,15 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   });
 
   return app;
+}
+
+/** Parse+clamp `?expire_days` for a preview publish (E1): 1-30, default 7. Never throws or 400s — a
+ *  missing/garbage value just falls back to the default rather than failing an otherwise-good
+ *  publish over a cosmetic query param. */
+function clampExpireDays(raw: string | undefined): number {
+  const n = raw === undefined ? NaN : Number(raw);
+  if (!Number.isFinite(n)) return 7;
+  return Math.min(30, Math.max(1, Math.trunc(n)));
 }
 
 /** Delete file/version records beyond keepVersions (never the current one). */

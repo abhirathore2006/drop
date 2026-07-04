@@ -69,18 +69,21 @@ export function buildMcp(): McpServer {
   server.registerTool(
     "publish",
     {
-      description: "Publish a built static folder to <name>.drop.example.com. Returns the live URL.",
+      description:
+        "Publish a built static folder to <name>.drop.example.com. Returns the live URL. Pass `preview` to publish as a labeled, expiring PREVIEW at <name>--<label>.drop.example.com instead — the live site's current version is left untouched (E1).",
       inputSchema: {
         directory: z.string().describe("path to the built folder, e.g. ./dist"),
         name: z.string().optional().describe("site name (optional — taken from drop.yaml site.name, else generated)"),
+        preview: z.string().optional().describe("publish as a PREVIEW under this label (e.g. a PR number) instead of updating the live site"),
+        expireDays: z.number().optional().describe("days until the preview expires, 1-30 (default 7); ignored without `preview`"),
       },
     },
-    async ({ directory, name }) =>
+    async ({ directory, name, preview, expireDays }) =>
       run(async () => {
         const dir = resolve(directory);
         const resolved = await resolveSiteName(dir, name);
         const tarball = await packDir(dir);
-        const res = await (await getClient()).publish(resolved.name, tarball);
+        const res = await (await getClient()).publish(resolved.name, tarball, undefined, preview ? { label: preview, expireDays } : undefined);
         return { ...res, name: resolved.name, nameSource: resolved.source };
       }),
   );

@@ -18,6 +18,11 @@ export function validateName(name: string): string | null {
   if (!LABEL.test(name)) {
     return `invalid site name "${name}": must be a lowercase DNS label`;
   }
+  // Reserved for preview/environment hostnames (E1: `<name>--<label>.<baseDomain>`) — mirrors
+  // src/names.ts EXACTLY (see its comment: LABEL alone doesn't exclude "--", so this is real logic).
+  if (name.includes("--")) {
+    return `invalid site name "${name}": "--" is reserved for preview/environment hostnames (<name>--<label>)`;
+  }
   if (RESERVED.has(name)) return `site name "${name}" is reserved`;
   return null;
 }

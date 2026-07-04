@@ -35,6 +35,10 @@ const SWEEP = [
   "1abc",
   "a1-2b3",
   "a".repeat(0),
+  "foo--bar",
+  "a--b",
+  "myapp--pr-1",
+  "a---b",
 ];
 
 describe("validateName mirrors src/names.ts exactly", () => {

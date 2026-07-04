@@ -355,6 +355,35 @@ const m0011_templates: Migration = {
   },
 };
 
+// Preview registry (E1): a labeled, expiring pointer to a SPECIFIC version, served at
+// `<site>--<label>.<baseDomain>` alongside (never instead of) the parent's `current_version`. PK
+// (site_name, label) — republishing the same label re-points it at a new version (the API upserts
+// via POST .../versions?preview=<label>). `version_id` deliberately carries NO foreign key to
+// `versions`: the existing publish-time pruneVersions/GC may reap an old version's bytes+row before
+// its preview's OWN expires_at passes — accepted, documented behavior (see docs/previews.html)
+// rather than new cross-feature protection. Cascades on the owning site's delete. The edge resolves
+// (site_name,label) read-only; the API's preview routes are the sole writer; the housekeeping sweep
+// (bin/api.ts) is the sole deleter of EXPIRED rows.
+const m0012_previews: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("previews")
+      .addColumn("site_name", "text", (c) => c.notNull().references("sites.name").onDelete("cascade"))
+      .addColumn("label", "text", (c) => c.notNull())
+      .addColumn("version_id", "text", (c) => c.notNull())
+      .addColumn("created_by", "text", (c) => c.notNull())
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addColumn("expires_at", "timestamptz", (c) => c.notNull())
+      .addPrimaryKeyConstraint("previews_pk", ["site_name", "label"])
+      .execute();
+    // The sweep's hot path: find everything past its expiry, cluster-wide, without a table scan.
+    await db.schema.createIndex("previews_expires_at_idx").on("previews").column("expires_at").execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -370,6 +399,7 @@ export class InlineMigrations implements MigrationProvider {
       "0009_tcp_endpoints": m0009_tcp_endpoints,
       "0010_service_tokens": m0010_service_tokens,
       "0011_templates": m0011_templates,
+      "0012_previews": m0012_previews,
     };
   }
 }

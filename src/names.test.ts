@@ -14,6 +14,14 @@ test("rejects invalid / reserved labels", () => {
   }
 });
 
+test("rejects '--' anywhere (reserved for preview/environment hostnames, E1) — LABEL alone permits it", () => {
+  const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+  for (const n of ["foo--bar", "a--b", "myapp--pr-1", "a---b"]) {
+    expect(LABEL.test(n)).toBe(true); // proves the reservation is real, additional logic
+    expect(validateName(n)).toMatch(/reserved for preview\/environment hostnames/);
+  }
+});
+
 test("generateName produces valid, varied names", () => {
   const names = new Set<string>();
   for (let i = 0; i < 500; i++) {
