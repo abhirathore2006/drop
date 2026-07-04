@@ -735,6 +735,89 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return c.json({ removed: true });
   });
 
+  // ---- (M4) live event stream — SSE push of new G3 events for the caller's orgs (session-scoped) ----
+  // Powers the console's real-time surfaces: the client (console/src/lib/events-stream.ts) turns each
+  // pushed frame into TanStack query invalidations, so the activity feed, the workloads list, and the
+  // stack canvas status flip immediately instead of on the next poll.
+  //
+  // Mechanics (deliberately simple): ONE lightweight DB poll per connection every ~2s for events with
+  // id > the last-seen cursor across the caller's orgs, emitted as `event: event` frames. A 2s
+  // per-connection poll is fine at this scale (a handful of concurrent console tabs) and leaks nothing —
+  // the poll + heartbeat timers are cleared on the request's abort signal (fired when the socket closes;
+  // @hono/node-server aborts it when the response socket closes). A `: hb` heartbeat comment every ~20s
+  // keeps intermediary proxies from idling the stream shut. Cursor seeds at the current MAX(id) so we
+  // stream only NEW events (no history replay — the initial page load already fetched history).
+  app.get("/v1/events/stream", async (c) => {
+    const email = c.get("identity").email;
+    await ensureUser(email);
+    const orgs = await d.orgs.listUserOrgs(email);
+    const slugById = new Map(orgs.map((o) => [o.id, o.slug]));
+    const orgIds = orgs.map((o) => o.id);
+    const signal = c.req.raw.signal;
+
+    const currentMaxId = async (): Promise<string> => {
+      if (orgIds.length === 0) return "0";
+      const row = await d.db.selectFrom("events").select((eb) => eb.fn.max("id").as("m")).where("org_id", "in", orgIds).executeTakeFirst();
+      return row?.m != null ? String(row.m) : "0";
+    };
+    let cursor = await currentMaxId();
+
+    const stream = new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        let busy = false;
+        const write = (s: string) => {
+          try {
+            controller.enqueue(enc.encode(s));
+          } catch {
+            /* controller already closed (client gone) — the abort handler stops the timers */
+          }
+        };
+        write("event: ready\ndata: {}\n\n"); // an immediate frame so the client sees the socket open
+
+        const poll = async () => {
+          if (busy || orgIds.length === 0) return;
+          busy = true;
+          try {
+            const rows = await d.db.selectFrom("events").selectAll().where("org_id", "in", orgIds).where("id", ">", cursor).orderBy("id", "asc").limit(200).execute();
+            for (const r of rows) {
+              cursor = String(r.id);
+              const frame = { id: String(r.id), orgId: r.org_id, orgSlug: slugById.get(r.org_id) ?? null, siteName: r.site_name ?? null, kind: r.kind, severity: r.severity };
+              write(`event: event\ndata: ${JSON.stringify(frame)}\n\n`);
+            }
+          } catch (err) {
+            console.error("event stream poll:", (err as Error).message);
+          } finally {
+            busy = false;
+          }
+        };
+
+        const pollTimer = setInterval(() => void poll(), 2000);
+        const hbTimer = setInterval(() => write(": hb\n\n"), 20_000);
+        const stop = () => {
+          clearInterval(pollTimer);
+          clearInterval(hbTimer);
+          try {
+            controller.close();
+          } catch {
+            /* already closed */
+          }
+        };
+        if (signal.aborted) stop();
+        else signal.addEventListener("abort", stop, { once: true });
+      },
+    });
+
+    return new Response(stream as ReadableStream, {
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        "x-accel-buffering": "no", // disable proxy buffering so frames flush immediately
+      },
+    });
+  });
+
   app.post("/v1/orgs/:slug/members", async (c) => {
     const email = c.get("identity").email;
     const r = await resolveOrg(c, email);
@@ -1920,6 +2003,64 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       command,
       wsPath: `/v1/apps/${r.site.name}/exec`,
       note: "single-use, 60s TTL — present it as ?ticket=… on a WebSocket upgrade to wsPath; the command is bound to this ticket and cannot be changed at upgrade",
+    });
+  });
+
+  // ---- (L3) `drop dev` context: the NON-SECRET surface the local inner loop composes an env from ----
+  // Returns everything `drop dev` needs, and NOTHING a secret: (1) the app's non-secret env — the SAME
+  // source the `<name>-env` Secret is built from (drop.yaml `app.env`, stored on the version config);
+  // (2) its DB/cache binding metadata — the in-cluster host/port + which env var the binding injects
+  // (PGHOST/PGPORT for a DB, REDIS_URL for a cache) so the CLI can rewrite it to a localhost tunnel
+  // port; (3) the NAMES of the write-only secret keys the app expects (from listSecretKeys — NAMES
+  // ONLY). No secret VALUE ever crosses this endpoint: the developer supplies them locally via
+  // `--env-file .env.dev` (secrets stay write-only — never pulled). Not audited: it carries no secret
+  // and is a read like `GET .../secrets` (also unaudited) — the security-relevant event is the TUNNEL
+  // open, which the A3 ticket model already audits (`db.tunnel.open`) at redemption. Authz is
+  // `deploy`-tier (via resolveApp): the same verb a deploy needs — a dev loop is a pre-deploy activity.
+  interface DevBinding {
+    kind: "database" | "cache";
+    resource: string;
+    host: string; // in-cluster Service DNS (what the app connects to when deployed)
+    port: number;
+    hostVar?: string; // database: the env var carrying the host (PGHOST)
+    portVar?: string; // database: the env var carrying the port (PGPORT)
+    urlVar?: string; // cache: the env var carrying a host-bearing URL (REDIS_URL / <LABEL>_REDIS_URL)
+    tunnelTicketPath: string | null; // A3 tunnel-ticket path when tunnelable (databases); null → not tunneled here
+  }
+  // Compute the DB/cache binding metadata `drop dev` rewrites. DB → `<db>-rw` (or `<db>-pooler-rw` for
+  // via:pooler) + 5432 + PGHOST/PGPORT; cache → `<cache>.<ns>.svc` + 6379 + the exact injected var name
+  // (cacheEnvKey applies the `<LABEL>_` prefix for multiple caches, matching the deploy binding). Host,
+  // port, and var NAMES only — the REDIS_URL VALUE (which embeds the cache password) never appears here.
+  const devBindings = (cfg: AppConfig | undefined, ns: string): DevBinding[] => {
+    const uses = cfg?.uses ?? [];
+    const out: DevBinding[] = [];
+    for (const u of uses.filter((x) => x.database)) {
+      const host = u.via === "pooler" ? `${u.database}-pooler-rw.${ns}.svc.cluster.local` : `${u.database}-rw.${ns}.svc.cluster.local`;
+      out.push({ kind: "database", resource: u.database!, host, port: 5432, hostVar: "PGHOST", portVar: "PGPORT", tunnelTicketPath: `/v1/databases/${u.database}/tunnel-ticket` });
+    }
+    const cacheUses = uses.filter((x) => x.cache);
+    const multiple = cacheUses.length > 1;
+    for (const u of cacheUses) {
+      // A cache tunnel WS endpoint doesn't exist yet (only `/v1/databases/:name/tunnel` is served), so
+      // caches carry a null ticket path — `drop dev` reports the binding + the REDIS_URL key name but
+      // points the developer at a local cache via .env.dev (documented). This is additive: the day a
+      // cache tunnel lands, set the path here and the CLI tunnels it with zero further change.
+      out.push({ kind: "cache", resource: u.cache!, host: cacheHost(u.cache!, ns), port: 6379, urlVar: cacheEnvKey(u.cache!, multiple), tunnelTicketPath: null });
+    }
+    return out;
+  };
+  app.get("/v1/apps/:name/dev-context", async (c) => {
+    const r = await resolveApp(c, "deploy"); // 404 unknown / 409 non-app / 403 not-permitted
+    if ("err" in r) return r.err;
+    const cfg = await currentAppConfig(r.site);
+    const webCmd = cfg ? expandProcesses(cfg, r.site.name).find((p) => p.web)?.command : undefined;
+    return c.json({
+      app: r.site.name,
+      namespace: r.site.namespace,
+      env: cfg?.env ?? {}, // the `<name>-env` source — NON-secret drop.yaml app.env; never secrets
+      bindings: devBindings(cfg, r.site.namespace),
+      secretKeys: (await d.meta.listSecretKeys(r.site.name)).map((k) => k.key), // key NAMES only — NEVER values
+      command: webCmd ?? null, // the L1 web process command `drop dev` runs when no `-- cmd` is given
     });
   });
 

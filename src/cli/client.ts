@@ -236,6 +236,12 @@ export class Client {
   configRemove(app: string, key: string) {
     return this.req("DELETE", `/v1/apps/${app}/config/${encodeURIComponent(key)}`);
   }
+  // (L3) `drop dev` context: the app's NON-secret env + DB/cache binding metadata + the NAMES of the
+  // secret keys it expects (never values). The developer fills those names into .env.dev locally —
+  // secrets are never pulled. Consumed by src/cli/dev.ts (tunnel orchestration + env materialization).
+  devContext(app: string) {
+    return this.req("GET", `/v1/apps/${app}/dev-context`);
+  }
   restartApp(app: string) {
     return this.req("POST", `/v1/apps/${app}/restart`);
   }

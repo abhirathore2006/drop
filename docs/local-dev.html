@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local development (drop dev) · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="cache.html">Cache (managed Valkey)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="local-dev.html" class="active">Local development (drop dev)</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <a href="observability.html">Observability</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Local development (<code>drop dev</code>)</h1>
+<p class="lead">Drop is where apps end up, not where they're built — so running your code locally against its <em>managed</em> resources normally means hand-copying env and juggling <code>kubectl port-forward</code>. <code>drop dev</code> collapses that into one command: it opens <strong>authorized, audited tunnels</strong> to your app's bound databases, <strong>materializes an env</strong> with the connection hosts rewritten to <code>localhost</code>, overlays your local <code>.env.dev</code>, and runs your dev command with it — tearing the tunnels down when you Ctrl-C.</p>
+
+<pre><code><span class="tok-c"># from your app's directory (reads the app name from drop.yaml)</span>
+drop dev -- npm run dev
+<span class="tok-c"># or name the app and command explicitly</span>
+drop dev billing -- node server.js</code></pre>
+
+<div class="note"><span class="lbl">It composes machinery you already have</span><p><code>drop dev</code> invents no new plane. The tunnels are exactly <a href="tcp-access.html#dbproxy"><code>db:proxy</code></a>'s authenticated WebSocket tunnels (the A3 ticket model); the env is the app's own non-secret config plus your local secrets; the process supervision is a plain <code>child_process</code> with inherited stdio. It's the same parts, wired for the inner loop.</p></div>
+
+<h2 id="compose">What one <code>drop dev</code> does</h2>
+<ol>
+  <li><strong>Fetches the app's dev-context</strong> — <code>GET /v1/apps/:name/dev-context</code> (authorized at the <code>deploy</code> tier). This returns the app's <strong>non-secret env</strong>, its <strong>DB/cache binding metadata</strong> (which resource, its in-cluster host/port, and which env var the binding injects — <code>PGHOST</code>/<code>PGPORT</code> for a database, <code>REDIS_URL</code> for a cache), and the <strong>names of the secret keys</strong> the app expects. <em>No secret value ever crosses this endpoint.</em></li>
+  <li><strong>Opens a tunnel per bound database</strong> — reusing <code>db:proxy</code>, each on an allocated local port. Every connection rides a fresh single-use ticket over an authenticated tunnel, so it is <strong>per-user authorized and audited</strong> (see <a href="#audit">below</a>).</li>
+  <li><strong>Materializes the env</strong> — the app's non-secret env, with each bound host <strong>rewritten to <code>localhost:&lt;port&gt;</code></strong>, plus your <a href="#envfile"><code>.env.dev</code> overlay</a> for the secret values.</li>
+  <li><strong>Runs your command</strong> — the argv after <code>--</code>, or (if you give none) the app's <a href="processes.html">web-process <code>command</code></a> from <code>drop.yaml</code> — inheriting stdio. Tunnels are torn down on Ctrl-C, <code>SIGTERM</code>, or when the child exits.</li>
+</ol>
+
+<pre><code><span class="tok-c">$ drop dev billing -- npm run dev</span>
+  ✓ overlaid 3 value(s) from .env.dev
+  ✓ tunnel to billdb (database) on 127.0.0.1:55432 — rewrites PGHOST=localhost PGPORT=55432
+  ⚠ cache "sessions" is not tunneled on this instance — set REDIS_URL in .env.dev to point at a local cache
+  ▸ running: npm run dev
+  <span class="tok-c"># … your app boots against the managed DB over the authorized tunnel …</span>
+  <span class="tok-c"># Ctrl-C → tunnels close</span></code></pre>
+
+<h2 id="secrets">Secrets stay write-only — never pulled</h2>
+<p>This is the load-bearing rule. Drop's app secrets are <strong>write-only</strong>: you set them, the platform injects them into the pod, and nothing — not the API, not the console, not <code>drop dev</code> — ever reads them back. <code>drop dev</code> keeps that invariant intact. dev-context carries the <strong>names</strong> of the secret keys your app expects; <strong>you</strong> supply the values locally in <code>.env.dev</code>.</p>
+
+<div class="note tip"><span class="lbl"><code>drop dev --check</code> tells you exactly what to fill</span><p>Run <code>--check</code> to list the secret key names the app expects (names only, never values) and print a ready-to-fill <code>.env.dev</code> template — then it exits without opening anything.</p></div>
+
+<pre><code><span class="tok-c">$ drop dev billing --check</span>
+  billing: secret keys the app expects (NAMES only — values are never pulled):
+    · JWT_SECRET
+    · REDIS_URL
+    · STRIPE_KEY
+    binding: database billdb @ billdb-rw.drop-acme.svc.cluster.local:5432 (tunneled → PGHOST/PGPORT rewritten to localhost)
+    binding: cache sessions @ sessions.drop-acme.svc.cluster.local:6379 (NOT tunneled here → set REDIS_URL in your .env.dev)
+
+  ready-to-fill .env.dev template:
+  # .env.dev — LOCAL dev credentials for billing.
+  # Secrets are NEVER pulled from Drop — fill these with your OWN local/dev values.
+  JWT_SECRET=
+  REDIS_URL=
+  STRIPE_KEY=
+  # database binding(s): the tunnel rewrites PGHOST/PGPORT to a local port; supply the
+  # connection creds (PGPASSWORD lives in the &lt;db&gt;-app Secret — never pulled; PGUSER/PGDATABASE default to 'app'):
+  # billdb: PGPASSWORD=   PGUSER=app   PGDATABASE=app</code></pre>
+
+<p>Redirect that template into place and fill it with your own dev credentials:</p>
+<pre><code>drop dev billing --check > .env.dev   <span class="tok-c"># then edit it; .env.dev is git-ignored, developer-owned</span></code></pre>
+
+<div class="note warn"><span class="lbl">Why not just pull the real secrets?</span><p>Because a platform that can hand a developer's laptop the production Stripe key on demand is a platform that has quietly become the softest place to exfiltrate every secret it holds. Write-only secrets mean a compromised laptop (or a stolen session) can <em>set</em> a secret but never <em>read</em> one. <code>drop dev</code> refuses to be the hole in that wall — local dev uses <strong>local dev credentials</strong>, which is what you want anyway (you don't test against the live Stripe account).</p></div>
+
+<h2 id="envfile">The <code>--env-file</code> overlay</h2>
+<p><code>drop dev</code> reads <code>.env.dev</code> from the current directory by default (absent → no overlay, that's fine). Point it elsewhere with <code>--env-file &lt;path&gt;</code> (an explicit path that doesn't exist is an error — a typo shouldn't silently run with no secrets). The file is a plain <code>KEY=VALUE</code> list: blank and <code>#</code> lines are skipped, a leading <code>export&nbsp;</code> is tolerated, and surrounding quotes are stripped. No interpolation — these are credentials, not a shell.</p>
+<p>Precedence, lowest to highest — the tunnel always wins because the allocated local port <em>is</em> the authoritative address:</p>
+<table class="tbl">
+<thead><tr><th>Layer</th><th>Source</th><th>Example</th></tr></thead>
+<tbody>
+<tr><td>1. app env</td><td>the app's <strong>non-secret</strong> <code>env:</code> (the <code>&lt;name&gt;-env</code> source)</td><td><code>NODE_ENV</code>, <code>LOG_LEVEL</code></td></tr>
+<tr><td>2. overlay</td><td>your <code>.env.dev</code> — beats the app env for the same key</td><td><code>PGPASSWORD</code>, <code>STRIPE_KEY</code>, <code>REDIS_URL</code></td></tr>
+<tr><td>3. tunnel</td><td>host rewrites — beat <em>both</em></td><td><code>PGHOST=localhost</code>, <code>PGPORT=&lt;port&gt;</code></td></tr>
+</tbody>
+</table>
+<p>For a cache, the rewrite swaps only the <strong>host</strong> inside <code>REDIS_URL</code> to the local tunnel, <em>keeping the userinfo/password from your <code>.env.dev</code></em> — so your local credential still authenticates while traffic routes through the tunnel.</p>
+
+<h2 id="incluster">The in-cluster-tunnel constraint (same as <code>db:proxy</code>)</h2>
+<div class="note warn"><span class="lbl">Tunnels dial the DB Service in-cluster</span><p>Exactly like <a href="tcp-access.html#dbproxy"><code>db:proxy</code></a> and the <a href="configuration.html#sqlconsole">SQL console</a>, the tunnel splices to <code>&lt;db&gt;-rw.&lt;ns&gt;.svc</code> <strong>from the API process</strong>. In the normal in-cluster deployment (<code>DROP_TUNNEL_DIRECT=1</code>) that's a direct dial and everything just works. If you run <code>drop dev</code> against an API that lives <strong>outside</strong> the cluster (a local dev API pointed at a remote cluster), it has no route to that Service and the per-connection dial returns <code>501</code> — surfaced, never fatal.</p></div>
+<p>You have two clean ways to develop:</p>
+<ul>
+  <li><strong>Against a real in-cluster deployment</strong> — the recommended path. Tunnels light up, <code>PGHOST</code> points through the authorized tunnel to the managed database, and every connection is audited.</li>
+  <li><strong>Against a local out-of-cluster API</strong> — pass <code>--no-tunnel</code>. <code>drop dev</code> then skips tunnels entirely and materializes the env from the app env + <code>.env.dev</code> only. Point <code>PGHOST</code>/<code>REDIS_URL</code> at your <em>own</em> local Postgres/Valkey in <code>.env.dev</code> — the classic inner loop, no cluster required.</li>
+</ul>
+<pre><code><span class="tok-c"># local API, local Postgres — env-only, no tunnels</span>
+drop dev billing --no-tunnel -- npm run dev</code></pre>
+
+<div class="note"><span class="lbl">Caches aren't tunneled yet</span><p>Today only <strong>databases</strong> have a tunnel endpoint (<code>/v1/databases/:name/tunnel</code>). A bound cache is reported in <code>--check</code> and its <code>REDIS_URL</code> is listed as a key to fill — point it at a local Valkey/Redis in <code>.env.dev</code>. The dev-context already carries the cache binding metadata, so the day a cache tunnel lands, <code>drop dev</code> tunnels it with no change to your workflow.</p></div>
+
+<h2 id="audit">Tunnels are authorized <em>and</em> audited</h2>
+<p>Because the tunnels are <code>db:proxy</code>'s, a <code>drop dev</code> session against a prod-org database is exactly as visible and gated as any other tunnel: each connection is authorized by your per-user <code>connect</code> grant, and every open is recorded as a <code>db.tunnel.open</code> audit event (written at redemption — the actual connection — not at ticket issuance). A dev loop against a real database is a first-class, auditable action, not a back door. Teams that want a hard wall put dev in <a href="stacks.html">its own environment</a> and scope roles accordingly.</p>
+<div class="note tip"><span class="lbl">The dev-context read itself isn't audited</span><p>It carries no secret — non-secret env, binding hosts, and key <em>names</em> — so like <code>GET&nbsp;.../secrets</code> (which returns key names too) it isn't audited. The security-relevant event is the <strong>tunnel open</strong>, and that already is.</p></div>
+
+<h2 id="reference">Command reference</h2>
+<pre><code>drop dev [app] [-- cmd…]        <span class="tok-c"># app defaults to drop.yaml's app.name; cmd to the web process command</span>
+  --check                       <span class="tok-c"># list secret KEY NAMES + print a .env.dev template, then exit</span>
+  --env-file &lt;path&gt;             <span class="tok-c"># overlay local values from this file (default: .env.dev if present)</span>
+  --no-tunnel                   <span class="tok-c"># skip tunnels; take connection hosts from .env.dev / the app env</span></code></pre>
+
+<div class="next">
+  <a href="cli-mcp.html"><div class="d">← Back</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+  <a href="tcp-access.html"><div class="d">Next →</div><div class="t">TCP access &amp; <code>db:proxy</code></div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

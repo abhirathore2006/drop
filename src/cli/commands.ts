@@ -9,6 +9,7 @@ import { loadConfig, saveConfig, resolveApiBase, resolveUpdateUrl } from "./conf
 import { Client } from "./client.ts";
 import { runDbProxy } from "./db-proxy.ts";
 import { runExec } from "./exec.ts";
+import { runDev } from "./dev.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate, loadAuthCreate } from "./resolve-name.ts";
@@ -1209,6 +1210,36 @@ export function buildProgram(): Command {
       if (err) throw new Error(err);
       const cmd = command && command.length ? command : ["/bin/sh"];
       const code = await runExec({ session: await session(), app: appName, command: cmd });
+      process.exit(code);
+    });
+
+  // (L3) `drop dev` — the local inner loop. Opens authorized+audited tunnels to the app's bound
+  // databases (reusing `db:proxy`), materializes an env from the app's NON-secret env with binding
+  // hosts rewritten to localhost + the `.env.dev` overlay, and runs your command (or the app's web
+  // command) with it. Secrets are NEVER pulled — `--check` lists the key names to put in `.env.dev`.
+  program
+    .command("dev [app] [command...]")
+    .description("Run your app locally against its managed resources: authorized DB tunnels + non-secret env (hosts rewritten to localhost) + .env.dev overlay, then your command (secrets are never pulled)")
+    .option("--check", "list the secret KEY NAMES the app expects (never values) + print a .env.dev template, then exit")
+    .option("--env-file <path>", "overlay local dev values from this file (default: .env.dev if present)")
+    .option("--no-tunnel", "skip tunnels; take all connection hosts from .env.dev / the app env (for a local out-of-cluster API)")
+    .action(async (appArg: string | undefined, commandArg: string[], opts: { check?: boolean; envFile?: string; tunnel?: boolean }) => {
+      // Commander merges `[app]` and `[command...]` and drops the `--` marker, so `drop dev -- npm start`
+      // is ambiguous (is "npm" the app or the command?). Resolve it from the raw argv: everything after
+      // the FIRST `--` is the child command; the app was omitted iff commander grabbed that command's
+      // first token into `appArg`.
+      const sep = process.argv.indexOf("--");
+      const command = sep === -1 ? commandArg ?? [] : process.argv.slice(sep + 1);
+      let app = appArg;
+      if (sep !== -1 && appArg && appArg === command[0]) app = undefined; // app omitted → resolve from drop.yaml
+      // No app → resolve it from the local drop.yaml `app:` section (run from the app's dir).
+      const resolved = app ?? (await loadAppDeploy(".")).name;
+      const err = validateName(resolved);
+      if (err) throw new Error(err);
+      const code = await runDev(
+        { app: resolved, command, envFile: opts.envFile, check: opts.check, noTunnel: opts.tunnel === false },
+        await session(),
+      );
       process.exit(code);
     });
 
