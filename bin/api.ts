@@ -10,7 +10,9 @@ import { UserStore } from "../src/users/store.ts";
 import { OrgStore } from "../src/orgs/store.ts";
 import { AuditStore } from "../src/audit/store.ts";
 import { ServiceTokenStore } from "../src/tokens/store.ts";
+import { TunnelTicketStore } from "../src/tokens/tunnel-tickets.ts";
 import { PreviewStore } from "../src/previews/store.ts";
+import { createDbTunnelHandler } from "../src/api/db-tunnel.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
 import { TokenVerifier } from "../src/auth/token-verifier.ts";
@@ -96,13 +98,37 @@ const bucket = makeBucketStore(cfg); // (I1) tenant object storage (floci-prefix
 const quotas = new QuotaStore(db); // (item 10) per-org quota overrides
 const tokens = new ServiceTokenStore(db); // (J1) service accounts / scoped CI tokens
 const previews = new PreviewStore(db); // (E1) preview registry
+const tickets = new TunnelTicketStore(db, undefined, cfg.tunnelTicketTtlMs); // (A3) db:proxy tunnel tickets — ONE instance shared by issuance (createApp) + redemption (the upgrade handler below)
 // Accept `Authorization: Bearer drop_st_…` alongside human logins. TokenVerifier goes FIRST in the
 // chain; it returns null for any non-service token so session/Google verification still runs after it.
 verifier = new ChainVerifier([new TokenVerifier(tokens, orgs), verifier]);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens, previews });
-serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens, previews, tickets });
+const server = serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });
+
+// (A3) db:proxy — the authenticated psql tunnel. A Node-level 'upgrade' listener redeems a single-use
+// tunnel ticket, then splices the WebSocket to the DB Service in-cluster. Attaching a listener is also
+// what makes the HTTP server surface upgrades instead of dropping them — the handler REJECTS every
+// upgrade that isn't `/v1/databases/:name/tunnel`, so nothing else on the API gains a WS surface.
+//
+// Dial posture (documented, honest): DROP_TUNNEL_DIRECT=1 (the normal in-cluster prod deployment) dials
+// the DB Service DNS `<db>-rw.<ns>.svc:5432` directly. Locally the API runs OUTSIDE the cluster with no
+// route to that Service, so the tunnel returns 501 — resolveTarget returns null (a portforward-subresource
+// path over the kube API server is possible future work; v1 does NOT shell out to kubectl). CNPG serves
+// TLS at the database layer, so a client asking for TLS still gets an end-to-end encrypted session over
+// the tunnel; the local hop from psql to the CLI listener is plain loopback.
+server.on(
+  "upgrade",
+  createDbTunnelHandler({
+    meta,
+    tickets,
+    resolveTarget: (site) => (cfg.tunnelDirect ? { host: `${site.name}-rw.${site.namespace}.svc`, port: 5432 } : null),
+    audit: (e) => audit.record(e).catch((err) => console.error(`audit ${e.action}:`, (err as Error).message)),
+    idleTimeoutMs: cfg.tunnelIdleTimeoutMs,
+    maxTunnelsPerUser: cfg.maxTunnelsPerUser,
+  }),
+);
 
 // (E1) Expiry sweep — the API's first housekeeping loop (none existed before previews). Deletes
 // previews whose expires_at has passed. Bytes are VERSION bytes, already covered by the existing
@@ -117,4 +143,7 @@ setInterval(() => {
       if (removed.length) console.log(`preview sweep: removed ${removed.length} expired preview(s)`);
     })
     .catch((e) => console.error("preview sweep failed:", (e as Error).message));
+  // (A3) Reap spent/expired tunnel tickets on the same tick — they're tiny + 60s-lived, but unredeemed
+  // ones would otherwise accumulate. Same posture as the preview sweep: best-effort, unaudited, never throws.
+  tickets.deleteExpired(new Date()).catch((e) => console.error("tunnel-ticket sweep failed:", (e as Error).message));
 }, cfg.previewSweepIntervalMs).unref();

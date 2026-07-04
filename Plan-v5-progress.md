@@ -32,7 +32,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 10 | J1 Service accounts / CI tokens | done | 2b4056c | drop_st_ tokens; scope grammar; DROP_TOKEN CI env; console Tokens tab |
 | 11 | D1 Template registry | done | see log | reconcileStack shared with up; fail-closed strip; seeds via make seed-templates |
 | 12 | E1 Static previews · H2 cron | done | see log | E1 this commit; H2 in eba3cc9 |
-| 13 | I2 Valkey · I3 PG depth | todo | | |
+| 13 | I2 Valkey · I3 PG depth | done | see log | cache rotate absent by design; ext add live db = 409 |
 | 14 | L1b Queue-scaled workers | todo | | |
 | 15 | A3 `db:proxy` tunnel | todo | | |
 | 16 | F1 `drop detect` + stack MCP | todo | | |

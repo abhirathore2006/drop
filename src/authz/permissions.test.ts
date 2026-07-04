@@ -30,6 +30,17 @@ test("expose is the deploy/ship tier: owner + editor + org member yes, viewer no
   expect(can(orgViewer, "expose")).toBe(false);
 });
 
+test("connect is the deploy/ship tier: owner + editor + org member yes, viewer no (A3 db:proxy)", () => {
+  expect(can(owner, "connect")).toBe(true);
+  expect(can(editor, "connect")).toBe(true); // opening a psql tunnel is a routine dev action
+  expect(can(viewer, "connect")).toBe(false); // a metadata-only viewer must NOT open a raw SQL session
+  expect(can(stranger, "connect")).toBe(false);
+  const orgMember: Actor = { email: "m@x.com", platformRole: "member", siteRole: null, orgRole: "member" };
+  expect(can(orgMember, "connect")).toBe(true);
+  const orgViewer: Actor = { email: "ov@x.com", platformRole: "member", siteRole: null, orgRole: "viewer" };
+  expect(can(orgViewer, "connect")).toBe(false);
+});
+
 test("viewer can only read", () => {
   expect(can(viewer, "read")).toBe(true);
   for (const a of ["publish", "rollback", "configure", "share", "transfer", "delete"] as const)

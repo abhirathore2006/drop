@@ -4,9 +4,10 @@ import { rm, readFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { defaultSessionPath, loadSession, saveSession } from "./session.ts";
+import { defaultSessionPath, loadSession, saveSession, type Session } from "./session.ts";
 import { loadConfig, saveConfig, resolveApiBase, resolveUpdateUrl } from "./config.ts";
 import { Client } from "./client.ts";
+import { runDbProxy } from "./db-proxy.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate } from "./resolve-name.ts";
@@ -17,20 +18,24 @@ import { CONFIG_FILE_YAML } from "../site-config.ts";
 import { validateName } from "../names.ts";
 import { VERSION } from "../version.ts";
 
-async function client(): Promise<Client> {
+async function session(): Promise<Session> {
   // CI story (J1): a `DROP_TOKEN` env bearer (a `drop_st_…` service token) authenticates non-
   // interactively — no `drop login`, no session.json on disk. When set it WINS over any saved session,
   // so a CI job just exports DROP_API + DROP_TOKEN and runs `drop deploy`. The API URL resolves the usual
   // way (DROP_API env / saved config / default); `--api` isn't consulted on this path — set DROP_API.
   if (process.env.DROP_TOKEN) {
-    return new Client({ apiBase: await resolveApiBase({}), token: process.env.DROP_TOKEN });
+    return { apiBase: await resolveApiBase({}), token: process.env.DROP_TOKEN };
   }
   try {
-    return new Client(await loadSession(defaultSessionPath()));
+    return await loadSession(defaultSessionPath());
   } catch {
     console.error("not logged in — run `drop login` (or `drop dev-login`, or set DROP_TOKEN for CI) first");
     process.exit(1);
   }
+}
+
+async function client(): Promise<Client> {
+  return new Client(await session());
 }
 
 const show = (v: unknown) => console.log(JSON.stringify(v, null, 2));
@@ -431,7 +436,7 @@ export function buildProgram(): Command {
       console.log(`  view it:  drop stack status ${res.stack}`);
     });
 
-  const db = program.command("db").description("Manage managed Postgres databases (create / password)");
+  const db = program.command("db").description("Manage managed Postgres databases (create / password / proxy)");
   db
     .command("create <name> [dir]")
     .description("Create a managed Postgres database (reads the database: section from dir/drop.yaml if present)")
@@ -529,6 +534,36 @@ export function buildProgram(): Command {
       console.log(`     connect: ${res.tcp.connect}`);
       if (res.tcp.sslmode) console.log(`     ${res.tcp.sslmode}`);
       if (res.note) console.log(`     note: ${res.note}`);
+    });
+
+  // (A3) db:proxy — an authenticated psql tunnel. A local TCP listener; each connection rides a fresh
+  // single-use ticket over an authenticated WebSocket to the API, which authorizes (per-user `connect`),
+  // audits, and splices to the DB in-cluster. Unlike `drop db expose` (L4), it needs no exposure opt-in,
+  // carries real per-user authz + audit, and works on deployments with no L4 plane.
+  db
+    .command("proxy <name>")
+    .description("Open an authenticated local psql tunnel to a managed database (per-user authz + audit; no exposure opt-in)")
+    .option("--port <n>", "local port to listen on (default: an ephemeral port, printed)", (v) => parseInt(v, 10))
+    .action(async (name: string, opts: { port?: number }) => {
+      const err = validateName(name);
+      if (err) throw new Error(err);
+      const s = await session();
+      const proxy = await runDbProxy({
+        session: s,
+        db: name,
+        port: opts.port,
+        onError: (e) => console.error(`  ⚠ tunnel connection failed: ${e.message}`),
+      });
+      console.log(`  ✓ tunnel to ${name} listening on 127.0.0.1:${proxy.port}`);
+      console.log(`     connect:  psql "host=127.0.0.1 port=${proxy.port} sslmode=disable"`);
+      console.log(`     (each connection is authorized + audited; the local hop is loopback, the DB hop is the authenticated tunnel)`);
+      console.log(`     Ctrl-C to stop.`);
+      await new Promise<void>((resolve) => {
+        process.once("SIGINT", () => {
+          console.log("\n  ▸ closing tunnel…");
+          void proxy.close().then(resolve);
+        });
+      });
     });
 
   // (I3) connection pooling (CNPG Pooler / PgBouncer)

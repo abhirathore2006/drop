@@ -18,6 +18,7 @@ import type { Site, Visibility } from "../metastore/types.ts";
 import { UserStore } from "../users/store.ts";
 import { can, canCreateInOrg, canManageOrg, type Action, type Actor } from "../authz/permissions.ts";
 import { ServiceTokenStore, validateScopes } from "../tokens/store.ts";
+import { TunnelTicketStore } from "../tokens/tunnel-tickets.ts";
 import { OrgStore, validateOrgSlug, type Org } from "../orgs/store.ts";
 import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
@@ -70,6 +71,7 @@ export interface Deps {
   tcp?: TcpEndpointStore; // (A2b) TCP exposure registry (tcp_endpoints); defaults over `db`
   tokens?: ServiceTokenStore; // (J1) service accounts / scoped CI tokens; defaults over `db`
   previews?: PreviewStore; // (E1) preview registry (previews); defaults over `db`
+  tickets?: TunnelTicketStore; // (A3) db:proxy single-use tunnel tickets; defaults over `db`. Share ONE instance with the tunnel upgrade handler (bin/api.ts) so issuance + redemption hit the same table.
   now?: () => Date;
 }
 
@@ -90,6 +92,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const tcp = d.tcp ?? new TcpEndpointStore(d.db); // (A2b) TCP exposure registry
   const tokens = d.tokens ?? new ServiceTokenStore(d.db); // (J1) service accounts / scoped CI tokens
   const previews = d.previews ?? new PreviewStore(d.db); // (E1) preview registry
+  const tickets = d.tickets ?? new TunnelTicketStore(d.db, now, d.cfg.tunnelTicketTtlMs); // (A3) db:proxy tunnel tickets
 
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
   // (E1) The preview hostname, `<name>--<label>.<baseDomain>` — reserved via src/names.ts (site
@@ -1321,6 +1324,29 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       },
       409,
     );
+  });
+
+  // ---- db:proxy authenticated tunnel tickets (A3) ----
+  // Mint a short-lived, single-use ticket for the psql tunnel. Gated at `connect` (owner/editor, org
+  // owner/admin/member — NOT viewer): opening a raw SQL session is a routine developer action but must
+  // be above metadata-only viewers. The ticket is the credential the WebSocket upgrade presents; the
+  // upgrade runs OUTSIDE this Hono app (a Node `upgrade` listener in bin/api.ts) so bearer auth can't
+  // ride it — the ticket, bound to (user, db) and single-use, is what makes the raw-TCP upgrade safe.
+  // NOT audited here: issuance can be speculative (the CLI fetches a fresh ticket per accepted local
+  // connection and may never dial). The REDEMPTION — the actual connection — is what's audited
+  // (`db.tunnel.open`, in the tunnel handler). The tunnel itself may still 501 at upgrade if this API
+  // runs outside the cluster (DROP_TUNNEL_DIRECT unset) — issuing a ticket doesn't promise reachability.
+  app.post("/v1/databases/:name/tunnel-ticket", async (c) => {
+    const r = await resolveDb(c, "connect");
+    if ("err" in r) return r.err;
+    const { ticket, expiresAt } = await tickets.issue(r.site.name, r.email);
+    return c.json({
+      db: r.site.name,
+      ticket, // shown once — the CLI uses it immediately for the WS upgrade, then it's spent
+      expiresAt,
+      wsPath: `/v1/databases/${r.site.name}/tunnel`,
+      note: "single-use, 60s TTL — present it as ?ticket=… on a WebSocket upgrade to wsPath (the API dials the DB in-cluster)",
+    });
   });
 
   // ---- tenant object storage (buckets, I1) ----

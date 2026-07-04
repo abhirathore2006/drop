@@ -3,7 +3,7 @@ import type { OrgRole, SiteRole } from "../db/schema.ts";
 // The permission verbs. Kept as a runtime array (not just a type) so the scope grammar (J1) can
 // validate a token's scopes against the SAME source of truth `can()` enforces. `Action` derives
 // from it, so the two can never drift.
-export const ACTIONS = ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose", "share", "transfer", "delete"] as const;
+export const ACTIONS = ["read", "logs", "publish", "deploy", "db:create", "connect", "rollback", "configure", "expose", "share", "transfer", "delete"] as const;
 export type Action = (typeof ACTIONS)[number];
 
 export interface Actor {
@@ -79,18 +79,24 @@ export function scopeAllows(scopes: string[], verb: Action, resource: string): b
 //   the ship/manage tier (site owner+editor, org owner/admin/member) — because exposure is a
 //   deploy-adjacent operation an editor drives, and it's already fenced (opt-in, default off, audited,
 //   protocol-native auth + a NetworkPolicy that only allows edge-tcp → the specifically-exposed pod).
+// connect = open an authenticated `db:proxy` tunnel to a managed database (A3). Deliberately ABOVE
+//   viewer — a viewer is metadata-only and must never open a raw SQL session — and mapped to the
+//   deploy/ship tier (site owner+editor, org owner/admin/member): opening a psql tunnel is a routine
+//   developer action, not an owner-only configure. Service tokens get it via the scope grammar
+//   (`connect:<db>`). Every redemption is audited (`db.tunnel.open`).
 const SITE_MAP: Record<SiteRole, Action[]> = {
-  owner: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose", "share", "transfer", "delete"],
-  editor: ["read", "logs", "publish", "deploy", "db:create", "rollback", "expose"],
+  owner: ["read", "logs", "publish", "deploy", "db:create", "connect", "rollback", "configure", "expose", "share", "transfer", "delete"],
+  editor: ["read", "logs", "publish", "deploy", "db:create", "connect", "rollback", "expose"],
   viewer: ["read"],
 };
 
 // Org roles apply org-WIDE (every resource in the org). owner/admin manage everything; member is the
-// day-to-day (ship + configure/secrets + expose, but not share/transfer/delete a resource); viewer reads.
+// day-to-day (ship + configure/secrets + expose + connect, but not share/transfer/delete a resource);
+// viewer reads (and, deliberately, may NOT open a db:proxy tunnel — connect is above viewer).
 const ORG_MAP: Record<OrgRole, Action[]> = {
-  owner: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose", "share", "transfer", "delete"],
-  admin: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose", "share", "transfer", "delete"],
-  member: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose"],
+  owner: ["read", "logs", "publish", "deploy", "db:create", "connect", "rollback", "configure", "expose", "share", "transfer", "delete"],
+  admin: ["read", "logs", "publish", "deploy", "db:create", "connect", "rollback", "configure", "expose", "share", "transfer", "delete"],
+  member: ["read", "logs", "publish", "deploy", "db:create", "connect", "rollback", "configure", "expose"],
   viewer: ["read"],
 };
 

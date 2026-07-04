@@ -60,6 +60,11 @@ export interface Config {
   edgeTcpService: string; // DROP_EDGE_TCP_SERVICE — the edge-tcp Service name whose port list the API patches on port expose (default drop-edge-tcp)
   // --- previews (E1) ---
   previewSweepIntervalMs: number; // DROP_PREVIEW_SWEEP_INTERVAL_MS — how often the API sweeps expired previews (default 5 min)
+  // --- db:proxy authenticated tunnel (A3) ---
+  tunnelDirect: boolean; // DROP_TUNNEL_DIRECT — dial the DB Service DNS directly (in-cluster API posture); off → local API can't reach the DB, tunnel 501s
+  tunnelTicketTtlMs: number; // DROP_TUNNEL_TICKET_TTL_MS — single-use tunnel-ticket lifetime (default 60s)
+  tunnelIdleTimeoutMs: number; // DROP_TUNNEL_IDLE_TIMEOUT_MS — destroy an idle tunnel after this long with no bytes (default 5 min)
+  maxTunnelsPerUser: number; // DROP_MAX_TUNNELS_PER_USER — per-user concurrent-tunnel cap (default 5, in-process)
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -148,6 +153,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       };
     })(),
     previewSweepIntervalMs: Number(env.DROP_PREVIEW_SWEEP_INTERVAL_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
+    // db:proxy (A3): direct-dial is the in-cluster posture (the DB Service DNS is reachable from the pod);
+    // locally the API is outside the cluster, so it defaults OFF and the tunnel returns 501 (documented).
+    tunnelDirect: env.DROP_TUNNEL_DIRECT === "1",
+    tunnelTicketTtlMs: Number(env.DROP_TUNNEL_TICKET_TTL_MS ?? "60000") || 60000,
+    tunnelIdleTimeoutMs: Number(env.DROP_TUNNEL_IDLE_TIMEOUT_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
+    maxTunnelsPerUser: Number(env.DROP_MAX_TUNNELS_PER_USER ?? "5") || 5,
   };
 }
 

@@ -220,6 +220,7 @@
 </tbody>
 </table>
 <div class="note warn"><span class="lbl">Note</span><p>The database password never appears in <code>drop.yaml</code>. Drop generates it at create; read it once, or rotate it straight into an app's write-only secret with <code>drop db password &lt;db&gt; --set-secret &lt;app&gt;:&lt;KEY&gt;</code>. Connect via the <code>&lt;name&gt;-rw</code> Service and the <code>&lt;name&gt;-app</code> credentials Secret in your namespace.</p></div>
+<div class="note tip"><span class="lbl">Reaching a database from your laptop</span><p>Apps in the same namespace connect over the in-cluster network (see <a href="#uses"><code>uses:</code></a>) — no proxy needed. For a human <code>psql</code> session from outside the cluster you have two paths: <a href="tcp-access.html#dbproxy"><code>drop db proxy &lt;db&gt;</code></a> — an <strong>authenticated, audited</strong> tunnel with per-user authz that works even on locked-down deployments (the recommended default) — or <a href="tcp-access.html#postgres"><code>drop db expose &lt;db&gt;</code></a> for direct L4 TLS-SNI reach when you want a long-lived endpoint. See <a href="tcp-access.html">TCP access</a> for the trade-offs.</p></div>
 
 <h4 id="extensions">Extensions</h4>
 <p>Request Postgres extensions at create — <code>pgvector</code> (the highest-demand one for internal AI tools), <code>pg_trgm</code>, <code>pgcrypto</code>, <code>citext</code> by default (the allowlist is set per platform via <code>DROP_DB_EXTENSION_ALLOWLIST</code>). A name outside the allowlist is rejected with a <code>400</code>.</p>

@@ -384,6 +384,35 @@ const m0012_previews: Migration = {
   },
 };
 
+// Tunnel tickets (A3, `db:proxy`): a short-lived, single-use credential for the authenticated psql
+// tunnel. `POST /v1/databases/:name/tunnel-ticket` (authz `connect`) mints one bound to the caller +
+// the database; the WebSocket tunnel upgrade redeems it EXACTLY once. Only the sha256 token_hash is
+// stored (unique — the redemption lookup key); the raw `drop_tt_…` secret is returned once and never
+// persisted. `used_at` is the single-use latch (flipped by a conditional UPDATE so redemption is
+// atomic); `expires_at` is a 60s TTL. Cascades on the owning database's delete — a dropped DB
+// invalidates any outstanding ticket for it.
+const m0013_tunnel_tickets: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("tunnel_tickets")
+      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn("token_hash", "text", (c) => c.notNull())
+      .addColumn("site_name", "text", (c) => c.notNull().references("sites.name").onDelete("cascade"))
+      .addColumn("email", "text", (c) => c.notNull())
+      .addColumn("expires_at", "timestamptz", (c) => c.notNull())
+      .addColumn("used_at", "timestamptz") // null = unredeemed; set once at redemption (single-use)
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    // The hash is the per-redemption lookup key → unique + indexed.
+    await db.schema.createIndex("tunnel_tickets_hash_uniq").on("tunnel_tickets").column("token_hash").unique().execute();
+    // Expiry sweep can find spent/expired rows without a table scan (tickets are transient — 60s TTL).
+    await db.schema.createIndex("tunnel_tickets_expires_at_idx").on("tunnel_tickets").column("expires_at").execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -400,6 +429,7 @@ export class InlineMigrations implements MigrationProvider {
       "0010_service_tokens": m0010_service_tokens,
       "0011_templates": m0011_templates,
       "0012_previews": m0012_previews,
+      "0013_tunnel_tickets": m0013_tunnel_tickets,
     };
   }
 }

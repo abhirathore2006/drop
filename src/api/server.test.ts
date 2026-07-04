@@ -984,6 +984,56 @@ test("db password: validates a caller-supplied password; 409 on a non-database; 
   await db.destroy();
 });
 
+test("db tunnel-ticket (A3): connect-tier issuance — owner + editor issue, a viewer is 403, unknown 404, 501 static-only", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  // owner issues a single-use ticket bound to the DB
+  const r = await call(app, "POST", "/v1/databases/billing/tunnel-ticket", "alice", {});
+  expect(r.status).toBe(200);
+  const j = await r.json();
+  expect(j.db).toBe("billing");
+  expect(j.ticket.startsWith("drop_tt_")).toBe(true);
+  expect(j.wsPath).toBe("/v1/databases/billing/tunnel");
+  expect(new Date(j.expiresAt).getTime()).toBeGreaterThan(Date.now());
+  // an editor may open a tunnel (connect is the deploy/ship tier), a viewer may not
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "editor" });
+  expect((await call(app, "POST", "/v1/databases/billing/tunnel-ticket", "bob", {})).status).toBe(200);
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "viewer" }); // demote bob
+  expect((await call(app, "POST", "/v1/databases/billing/tunnel-ticket", "bob", {})).status).toBe(403); // viewer: metadata-only
+  // 404 for an unknown DB, 409 for a non-database name
+  expect((await call(app, "POST", "/v1/databases/nope/tunnel-ticket", "alice", {})).status).toBe(404);
+  await pub(app, "alice", "asite", await tgz({ "index.html": "x" }));
+  expect((await call(app, "POST", "/v1/databases/asite/tunnel-ticket", "alice", {})).status).toBe(409);
+  await db.destroy();
+});
+
+test("db tunnel-ticket: a `connect`-scoped service token issues; a token without connect is 403", async () => {
+  const { app, orgs, tokens, db } = await mk();
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" });
+  await call(app, "POST", "/v1/databases/billing?org=acme", "alice", {}); // a DB in the acme org
+  const org = await orgs.getOrgBySlug("acme");
+  const withConnect = (await tokens.create(org!.id, "ci", ["connect:billing"], null, "alice@example.com")).token;
+  const noConnect = (await tokens.create(org!.id, "ci2", ["read:billing"], null, "alice@example.com")).token;
+  expect((await call(app, "POST", "/v1/databases/billing/tunnel-ticket", withConnect, {})).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/billing/tunnel-ticket", noConnect, {})).status).toBe(403);
+  await db.destroy();
+});
+
+test("db tunnel-ticket: 501 when compute is disabled (static-only instance)", async () => {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  const meta = new MetaStore(db);
+  const orgs = new OrgStore(db);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com" });
+  const fake = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  const tokens = new ServiceTokenStore(db);
+  const verifier = new ChainVerifier([new TokenVerifier(tokens, orgs), fake]);
+  // No `kube` → compute disabled.
+  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs, audit: new AuditStore(db), bucket: new FakeBucketStore(), quotas: new QuotaStore(db), tokens });
+  expect((await call(app, "POST", "/v1/databases/whatever/tunnel-ticket", "alice", {})).status).toBe(501);
+  await db.destroy();
+});
+
 test("db:create provisions the tenant namespace (isolation objects) before the DB", async () => {
   const { app, kube, db } = await mk();
   await call(app, "POST", "/v1/databases/billing", "alice", {});

@@ -141,6 +141,9 @@ export function buildMcp(): McpServer {
     { description: "Wake a hibernated managed database.", inputSchema: { name: z.string() } },
     async ({ name }) => run(() => getClient().then((c) => c.dbWake(name))),
   );
+  // (A3) db:proxy — deliberately NO MCP tool. The tunnel is an interactive, long-lived raw-TCP session
+  // for a human at a `psql` prompt (`drop db proxy <db>`); an agent opening a raw database socket is out
+  // of scope v1 (an agent that needs data should go through a purpose-built query tool, not a byte pipe).
 
   // tenant object storage (buckets, I1)
   server.registerTool(

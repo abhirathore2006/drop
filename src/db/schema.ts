@@ -232,6 +232,23 @@ export interface PreviewsTable {
   expires_at: Ts;
 }
 
+/** A short-lived, single-use tunnel ticket (A3, `db:proxy`). Issued by `POST
+ *  /v1/databases/:name/tunnel-ticket` (authz `connect`) and redeemed ONCE by the WebSocket tunnel
+ *  upgrade. Only the sha256 `token_hash` is stored — the raw `drop_tt_…` secret is returned once and
+ *  never persisted, so a leaked metastore yields no usable ticket. `used_at` flips non-null on
+ *  redemption (the single-use latch, set by a conditional UPDATE); the ticket is bound to `site_name`
+ *  (the database) + `email` (the user) so a ticket for one DB can't open another. `expires_at` is a
+ *  60s TTL. Cascades on the owning database's delete. */
+export interface TunnelTicketsTable {
+  id: string;
+  token_hash: string; // sha256 hex of the full `drop_tt_…` secret — the lookup key (never the secret)
+  site_name: string; // the database this ticket authorizes a tunnel to
+  email: string; // the user the ticket was issued to (the audited actor at redemption)
+  expires_at: Ts; // 60s TTL from issuance (injectable clock)
+  used_at: Ts | null; // null = unredeemed; set once at redemption (single-use latch)
+  created_at: Ts; // set from the store's injectable clock (the column also has a now() default)
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -251,4 +268,5 @@ export interface Database {
   templates: TemplatesTable;
   template_versions: TemplateVersionsTable;
   previews: PreviewsTable;
+  tunnel_tickets: TunnelTicketsTable;
 }

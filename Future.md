@@ -51,6 +51,22 @@ either trust the CNPG CA or use the driver's "encrypt without verify" option.
 
 ## 2. `db:proxy` — external psql access (deferred from Phase C)
 
+> **Status (2026-07-04):** SHIPPED (slice A3). `drop db proxy <db> [--port]` opens a local TCP listener;
+> each connection fetches a **single-use tunnel ticket** (`POST /v1/databases/:name/tunnel-ticket`,
+> authz `connect` — a new verb, owner/editor + org owner/admin/member, NOT viewer; also a token scope
+> `connect:<db>`), then rides an **authenticated WebSocket** (`GET /v1/databases/:name/tunnel?ticket=…`,
+> a Node `upgrade` listener in `bin/api.ts` that rejects every other upgrade path) which redeems the
+> ticket (atomic single-use, 60s TTL, bound to user+db), splices WS binary frames ↔ the DB Service's TCP
+> bytes, and audits `db.tunnel.open` at **redemption**. Tickets live in migration 0013
+> `tunnel_tickets` (sha256-stored). Per-user concurrent-tunnel cap + idle timeout + a G2-shaped
+> onClose byte counter. **Dial posture (honest v1):** `DROP_TUNNEL_DIRECT=1` (in-cluster prod) dials
+> `<db>-rw.<ns>.svc:5432` directly; a locally-run (out-of-cluster) API returns `501` for the tunnel —
+> a kube-API `portforward`-subresource path is possible future work; v1 does **not** shell out to
+> `kubectl`. Landed in `authz/permissions.ts` (verb), `tokens/tunnel-tickets.ts` (ticket store),
+> `ws/frames.ts` (shared RFC 6455 codec), `api/db-tunnel.ts` (upgrade handler), `api/server.ts`
+> (ticket route), `cli/db-proxy.ts` + `cli/commands.ts` (`drop db proxy`), docs in `tcp-access.html`.
+> **No MCP tool** (an agent opening a raw DB socket is out of scope); **no console** (a CLI feature).
+
 A platform-mediated, authorized TCP tunnel so a developer can `psql` a managed DB from their
 laptop — **not** raw `kubectl port-forward` (which bypasses authz). Needs a short-lived, scoped
 tunnel the API issues. The in-cluster app↔DB path needs no proxy, so this is for human/CLI access

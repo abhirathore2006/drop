@@ -78,8 +78,31 @@ router  → upstream  <span class="tok-c"># ClientHello + splice  → TLS now co
 </ul></div>
 <p>Because a TCP <code>SYN</code> can't wake a scaled-to-zero pod (the KEDA HTTP interceptor only wakes on HTTP), any app that exposes TCP must run with <code>scale.min ≥ 1</code>. Managed databases (CNPG) are always-on and unaffected.</p>
 
-<h2 id="dbproxy">The authorized alternative: <code>db:proxy</code></h2>
-<p>When you need <strong>real per-user authorization and an audit trail</strong> on a database connection — the thing L4 structurally cannot provide — reach for <code>db:proxy</code>. It opens a local listener whose connections ride an authenticated WebSocket to the control plane, which checks your role and splices to the database in-cluster. It also works on deployments with <em>no</em> L4 plane at all and needs no exposure opt-in. Think of L4 as convenient, protocol-native reach, and <code>db:proxy</code> as the guarded door.</p>
+<h2 id="dbproxy"><code>db:proxy</code> (authenticated tunnel)</h2>
+<p>When you need <strong>real per-user authorization and an audit trail</strong> on a database connection — the thing L4 structurally cannot provide — reach for <code>db:proxy</code>. <code>drop db proxy &lt;db&gt;</code> opens a local TCP listener; each connection rides an <strong>authenticated WebSocket</strong> to the control plane, which authorizes <em>you</em> (a per-user <code>connect</code> grant), audits the open, and splices to the database's <code>&lt;db&gt;-rw</code> Service in-cluster. Think of L4 as convenient, protocol-native reach, and <code>db:proxy</code> as the guarded door — the two are complements, not competitors.</p>
+
+<pre><code><span class="tok-c"># open a tunnel; each connection is authorized + audited</span>
+drop db proxy mydb                      <span class="tok-c"># prints: listening on 127.0.0.1:&lt;ephemeral-port&gt;</span>
+drop db proxy mydb --port 6543          <span class="tok-c"># or pin a local port</span>
+<span class="tok-c"># then, in another shell:</span>
+psql "host=127.0.0.1 port=6543 sslmode=disable"</code></pre>
+
+<p>How it contrasts with <a href="#expose">L4 <code>expose</code></a>:</p>
+<table class="tbl">
+<thead><tr><th></th><th><code>db:proxy</code> (this)</th><th>L4 <code>expose</code></th></tr></thead>
+<tbody>
+<tr><td><strong>Who</strong></td><td><strong>Per-user platform authz</strong> — your Drop role/`connect` grant is checked on every tunnel</td><td>None — a TCP <code>SYN</code> carries no identity; security is protocol-native (the DB password) + NetworkPolicy</td></tr>
+<tr><td><strong>Audit</strong></td><td>Every open is recorded (<code>db.tunnel.open</code>)</td><td>Not per-connection (only the expose/unexpose config change is audited)</td></tr>
+<tr><td><strong>Opt-in</strong></td><td>None — nothing is exposed; the door is authorization, not a network hole</td><td>Explicit, per-resource, default off</td></tr>
+<tr><td><strong>Works on</strong></td><td><strong>Locked-down deployments with no L4 plane at all</strong></td><td>Requires the <code>edge-tcp</code> router + an NLB listener</td></tr>
+</tbody>
+</table>
+
+<div class="note"><span class="lbl">The ticket model (replay-proof)</span><p>Each accepted local connection first asks the API for a <strong>single-use tunnel ticket</strong> (<code>POST /v1/databases/:name/tunnel-ticket</code>, authorized by <code>connect</code>) — a random secret, 60&nbsp;s TTL, bound to <em>(you, this database)</em>, stored only as a hash. The WebSocket upgrade presents the ticket in <code>?ticket=…</code>; the API redeems it <strong>exactly once</strong> (an atomic latch), so a captured ticket can't be replayed and a ticket for one database can't open another. The <code>db.tunnel.open</code> audit event is written at <em>redemption</em> (the connection), not issuance (which can be speculative). A per-user concurrent-tunnel cap bounds fan-out.</p></div>
+
+<div class="note tip"><span class="lbl">Honest about the hops (and TLS)</span><p>The local hop — your <code>psql</code> to the <code>127.0.0.1</code> listener — is plain <strong>loopback</strong> (that's why <code>sslmode=disable</code> is fine there; the loopback + the authenticated, audited tunnel <em>is</em> the security boundary). CNPG still serves TLS at the database layer, so if you keep TLS on, the handshake negotiates <strong>end-to-end</strong> over the tunnel and the DB certificate is verified by your client. This is deliberately <strong>not</strong> a raw <code>kubectl port-forward</code> — port-forward bypasses platform authz entirely; the whole point of <code>db:proxy</code> is that it doesn't.</p></div>
+
+<div class="note warn"><span class="lbl">Deployment posture</span><p>The tunnel dials the DB Service DNS from the API. In the normal <strong>in-cluster</strong> production deployment (<code>DROP_TUNNEL_DIRECT=1</code>) that's a direct dial to <code>&lt;db&gt;-rw.&lt;ns&gt;.svc:5432</code>. If the API runs <strong>outside</strong> the cluster (e.g. a local dev API with a remote cluster) it has no route to that Service, so the tunnel upgrade returns <code>501</code> — issue the ticket from, and run the tunnel against, an in-cluster API. There is no MCP tool for <code>db:proxy</code> (an agent opening a raw database socket is out of scope); it is a CLI feature for a human at a <code>psql</code> prompt.</p></div>
 
 <h2 id="local">Local parity</h2>
 <p>Locally, nginx grows a <code>stream {}</code> block (<code>listen 5432; ssl_preread on;</code>) that forwards the shared port and the dynamic range to <code>edge-tcp</code> exactly as the production NLB will. It ships <strong>off by default</strong> — port <code>5432</code> is already taken by Postgres on most dev machines — and is enabled with <code>make tls TCP_PORTS=1</code>.</p>
