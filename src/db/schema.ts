@@ -357,6 +357,29 @@ export interface AppConfigsTable {
   updated_at: Generated<Ts>;
 }
 
+/** (B3) A stack's GitOps link — `drop stack link`. ONE row per linked stack (stack_id PK; cascades with
+ *  the stack). The API-side poller fetches `path` from `repo`@`branch`, and when the CONTENT sha256
+ *  (`last_sha` — provider-agnostic change detection; a git-commit-sha optimization is a follow-up) changes
+ *  it re-runs the standard stack up. `token` (nullable) is the private-repo credential, stored per the
+ *  event_webhooks.secret precedent: kept server-side for the poller's auth header, NEVER returned by any
+ *  API response (GET /link masks it to `hasToken`) and never logged. `dry_run_only` gates auto-apply: a
+ *  change parks as `last_status='pending_review'` + `pending_sha` until a human confirms in the console. */
+export interface StackLinksTable {
+  stack_id: string;
+  repo: string;
+  branch: string;
+  path: string;
+  token: string | null;
+  last_sha: string | null; // sha256 of the last APPLIED file content
+  last_status: string | null; // 'synced' | 'failed' | 'pending_review'; null = never synced
+  last_error: string | null;
+  last_synced_at: Ts | null; // when the last successful apply ran
+  pending_sha: string | null; // dry-run-only: the fetched-but-unapplied content sha awaiting review
+  dry_run_only: ColumnType<boolean, boolean | undefined, boolean>;
+  created_by: string;
+  created_at: Generated<Ts>;
+}
+
 /** (G4) One retained-log object's index row. The collector batches each RUNNING workload's pod logs into
  *  a gzipped NDJSON object per (site, hour) in S3 (`logs/<site>/<hour>.ndjson.gz`) and records ONE row per
  *  object here. PK (site_name, hour) — a flush REWRITES an hour's object with its full accumulated set, so
@@ -400,4 +423,5 @@ export interface Database {
   event_webhooks: EventWebhooksTable;
   app_configs: AppConfigsTable;
   log_objects: LogObjectsTable;
+  stack_links: StackLinksTable;
 }

@@ -33,6 +33,9 @@ import { sanitizeStackConfig, sanitizeStackConfigPreservingVars, validateStackEd
 import { planStack, StackCycleError, type LivePresence, type PlanStep } from "../stacks/plan.ts";
 import { diffStack, mergeUpgrade, type Resolution } from "../stacks/diff.ts";
 import { StackStore, EnvironmentStore, type StackRow } from "../stacks/store.ts";
+import { StackLinkStore, type StackLinkRow } from "../gitops/store.ts";
+import { syncLinkedStack, type GitopsSyncOpts, type GitopsSyncRunner } from "../gitops/sync.ts";
+import type { FetchLike } from "../gitops/fetch.ts";
 import { TemplateStore, validateTemplateSlug } from "../templates/store.ts";
 import type { TemplateVisibility } from "../db/schema.ts";
 import { substituteTemplate, sanitizeVariables, resolveEnvSpec, validateVarKey } from "../templates/vars.ts";
@@ -63,6 +66,7 @@ import { EventStore, type EmitInput } from "../events/store.ts";
 import { AppConfigStore, ConfigValidationError } from "../appconfig/store.ts";
 import { searchLogObjects, makeMatcher, parseTs } from "../logs/search.ts";
 import { makeLlmClient, type LlmClient } from "../ai/client.ts";
+import { buildSpec, apiVersion } from "./openapi/index.ts"; // (L5) parallel OpenAPI spec registry
 
 export interface Deps {
   cfg: Config;
@@ -89,6 +93,12 @@ export interface Deps {
   metrics?: MetricsStore; // (G2/G2b) edge traffic + uptime rollups; defaults over `db`
   events?: EventStore; // (G3) alerting/notifications event feed + org webhook delivery; defaults over `db`. Share ONE instance with the crash-loop/preview sweeps (bin/api.ts) so emit/resolve/webhook all hit the same delivery path.
   appConfigs?: AppConfigStore; // (L4) per-app NON-SECRET runtime config KV (app_configs); defaults over `db`
+  gitopsLinks?: StackLinkStore; // (B3) GitOps stack links (stack_links); defaults over `db`. Share ONE instance with the bin/api.ts poller.
+  // (B3) Called ONCE (synchronously, during createApp) with the wired per-stack GitOps sync runner
+  // (fetch → content-sha diff → reconcileStack, which takes the `stack:<id>` advisory lock) so the
+  // bin/api.ts housekeeping poller drives EXACTLY the code path the manual sync route uses.
+  onGitopsSync?: (run: GitopsSyncRunner) => void;
+  gitopsFetch?: FetchLike; // (B3) test injection for the GitOps raw-file fetch — tests never hit the network
   authEngine?: AuthEngine; // (K1) the managed-auth engine port; defaults to GoTrue pinned via cfg.authEngineImage
   // (K1) The transport the user-admin proxy uses to reach the in-cluster auth engine's admin API. Tests
   // inject a fake (routes through the FakeEngine's records); prod defaults to an in-cluster fetch. Absent
@@ -247,6 +257,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // Public: the version of the CLI this instance serves (built from the same commit as the API),
   // so `drop update` can show "current → target" before re-installing.
   app.get("/version", (c) => c.json({ version: VERSION }));
+  // (L5) Public platform API spec — an OpenAPI 3.1 document assembled from the parallel route registry
+  // (src/api/openapi). Public like /version: a machine-readable API spec is meant to be fetched by any
+  // integrator (and drives the generated @drop/client). Tagged with the API contract version (the semver;
+  // the build-sha suffix is stripped) so the served spec is stable across builds and matches docs/openapi.json.
+  app.get("/v1/openapi.json", (c) => c.json(buildSpec(apiVersion(VERSION))));
   // The admin console's static assets (built to <cliDir>/ui/ by build.mjs) — hashed
   // assets/* are immutable, everything else no-cache; traversal rejected in consoleAsset.
   app.get("/ui/*", (c) => consoleAsset(d.cfg, c.req.path.replace(/^\/ui\//, "")));
@@ -3779,6 +3794,29 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return { status: 200, body: { stack: name, org: org.slug, specVersion: outcome.newVersion, plan, applied: outcome.applied, needs, outputs } };
   };
 
+  // ---- (B3) GitOps link store + the shared per-stack sync runner ------------------------------------
+  // ONE runner (src/gitops/sync.ts) serves the manual sync/apply routes below AND the bin/api.ts
+  // housekeeping poller (handed over via d.onGitopsSync). The reconcile is the STANDARD reconcileStack,
+  // bound to the link creator's identity — it takes the `stack:<id>` advisory lock itself, so a GitOps
+  // apply serializes against every other `up` path, and it audits `stack.sync` (the injected action).
+  const gitopsLinks = d.gitopsLinks ?? new StackLinkStore(d.db);
+  const runGitopsSync: GitopsSyncRunner = (stack: StackRow, link: StackLinkRow, opts?: GitopsSyncOpts) =>
+    syncLinkedStack(
+      {
+        links: gitopsLinks,
+        getOrg: (id) => d.orgs.getOrg(id),
+        reconcile: (email, args) => reconcileStack({ sub: email, email }, args),
+        emit: (e) => emitEvent(e),
+        resolve: (site, kind) => resolveEvent(site, kind),
+        ...(d.gitopsFetch ? { fetchImpl: d.gitopsFetch } : {}),
+        now,
+      },
+      stack,
+      link,
+      opts,
+    );
+  d.onGitopsSync?.(runGitopsSync);
+
   // ---- POST /v1/stacks/:name/up : reconcile the desired spec (plan + execute; ?dry_run=1 = plan) ----
   app.post("/v1/stacks/:name/up", async (c) => {
     const email = c.get("identity").email;
@@ -4208,6 +4246,116 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     });
     const bodyOut = { ...r.body, from: source || "default", to: target };
     return c.json(bodyOut as Record<string, unknown>, r.status as 200);
+  });
+
+  // ================================ GitOps links (B3) ================================
+  // PULL-ONLY git → stack sync (`drop stack link`): the API polls the linked drop.yaml (no inbound
+  // webhooks v1 — that would mean exposing the API to the git host) and re-runs the standard up when
+  // the content sha changes. Spec-only v1 (images pinned by ref; `dir:` specs are refused by the sync).
+  // Authz: managing/syncing a link is create-tier in the stack's org (hasStackCreateRights, the E3
+  // helper above — a sync ultimately runs the same reconcile an `up` does); reading the status is
+  // plain org membership (findStack). The token is WRITE-ONLY here: stored on the row for the poller's
+  // auth header (the event_webhooks.secret precedent), masked to `hasToken` in every response, never logged.
+
+  const linkView = (l: StackLinkRow) => ({
+    repo: l.repo,
+    branch: l.branch,
+    path: l.path,
+    dryRunOnly: l.dryRunOnly,
+    hasToken: l.token != null, // NEVER the token itself
+    lastSha: l.lastSha,
+    lastStatus: l.lastStatus,
+    lastError: l.lastError,
+    lastSyncedAt: l.lastSyncedAt,
+    pendingSha: l.pendingSha,
+    createdBy: l.createdBy,
+    createdAt: l.createdAt,
+  });
+
+  // ---- POST /v1/stacks/:name/link {repo, branch?, path?, token?, dryRunOnly?} : create/replace the link ----
+  app.post("/v1/stacks/:name/link", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack, org } = found;
+    if (!(await hasStackCreateRights(org, email))) return c.json({ error: "not permitted to manage this stack's GitOps link" }, 403);
+    let body: { repo?: unknown; branch?: unknown; path?: unknown; token?: unknown; dryRunOnly?: unknown };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const repo = typeof body.repo === "string" ? body.repo.trim() : "";
+    if (!repo || repo.length > 512) return c.json({ error: "a repo URL is required (GitHub/GitLab repo, or a direct raw-file URL)" }, 400);
+    const branch = typeof body.branch === "string" && body.branch.trim() ? body.branch.trim() : "main";
+    if (branch.length > 255 || branch.includes("..") || !/^[\w./-]+$/.test(branch)) return c.json({ error: `invalid branch name: ${branch}` }, 400);
+    const path = typeof body.path === "string" && body.path.trim() ? body.path.trim() : "drop.yaml";
+    if (path.length > 512 || path.startsWith("/") || path.includes("..")) return c.json({ error: `invalid file path: ${path}` }, 400);
+    const token = typeof body.token === "string" && body.token.length > 0 ? body.token : null;
+    if (token && token.length > 512) return c.json({ error: "token too long" }, 400);
+    const dryRunOnly = body.dryRunOnly === true;
+    const link = await gitopsLinks.link({ stackId: stack.id, repo, branch, path, token, dryRunOnly, createdBy: email });
+    // Audit the LINK config (never the token — only whether one was provided).
+    await audit({ actor: email, action: "stack.link", target: stack.name, targetType: "stack", orgId: org.id, detail: { repo, branch, path, dryRunOnly, hasToken: !!token } });
+    return c.json({ stack: stack.name, link: linkView(link) });
+  });
+
+  // ---- GET /v1/stacks/:name/link : the link + last-sync sha/status/error (org members; token masked) ----
+  app.get("/v1/stacks/:name/link", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const link = await gitopsLinks.get(found.stack.id);
+    return c.json({ stack: found.stack.name, link: link ? linkView(link) : null });
+  });
+
+  // ---- DELETE /v1/stacks/:name/link : unlink (stop polling; nothing is torn down) ----
+  app.delete("/v1/stacks/:name/link", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack, org } = found;
+    if (!(await hasStackCreateRights(org, email))) return c.json({ error: "not permitted to manage this stack's GitOps link" }, 403);
+    if (!(await gitopsLinks.unlink(stack.id))) return c.json({ error: `stack ${stack.name} has no GitOps link` }, 404);
+    await audit({ actor: email, action: "stack.unlink", target: stack.name, targetType: "stack", orgId: org.id, detail: null });
+    return c.json({ stack: stack.name, unlinked: true });
+  });
+
+  // ---- POST /v1/stacks/:name/link/sync : sync now (the poller's tick, on demand). A dry-run-only link
+  // parks a change as pending_review instead of applying — same semantics as the poll path. A successful
+  // APPLY is audited as `stack.sync` by reconcileStack itself (one audit per actual mutation; an
+  // unchanged/parked sync mutates nothing and failures land in the G3 `gitops_failed` event). ----
+  app.post("/v1/stacks/:name/link/sync", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack, org } = found;
+    if (!(await hasStackCreateRights(org, email))) return c.json({ error: "not permitted to sync this stack's GitOps link" }, 403);
+    const link = await gitopsLinks.get(stack.id);
+    if (!link) return c.json({ error: `stack ${stack.name} has no GitOps link — create one with \`drop stack link\`` }, 404);
+    const result = await runGitopsSync(stack, link);
+    const after = await gitopsLinks.get(stack.id);
+    return c.json({ stack: stack.name, result, link: after ? linkView(after) : null });
+  });
+
+  // ---- POST /v1/stacks/:name/link/apply : apply the REVIEWED pending change (dry-run-only mode). The
+  // sync re-fetches and verifies the content still matches the reviewed pending_sha — moved content
+  // re-parks under the new sha (409) rather than applying unreviewed bytes. ----
+  app.post("/v1/stacks/:name/link/apply", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack, org } = found;
+    if (!(await hasStackCreateRights(org, email))) return c.json({ error: "not permitted to apply this stack's GitOps change" }, 403);
+    const link = await gitopsLinks.get(stack.id);
+    if (!link) return c.json({ error: `stack ${stack.name} has no GitOps link` }, 404);
+    if (link.lastStatus !== "pending_review" || !link.pendingSha) return c.json({ error: "no pending change to apply — sync first (dry-run-only links park changes for review)" }, 409);
+    const result = await runGitopsSync(stack, link, { mode: "apply", expectSha: link.pendingSha });
+    const after = await gitopsLinks.get(stack.id);
+    if (result.changedSinceReview) {
+      return c.json({ error: "the linked file changed since it was reviewed — re-review the new pending change", stack: stack.name, result, link: after ? linkView(after) : null }, 409);
+    }
+    return c.json({ stack: stack.name, result, link: after ? linkView(after) : null });
   });
 
   // ---- Template upstream diff (D2): resolve a template-derived stack's pinned + latest versions into

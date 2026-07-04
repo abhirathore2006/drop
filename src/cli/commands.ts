@@ -479,6 +479,62 @@ export function buildProgram(): Command {
       }
     });
 
+  // ---- (B3) GitOps: pull-only git → stack sync (`stack link [status] | unlink | sync`) ----
+  // `link` doubles as a command group: `drop stack link <name> --repo …` creates the link (the default
+  // action) while `drop stack link status <name>` dispatches to the subcommand (commander resolves a
+  // matching subcommand name first — a stack literally named "status" can't be linked, documented edge).
+  const linkCmd = stack
+    .command("link [name]")
+    .description("Link a stack to a git-hosted drop.yaml — the API polls it (~60s) and re-runs `up` when it changes (spec-only: pin images by ref)")
+    .option("--repo <url>", "the repo URL (GitHub/GitLab), or a direct raw-file URL for any other host")
+    .option("--branch <branch>", "branch to poll", "main")
+    .option("--path <path>", "path to the drop.yaml within the repo", "drop.yaml")
+    .option("--token <token>", "access token for a private repo (write-only: stored server-side, never shown again)")
+    .option("--token-env <var>", "read the token from this environment variable (keeps it out of shell history)")
+    .option("--dry-run-only", "never auto-apply: a change parks as pending review until confirmed (console, or the apply endpoint)")
+    .option("--org <slug>", "the stack's organisation")
+    .action(async (name: string | undefined, opts: { repo?: string; branch: string; path: string; token?: string; tokenEnv?: string; dryRunOnly?: boolean; org?: string }) => {
+      if (!name) throw new Error("usage: drop stack link <name> --repo <url>  (or: drop stack link status <name>)");
+      if (!opts.repo) throw new Error("--repo <url> is required");
+      let token = opts.token;
+      if (!token && opts.tokenEnv) {
+        token = process.env[opts.tokenEnv];
+        if (!token) throw new Error(`--token-env: environment variable ${opts.tokenEnv} is unset/empty`);
+      }
+      const res = await (await client()).stackLink(name, { repo: opts.repo, branch: opts.branch, path: opts.path, token, dryRunOnly: opts.dryRunOnly }, opts.org);
+      console.log(`  ✓ stack ${name} linked to ${res.link.repo} (${res.link.branch}:${res.link.path})${res.link.dryRunOnly ? " [dry-run-only]" : ""}`);
+      console.log(`  the API polls it and re-runs the standard up on change — check with  drop stack link status ${name}`);
+    });
+  linkCmd
+    .command("status <name>")
+    .description("Show the GitOps link + last sync sha/status/error")
+    .option("--org <slug>", "the stack's organisation")
+    .action(async (name: string, opts: { org?: string }) => show(await (await client()).stackLinkStatus(name, opts.org)));
+  stack
+    .command("unlink <name>")
+    .description("Remove the stack's GitOps link (stops polling; nothing is torn down)")
+    .option("--org <slug>", "the stack's organisation")
+    .action(async (name: string, opts: { org?: string }) => {
+      await (await client()).stackUnlink(name, opts.org);
+      console.log(`  ✓ stack ${name} unlinked`);
+    });
+  stack
+    .command("sync <name>")
+    .description("Fetch the linked drop.yaml now and apply it if changed (a dry-run-only link parks the change for review)")
+    .option("--org <slug>", "the stack's organisation")
+    .action(async (name: string, opts: { org?: string }) => {
+      const res = await (await client()).stackLinkSync(name, opts.org);
+      const r = res.result as { outcome: string; sha?: string; error?: string; specVersion?: number };
+      const short = r.sha ? r.sha.slice(0, 12) : "";
+      if (r.outcome === "unchanged") console.log(`  ✓ up to date (sha ${short})`);
+      else if (r.outcome === "synced") console.log(`  ✓ synced (sha ${short}${r.specVersion != null ? `, spec v${r.specVersion}` : ""})`);
+      else if (r.outcome === "pending_review") console.log(`  ⏸ change parked for review (sha ${short}) — apply it in the console, or via the /link/apply endpoint`);
+      else {
+        console.error(`  ✗ sync failed: ${r.error}`);
+        process.exitCode = 1;
+      }
+    });
+
   // ---- environments (E3): named, durable instantiations of a stack with a per-env variable overlay ----
   const parseSet = (pairs: string[]): Record<string, string> => {
     const out: Record<string, string> = {};

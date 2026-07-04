@@ -1,0 +1,118 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Drop Platform API reference</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .api { max-width: 920px; margin: 0 auto; padding: 24px 20px 80px; }
+  .api h1 { margin-bottom: 4px; }
+  .api .lede { color: var(--muted, #8b95a7); margin-top: 0; }
+  .endpoint { border: 1px solid rgba(140,150,170,.25); border-radius: 10px; padding: 14px 16px; margin: 14px 0; }
+  .sig { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+  .method { font-weight: 700; font-size: 12px; padding: 2px 8px; border-radius: 6px; letter-spacing: .04em; }
+  .method.get { background: #10331f; color: #4ade80; }
+  .method.post { background: #10233f; color: #60a5fa; }
+  .method.put, .method.patch { background: #33280f; color: #fbbf24; }
+  .method.delete { background: #331414; color: #f87171; }
+  .path { font-size: 15px; }
+  .summary { margin: 8px 0 2px; }
+  .opid { margin: 0 0 8px; font-size: 12px; color: var(--muted, #8b95a7); }
+  .block { margin-top: 10px; }
+  .block h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted, #8b95a7); }
+  table.fields { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.fields th { text-align: left; font-weight: 600; color: var(--muted, #8b95a7); padding: 3px 8px; }
+  table.fields td { padding: 3px 8px; border-top: 1px solid rgba(140,150,170,.15); }
+  .opt { color: #f59e0b; }
+  .muted { color: var(--muted, #8b95a7); font-size: 13px; }
+  ul { margin: 4px 0; padding-left: 20px; }
+  .note { border: 1px solid rgba(140,150,170,.25); border-radius: 10px; padding: 4px 16px; margin: 16px 0 8px; background: rgba(140,150,170,.06); }
+  .note p { font-size: 14px; }
+</style>
+<div class="api">
+  <h1>Drop Platform API</h1>
+  <p class="lede">Version <code>2.0.0</code> · <a href="index.html">docs home</a> · <a href="openapi.json">openapi.json</a></p>
+  <p>The Drop control-plane HTTP API. A representative, conformance-verified subset of the routes is documented here (see docs/api-reference.html). Generated from src/api/openapi — do not edit docs/openapi.json by hand.</p>
+  <div class="note">
+    <p><strong>Machine-readable spec.</strong> The live spec is served at <code>GET /v1/openapi.json</code>
+    (public, like <code>/version</code>) and committed to <a href="openapi.json">docs/openapi.json</a>.
+    This page + the spec are GENERATED from the route registry in <code>src/api/openapi</code> — never edit
+    them by hand; run <code>npm run gen:openapi</code>.</p>
+    <p><strong>Typed client.</strong> <code>@drop/client</code> (<code>packages/client</code>, zero runtime
+    deps) is generated from this spec: <code>createClient({ baseUrl }).getSite({ name })</code> returns a
+    typed response. The Drop CLI is its first consumer, which makes it the permanent conformance test.</p>
+    <p><strong>Versioning.</strong> <code>info.version</code> is the API's semver (the build-sha suffix is
+    stripped, so the committed spec is stable across commits). A CI gate (<code>npm run check:openapi</code>)
+    fails on any drift; removing or changing a field requires bumping the version — added fields do not.</p>
+  </div>
+  <section><h2>identity</h2><div class="endpoint">
+  <div class="sig"><span class="method get">GET</span> <code class="path">/v1/me</code></div>
+  <p class="summary">The authenticated caller: email, platform-admin flag, and unresolved-event badge count.</p>
+  <p class="opid">operationId: <code>getMe</code></p>
+  
+  
+  <div class="block"><h4>Response 200</h4><table class="fields"><thead><tr><th>field</th><th>type</th></tr></thead><tbody><tr><td><code>email</code></td><td><code>string</code></td></tr><tr><td><code>admin</code></td><td><code>boolean</code></td></tr><tr><td><code>unresolvedEvents</code></td><td><code>number</code></td></tr></tbody></table></div>
+</div></section>
+<section><h2>meta</h2><div class="endpoint">
+  <div class="sig"><span class="method get">GET</span> <code class="path">/version</code></div>
+  <p class="summary">The CLI/API build version this instance serves (public).</p>
+  <p class="opid">operationId: <code>getVersion</code></p>
+  
+  
+  <div class="block"><h4>Response 200</h4><table class="fields"><thead><tr><th>field</th><th>type</th></tr></thead><tbody><tr><td><code>version</code></td><td><code>string</code></td></tr></tbody></table></div>
+</div>
+<div class="endpoint">
+  <div class="sig"><span class="method get">GET</span> <code class="path">/v1/features</code></div>
+  <p class="summary">Which optional features this deployment has enabled.</p>
+  <p class="opid">operationId: <code>getFeatures</code></p>
+  
+  
+  <div class="block"><h4>Response 200</h4><table class="fields"><thead><tr><th>field</th><th>type</th></tr></thead><tbody><tr><td><code>llmEnabled</code></td><td><code>boolean</code></td></tr></tbody></table></div>
+</div></section>
+<section><h2>orgs</h2><div class="endpoint">
+  <div class="sig"><span class="method get">GET</span> <code class="path">/v1/orgs</code></div>
+  <p class="summary">The organisations the caller belongs to, with their role in each.</p>
+  <p class="opid">operationId: <code>listOrgs</code></p>
+  
+  
+  <div class="block"><h4>Response 200</h4><table class="fields"><thead><tr><th>field</th><th>type</th></tr></thead><tbody><tr><td><code>orgs</code></td><td><code>object[]</code></td></tr></tbody></table></div>
+</div>
+<div class="endpoint">
+  <div class="sig"><span class="method get">GET</span> <code class="path">/v1/orgs/{slug}</code></div>
+  <p class="summary">An organisation's metadata + members.</p>
+  <p class="opid">operationId: <code>getOrg</code></p>
+  <div class="block"><h4>Parameters</h4><ul><li><code>slug</code> <span class="muted">(path, required)</span></li></ul></div>
+  
+  <div class="block"><h4>Response 200</h4><table class="fields"><thead><tr><th>field</th><th>type</th></tr></thead><tbody><tr><td><code>slug</code></td><td><code>string</code></td></tr><tr><td><code>name</code></td><td><code>string</code></td></tr><tr><td><code>kind</code></td><td><code>"personal" | "team"</code></td></tr><tr><td><code>members</code></td><td><code>object[]</code></td></tr></tbody></table></div>
+</div>
+<div class="endpoint">
+  <div class="sig"><span class="method get">GET</span> <code class="path">/v1/orgs/{slug}/usage</code></div>
+  <p class="summary">An org's workload counts, workload cap, live cluster quota, and storage usage.</p>
+  <p class="opid">operationId: <code>getOrgUsage</code></p>
+  <div class="block"><h4>Parameters</h4><ul><li><code>slug</code> <span class="muted">(path, required)</span></li></ul></div>
+  
+  <div class="block"><h4>Response 200</h4><table class="fields"><thead><tr><th>field</th><th>type</th></tr></thead><tbody><tr><td><code>org</code></td><td><code>object</code></td></tr><tr><td><code>workloads</code></td><td><code>object</code></td></tr><tr><td><code>cap</code></td><td><code>number</code></td></tr><tr><td><code>quota</code></td><td><code>object | null</code></td></tr><tr><td><code>storage</code></td><td><code>object</code></td></tr></tbody></table></div>
+</div></section>
+<section><h2>sites</h2><div class="endpoint">
+  <div class="sig"><span class="method get">GET</span> <code class="path">/v1/sites</code></div>
+  <p class="summary">The resources the caller can see, each with the caller's resolved capability set.</p>
+  <p class="opid">operationId: <code>listSites</code></p>
+  <div class="block"><h4>Parameters</h4><ul><li><code>org</code> <span class="muted">(query)</span></li></ul></div>
+  
+  <div class="block"><h4>Response 200</h4><table class="fields"><thead><tr><th>field</th><th>type</th></tr></thead><tbody><tr><td><code>sites</code></td><td><code>object[]</code></td></tr></tbody></table></div>
+</div>
+<div class="endpoint">
+  <div class="sig"><span class="method get">GET</span> <code class="path">/v1/sites/{name}</code></div>
+  <p class="summary">A single resource's metadata, versions, capabilities, best-effort live detail, and status.</p>
+  <p class="opid">operationId: <code>getSite</code></p>
+  <div class="block"><h4>Parameters</h4><ul><li><code>name</code> <span class="muted">(path, required)</span></li></ul></div>
+  
+  <div class="block"><h4>Response 200</h4><table class="fields"><thead><tr><th>field</th><th>type</th></tr></thead><tbody><tr><td><code>name</code></td><td><code>string</code></td></tr><tr><td><code>type</code></td><td><code>"site" | "app" | "database" | "bucket" | "cache" | "auth"</code></td></tr><tr><td><code>owner</code></td><td><code>string</code></td></tr><tr><td><code>org</code></td><td><code>object | null</code></td></tr><tr><td><code>collaborators</code></td><td><code>string[]</code></td></tr><tr><td><code>members</code></td><td><code>object[]</code></td></tr><tr><td><code>visibility</code></td><td><code>"public" | "private" | "password"</code></td></tr><tr><td><code>current</code></td><td><code>string | null</code></td></tr><tr><td><code>url</code></td><td><code>string</code></td></tr><tr><td><code>versions</code></td><td><code>object[]</code></td></tr><tr><td><code>capabilities</code></td><td><code>"read" | "logs" | "publish" | "deploy" | "db:create" | "connect" | "exec" | "query" | "rollback" | "configure" | "expose" | "share" | "transfer" | "delete" | "config.read"[]</code></td></tr><tr><td><code>status</code></td><td><code>object</code></td></tr><tr><td><code>app</code> <span class="opt">?</span></td><td><code>Record&lt;string, any&gt;</code></td></tr><tr><td><code>database</code> <span class="opt">?</span></td><td><code>Record&lt;string, any&gt;</code></td></tr><tr><td><code>cache</code> <span class="opt">?</span></td><td><code>Record&lt;string, any&gt;</code></td></tr><tr><td><code>auth</code> <span class="opt">?</span></td><td><code>Record&lt;string, any&gt;</code></td></tr><tr><td><code>bucket</code> <span class="opt">?</span></td><td><code>Record&lt;string, any&gt;</code></td></tr><tr><td><code>tcp</code> <span class="opt">?</span></td><td><code>Record&lt;string, any&gt;</code></td></tr><tr><td><code>previews</code> <span class="opt">?</span></td><td><code>object[]</code></td></tr><tr><td><code>uptime</code> <span class="opt">?</span></td><td><code>object</code></td></tr></tbody></table></div>
+</div>
+<div class="endpoint">
+  <div class="sig"><span class="method post">POST</span> <code class="path">/v1/sites/{name}/versions</code></div>
+  <p class="summary">Publish a new static-site version from a gzipped tarball; flips the live pointer (or a preview).</p>
+  <p class="opid">operationId: <code>publishSiteVersion</code></p>
+  <div class="block"><h4>Parameters</h4><ul><li><code>name</code> <span class="muted">(path, required)</span></li><li><code>org</code> <span class="muted">(query)</span></li><li><code>preview</code> <span class="muted">(query)</span></li><li><code>expire_days</code> <span class="muted">(query)</span></li></ul></div>
+  <div class="block"><h4>Request body</h4><div class="muted">application/gzip</div><div class="muted">string</div></div>
+  <div class="block"><h4>Response 200</h4><table class="fields"><thead><tr><th>field</th><th>type</th></tr></thead><tbody><tr><td><code>url</code></td><td><code>string</code></td></tr><tr><td><code>version</code></td><td><code>string</code></td></tr><tr><td><code>files</code></td><td><code>number</code></td></tr><tr><td><code>bytes</code></td><td><code>number</code></td></tr><tr><td><code>preview</code> <span class="opt">?</span></td><td><code>object</code></td></tr></tbody></table></div>
+</div></section>
+</div>

@@ -147,6 +147,32 @@ export interface EnvList {
   environments: EnvSummary[];
 }
 
+// ---- GitOps link (B3) — pull-only git → stack sync (`drop stack link`) --------------------------------
+/** GET /v1/stacks/:name/link. The token is NEVER returned (masked to `hasToken`). `lastStatus` is
+ *  'synced' | 'failed' | 'pending_review' (dry-run-only links park changes for a human to apply). */
+export interface StackLinkStatus {
+  repo: string;
+  branch: string;
+  path: string;
+  dryRunOnly: boolean;
+  hasToken: boolean;
+  lastSha: string | null;
+  lastStatus: "synced" | "failed" | "pending_review" | null;
+  lastError: string | null;
+  lastSyncedAt: string | null;
+  pendingSha: string | null;
+  createdBy: string;
+  createdAt: string;
+}
+/** The sync/apply outcome (POST /link/sync + /link/apply both return `{stack, result, link}`). */
+export interface StackLinkSyncResult {
+  outcome: "unchanged" | "synced" | "pending_review" | "failed";
+  sha?: string;
+  error?: string;
+  specVersion?: number;
+  changedSinceReview?: boolean;
+}
+
 /** (F2) GET /v1/features — the console's capability probe. `llmEnabled` gates the AI-intent prompt box.
  *  Lives here (not on the `Me` type in api.ts, owned by another agent) as a tiny dedicated endpoint. */
 export interface Features {
@@ -190,6 +216,13 @@ export const apiExtra = {
   /** Promote <source>'s applied spec into <target> (images pinned exact; target keeps its own variables). */
   promoteEnvironment: (name: string, source: string, to: string) =>
     req<StackUpResult & { from: string; to: string }>("POST", `/v1/stacks/${encodeURIComponent(name)}/environments/${encodeURIComponent(source || "default")}/promote`, { to }),
+  // ---- GitOps link (B3) ----
+  /** The stack's GitOps link + last-sync state (null when unlinked). Token always masked server-side. */
+  stackLink: (name: string) => req<{ stack: string; link: StackLinkStatus | null }>("GET", `/v1/stacks/${encodeURIComponent(name)}/link`),
+  /** Sync now — the poller's tick on demand. A dry-run-only link parks the change as pending_review. */
+  stackLinkSync: (name: string) => req<{ stack: string; result: StackLinkSyncResult; link: StackLinkStatus | null }>("POST", `/v1/stacks/${encodeURIComponent(name)}/link/sync`, {}),
+  /** Apply the REVIEWED pending change (dry-run-only mode). 409 if the file moved since review. */
+  stackLinkApply: (name: string) => req<{ stack: string; result: StackLinkSyncResult; link: StackLinkStatus | null }>("POST", `/v1/stacks/${encodeURIComponent(name)}/link/apply`, {}),
   /** (D2) Three-way diff of the stack vs its template's latest version. 404 → not template-derived. */
   stackOutdated: (name: string) => req<OutdatedResult>("GET", `/v1/stacks/${encodeURIComponent(name)}/outdated`),
   /** (D2) Apply upstream changes. `dry_run` returns the reconcile plan; a missing conflict resolution 409s. */

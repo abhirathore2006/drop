@@ -6,6 +6,9 @@ import { runMigrations } from "../src/db/migrate.ts";
 import { MetaStore } from "../src/metastore/store.ts";
 import { LockStore } from "../src/metastore/lock.ts";
 import { StackStore } from "../src/stacks/store.ts";
+import { StackLinkStore } from "../src/gitops/store.ts";
+import { startGitopsPoller } from "../src/gitops/poller.ts";
+import type { GitopsSyncRunner } from "../src/gitops/sync.ts";
 import { UserStore } from "../src/users/store.ts";
 import { OrgStore } from "../src/orgs/store.ts";
 import { AuditStore } from "../src/audit/store.ts";
@@ -109,10 +112,12 @@ const previews = new PreviewStore(db); // (E1) preview registry
 const tickets = new TunnelTicketStore(db, undefined, cfg.tunnelTicketTtlMs); // (A3) db:proxy tunnel tickets — ONE instance shared by issuance (createApp) + redemption (the upgrade handler below)
 const metrics = new MetricsStore(db); // (G2/G2b) edge traffic + uptime rollups — read by the API routes/Prometheus, written by the poller + swept below
 const events = new EventStore(db); // (G3) alerting/notifications feed + org webhook delivery — emitted from the API routes AND the sweeps below (crash-loop, preview-expiring); ONE instance shared so all emits hit the same webhook path
+const gitopsLinks = new StackLinkStore(db); // (B3) GitOps stack links — ONE instance shared by the link routes + the poller below
+let gitopsRun: GitopsSyncRunner | undefined; // set synchronously by createApp via onGitopsSync
 // Accept `Authorization: Bearer drop_st_…` alongside human logins. TokenVerifier goes FIRST in the
 // chain; it returns null for any non-service token so session/Google verification still runs after it.
 verifier = new ChainVerifier([new TokenVerifier(tokens, orgs), verifier]);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens, previews, tickets, metrics, events });
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens, previews, tickets, metrics, events, gitopsLinks, onGitopsSync: (run) => (gitopsRun = run) });
 const server = serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });
@@ -270,6 +275,24 @@ async function detectCrashLoops(k: KubeClient): Promise<void> {
     await events.resolve(s.name, "crashloop").catch((e) => console.error(`crashloop resolve ${s.name}:`, (e as Error).message));
   }
 }
+
+// (B3) GitOps poller — the pull loop behind `drop stack link`. Each (jittered, default 60s —
+// DROP_GITOPS_POLL_MS) tick sweeps every linked stack, fetches its drop.yaml, and when the content sha
+// changed runs the STANDARD stack up via the runner createApp handed over (reconcileStack under the
+// stack's `stack:<id>` advisory lock — the same serialization every other up path uses; dry-run-only
+// links park changes as pending_review instead). Pull-only by design: no inbound webhooks v1 (that
+// would mean exposing the API to the git host). Failures land in the G3 events feed (`gitops_failed`)
+// + the link's last_error; the sweep itself is best-effort like its housekeeping siblings.
+const gitopsPollMs = Number(process.env.DROP_GITOPS_POLL_MS ?? "60000") || 60000;
+startGitopsPoller({
+  links: gitopsLinks,
+  stacks,
+  run: (stack, link) => gitopsRun!(stack, link), // set synchronously by createApp above
+  intervalMs: gitopsPollMs,
+  log: (m) => console.log(m),
+  error: (m) => console.error(m),
+});
+console.log(`drop-api gitops poller enabled (~${Math.round(gitopsPollMs / 1000)}s, jittered)`);
 
 // (G2b) Synthetic uptime poller — probes each qualifying workload on its own interval (default 60s)
 // and records the outcome into `uptime_checks`. HTTP probes (sites/apps) go through the EDGE

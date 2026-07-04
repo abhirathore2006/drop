@@ -645,6 +645,38 @@ const m0021_preview_branch: Migration = {
   },
 };
 
+// (B3) GitOps mode — `drop stack link`. One `stack_links` row per linked stack (stack_id PK; cascades
+// with the stack): where to pull the drop.yaml from (repo/branch/path), the private-repo `token`
+// (nullable, stored like event_webhooks.secret — write-only at the API surface, read only by the
+// poller's auth header, never logged), and the sync state the poller maintains (`last_sha` is a sha256
+// of the FETCHED FILE CONTENT — simple, provider-agnostic change detection; a git-commit-sha
+// optimization is a follow-up). `dry_run_only` + `pending_sha` implement the human-confirm gate:
+// a change parks as last_status='pending_review' until the console apply action runs it. L2 owns
+// 0021; this is 0022.
+const m0022_stack_links: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("stack_links")
+      .addColumn("stack_id", "text", (c) => c.primaryKey().references("stacks.id").onDelete("cascade"))
+      .addColumn("repo", "text", (c) => c.notNull())
+      .addColumn("branch", "text", (c) => c.notNull().defaultTo("main"))
+      .addColumn("path", "text", (c) => c.notNull().defaultTo("drop.yaml"))
+      .addColumn("token", "text") // nullable: private-repo credential (never surfaced by the API)
+      .addColumn("last_sha", "text") // sha256 of the last APPLIED content
+      .addColumn("last_status", "text") // 'synced' | 'failed' | 'pending_review'
+      .addColumn("last_error", "text")
+      .addColumn("last_synced_at", "timestamptz")
+      .addColumn("pending_sha", "text") // dry-run-only: fetched-but-unapplied sha awaiting review
+      .addColumn("dry_run_only", "boolean", (c) => c.notNull().defaultTo(false))
+      .addColumn("created_by", "text", (c) => c.notNull().references("users.email"))
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -670,6 +702,7 @@ export class InlineMigrations implements MigrationProvider {
       "0019_environments": m0019_environments,
       "0020_log_objects": m0020_log_objects,
       "0021_preview_branch": m0021_preview_branch,
+      "0022_stack_links": m0022_stack_links,
     };
   }
 }

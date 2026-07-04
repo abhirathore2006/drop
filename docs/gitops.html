@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitOps · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="gitops.html" class="active">GitOps</a>
+      <a href="templates.html">Templates</a>
+      <a href="buckets.html">Buckets (object storage)</a>
+      <a href="previews.html">Previews</a>
+      <a href="environments.html">Environments</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <a href="tokens.html">CI tokens (service accounts)</a>
+      <a href="observability.html">Observability</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>GitOps</h1>
+<p class="lead">Point a <a href="stacks.html">stack</a> at a git repository and Drop keeps it in sync — it <strong>polls</strong> the <code>drop.yaml</code>, and whenever it changes, re-runs the standard <code>drop up</code> for you. It is deliberately <strong>pull-only</strong>: Drop reaches out to the git host on an interval; the git host never reaches in. Nothing is exposed, no inbound webhook, no callback URL to register.</p>
+
+<h2 id="why-pull">Why pull, not push</h2>
+<p>An inbound webhook means exposing the control-plane API to your git host and trusting its payloads — exactly the kind of surface an internal platform exists to avoid. So Drop polls instead: a small housekeeping loop fetches the linked file on an interval (default 60&nbsp;s, jittered), compares a <strong>SHA-256 of the file contents</strong> against the last-applied one, and only acts when it changed. No signatures to verify, no endpoint to protect, works behind any firewall.</p>
+
+<h2 id="link">Linking a stack</h2>
+<pre><code>drop stack link myproduct \
+  --repo https://github.com/acme/myproduct \
+  --branch main \
+  --path drop.yaml</code></pre>
+<p>Supported hosts: GitHub, GitLab, and any raw-file URL. For a <strong>private</strong> repo, pass a token — it is stored on the link row (never returned by <code>stack link status</code>, never logged) and sent as the host's auth header:</p>
+<pre><code>drop stack link myproduct --repo … --token ghp_xxx
+# or read it from the environment instead of the shell history:
+drop stack link myproduct --repo … --token-env GITHUB_TOKEN</code></pre>
+<p>Check the sync state any time:</p>
+<pre><code>drop stack link status myproduct
+#   repo    github.com/acme/myproduct (main:drop.yaml)
+#   last    a1b2c3d · synced · 2m ago
+drop stack sync myproduct     # poll + apply right now, don't wait for the interval
+drop stack unlink myproduct   # stop polling (nothing is torn down)</code></pre>
+
+<h2 id="spec-only">Spec-only, images pinned</h2>
+<p>The poller applies <strong>spec changes</strong>, not source builds. A linked <code>drop.yaml</code> whose apps carry a <code>dir:</code> build context is <strong>refused</strong> with a clear error — GitOps mode expects images pinned by ref (a tag or digest your CI already pushed). This keeps the pull loop free of a checkout-and-build step; source-build-on-push composes later with in-cluster builds. Everything a normal <code>drop up</code> does — create, update, topologically-ordered apply under the stack's advisory lock — happens exactly the same way here.</p>
+
+<h2 id="dry-run">Review before apply</h2>
+<p>By default a change applies automatically. Add <code>--dry-run-only</code> to gate it on a human:</p>
+<pre><code>drop stack link myproduct --repo … --dry-run-only</code></pre>
+<p>Now when the file changes the poller does <strong>not</strong> apply it — it records the pending revision and flips the status to <code>pending_review</code>. The stack page shows a <em>“changes pending review”</em> badge with a <strong>Review &amp; apply</strong> action; applying it runs the standard <code>up</code> at that revision. This is the safe default for anything you'd hesitate to let a merge deploy on its own.</p>
+
+<h2 id="failures">Failures land in the feed</h2>
+<p>A fetch error, an unparseable <code>drop.yaml</code>, a refused <code>dir:</code> spec, or a halted reconcile records the error on the link (visible in <code>stack link status</code> and the console badge) <strong>and</strong> emits a <a href="observability.html#events">GitOps event</a> to the org's activity feed — so a broken sync is visible next to every other platform event, and reaches your <a href="observability.html#events">org webhook</a> if you've set one. A successful sync emits a <code>gitops_synced</code> event with the new revision.</p>
+
+<h2 id="console">In the console</h2>
+<p>The stack page carries a <strong>GitOps</strong> section: the linked repo/branch/path, the last-sync revision, status and time, and any last error, with a <strong>Sync now</strong> button. For a <code>--dry-run-only</code> link it also surfaces the pending-review affordance that opens the plan and applies it on confirm — the same dry-run → plan → confirm path the canvas editor uses.</p>
+
+<div class="next">
+  <a href="stacks.html"><div class="d">Back →</div><div class="t">Stacks</div></a>
+  <a href="environments.html"><div class="d">Related →</div><div class="t">Environments</div></a>
+  <a href="observability.html"><div class="d">Events →</div><div class="t">Observability</div></a>
+</div>
+</article></main>
+</div>
+</body>
+</html>

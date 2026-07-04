@@ -3,9 +3,16 @@ import type { AppConfig } from "../app-config.ts";
 import type { DatabaseConfig } from "../db-config.ts";
 import type { CacheConfig } from "../cache-config.ts";
 import type { StackSpec } from "../stack-config.ts";
+import { createClient, type DropMethods } from "@drop/client";
 
 export class Client {
-  constructor(private s: Session) {}
+  // (L5) Routes registered in the OpenAPI spec go through the GENERATED @drop/client, making the CLI its
+  // first consumer + the permanent conformance surface. Un-registered routes stay on `req()` below and
+  // migrate opportunistically. Both share the same Session (base URL + bearer token).
+  private readonly gen: DropMethods;
+  constructor(private s: Session) {
+    this.gen = createClient({ baseUrl: s.apiBase, headers: () => ({ authorization: `Bearer ${s.token}` }) });
+  }
 
   private async req(
     method: string,
@@ -28,18 +35,15 @@ export class Client {
   private orgQ(org?: string) {
     return org ? `?org=${encodeURIComponent(org)}` : "";
   }
+  // (L5) migrated to @drop/client: POST /v1/sites/:name/versions
   publish(name: string, tarball: Buffer | Uint8Array, org?: string, preview?: { label: string; expireDays?: number }) {
-    const q = new URLSearchParams();
-    if (org) q.set("org", org);
+    const query: { org?: string; preview?: string; expire_days?: string } = {};
+    if (org) query.org = org;
     if (preview) {
-      q.set("preview", preview.label);
-      if (preview.expireDays != null) q.set("expire_days", String(preview.expireDays));
+      query.preview = preview.label;
+      if (preview.expireDays != null) query.expire_days = String(preview.expireDays);
     }
-    const qs = q.toString();
-    return this.req("POST", `/v1/sites/${name}/versions${qs ? `?${qs}` : ""}`, {
-      contentType: "application/gzip",
-      body: tarball,
-    });
+    return this.gen.publishSiteVersion({ name }, tarball, query);
   }
   // previews (E1): `list` mirrors GET .../previews; `remove` is audited server-side (preview.delete)
   previewList(name: string) {
@@ -93,14 +97,15 @@ export class Client {
   createOrg(slug: string, name?: string) {
     return this.req("POST", `/v1/orgs`, { contentType: "application/json", body: JSON.stringify({ slug, name }) });
   }
+  // (L5) migrated to @drop/client: GET /v1/orgs, /v1/orgs/:slug, /v1/orgs/:slug/usage
   listOrgs() {
-    return this.req("GET", `/v1/orgs`);
+    return this.gen.listOrgs();
   }
   orgInfo(slug: string) {
-    return this.req("GET", `/v1/orgs/${slug}`);
+    return this.gen.getOrg({ slug });
   }
   orgUsage(slug: string) {
-    return this.req("GET", `/v1/orgs/${slug}/usage`);
+    return this.gen.getOrgUsage({ slug });
   }
   addOrgMember(slug: string, email: string, role?: string) {
     return this.req("POST", `/v1/orgs/${slug}/members`, { contentType: "application/json", body: JSON.stringify({ email, role }) });
@@ -260,8 +265,9 @@ export class Client {
       body: JSON.stringify({ to }),
     });
   }
+  // (L5) migrated to @drop/client: GET /v1/sites/:name
   info(name: string) {
-    return this.req("GET", `/v1/sites/${name}`);
+    return this.gen.getSite({ name });
   }
   /** (G2) Edge request metrics for a workload — `{range, series, totals}`. `range` is 1h|24h|7d. */
   metrics(name: string, range?: string) {
@@ -319,8 +325,9 @@ export class Client {
     }
     return res;
   }
+  // (L5) migrated to @drop/client: GET /v1/sites
   list(org?: string) {
-    return this.req("GET", `/v1/sites${org ? `?org=${encodeURIComponent(org)}` : ""}`);
+    return this.gen.listSites(org ? { org } : undefined);
   }
   // (I5) `force` confirms data loss: a stateful app's volume (or a non-empty bucket's contents, I1) —
   // same `?force=1` convention as `bucketRemove`.
@@ -397,6 +404,23 @@ export class Client {
     if (opts.cascade) q.set("cascade", "1");
     const qs = q.toString();
     return this.req("DELETE", `/v1/stacks/${name}${qs ? `?${qs}` : ""}`);
+  }
+  // (B3) GitOps link — pull-only git→stack sync. The token is WRITE-ONLY: sent once at link time,
+  // stored server-side for the poller's auth header, and masked to `hasToken` in every response.
+  stackLink(name: string, payload: { repo: string; branch?: string; path?: string; token?: string; dryRunOnly?: boolean }, org?: string) {
+    return this.req("POST", `/v1/stacks/${encodeURIComponent(name)}/link${this.orgQ(org)}`, { contentType: "application/json", body: JSON.stringify(payload) });
+  }
+  stackLinkStatus(name: string, org?: string) {
+    return this.req("GET", `/v1/stacks/${encodeURIComponent(name)}/link${this.orgQ(org)}`);
+  }
+  stackUnlink(name: string, org?: string) {
+    return this.req("DELETE", `/v1/stacks/${encodeURIComponent(name)}/link${this.orgQ(org)}`);
+  }
+  stackLinkSync(name: string, org?: string) {
+    return this.req("POST", `/v1/stacks/${encodeURIComponent(name)}/link/sync${this.orgQ(org)}`, { contentType: "application/json", body: "{}" });
+  }
+  stackLinkApply(name: string, org?: string) {
+    return this.req("POST", `/v1/stacks/${encodeURIComponent(name)}/link/apply${this.orgQ(org)}`, { contentType: "application/json", body: "{}" });
   }
   // template upstream diff (D2): outdated (three-way diff) + upgrade (merge → standard reconcile)
   stackOutdated(name: string, org?: string) {

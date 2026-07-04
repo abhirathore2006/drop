@@ -1,0 +1,1040 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Drop Platform API",
+    "version": "2.0.0",
+    "description": "The Drop control-plane HTTP API. A representative, conformance-verified subset of the routes is documented here (see docs/api-reference.html). Generated from src/api/openapi — do not edit docs/openapi.json by hand."
+  },
+  "tags": [
+    {
+      "name": "identity"
+    },
+    {
+      "name": "meta"
+    },
+    {
+      "name": "orgs"
+    },
+    {
+      "name": "sites"
+    }
+  ],
+  "paths": {
+    "/version": {
+      "get": {
+        "operationId": "getVersion",
+        "summary": "The CLI/API build version this instance serves (public).",
+        "tags": [
+          "meta"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "version"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "operationId": "getMe",
+        "summary": "The authenticated caller: email, platform-admin flag, and unresolved-event badge count.",
+        "tags": [
+          "identity"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "email": {
+                      "type": "string"
+                    },
+                    "admin": {
+                      "type": "boolean"
+                    },
+                    "unresolvedEvents": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "email",
+                    "admin",
+                    "unresolvedEvents"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/features": {
+      "get": {
+        "operationId": "getFeatures",
+        "summary": "Which optional features this deployment has enabled.",
+        "tags": [
+          "meta"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "llmEnabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "llmEnabled"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orgs": {
+      "get": {
+        "operationId": "listOrgs",
+        "summary": "The organisations the caller belongs to, with their role in each.",
+        "tags": [
+          "orgs"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "orgs": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "slug": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "personal",
+                              "team"
+                            ]
+                          },
+                          "role": {
+                            "type": "string",
+                            "enum": [
+                              "owner",
+                              "admin",
+                              "member",
+                              "viewer"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "slug",
+                          "name",
+                          "kind",
+                          "role"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "orgs"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orgs/{slug}": {
+      "get": {
+        "operationId": "getOrg",
+        "summary": "An organisation's metadata + members.",
+        "tags": [
+          "orgs"
+        ],
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "slug": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "personal",
+                        "team"
+                      ]
+                    },
+                    "members": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "email": {
+                            "type": "string"
+                          },
+                          "role": {
+                            "type": "string",
+                            "enum": [
+                              "owner",
+                              "admin",
+                              "member",
+                              "viewer"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "email",
+                          "role"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "slug",
+                    "name",
+                    "kind",
+                    "members"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/orgs/{slug}/usage": {
+      "get": {
+        "operationId": "getOrgUsage",
+        "summary": "An org's workload counts, workload cap, live cluster quota, and storage usage.",
+        "tags": [
+          "orgs"
+        ],
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "org": {
+                      "type": "object",
+                      "properties": {
+                        "slug": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "personal",
+                            "team"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "slug",
+                        "name",
+                        "kind"
+                      ]
+                    },
+                    "workloads": {
+                      "type": "object",
+                      "properties": {
+                        "site": {
+                          "type": "number"
+                        },
+                        "app": {
+                          "type": "number"
+                        },
+                        "database": {
+                          "type": "number"
+                        },
+                        "bucket": {
+                          "type": "number"
+                        },
+                        "cache": {
+                          "type": "number"
+                        },
+                        "auth": {
+                          "type": "number"
+                        },
+                        "total": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "site",
+                        "app",
+                        "database",
+                        "bucket",
+                        "cache",
+                        "auth",
+                        "total"
+                      ]
+                    },
+                    "cap": {
+                      "type": "number"
+                    },
+                    "quota": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "hard": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "string"
+                              }
+                            },
+                            "used": {
+                              "type": "object",
+                              "additionalProperties": {
+                                "type": "string"
+                              }
+                            }
+                          },
+                          "required": [
+                            "hard",
+                            "used"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "storage": {
+                      "type": "object",
+                      "properties": {
+                        "databases": {
+                          "type": "object",
+                          "properties": {
+                            "count": {
+                              "type": "number"
+                            },
+                            "requestedBytes": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "count",
+                            "requestedBytes"
+                          ]
+                        },
+                        "buckets": {
+                          "type": "object",
+                          "properties": {
+                            "count": {
+                              "type": "number"
+                            },
+                            "bytes": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "count",
+                            "bytes"
+                          ]
+                        },
+                        "caches": {
+                          "type": "object",
+                          "properties": {
+                            "count": {
+                              "type": "number"
+                            },
+                            "bytes": {
+                              "type": "number"
+                            }
+                          },
+                          "required": [
+                            "count",
+                            "bytes"
+                          ]
+                        },
+                        "budget": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "databases",
+                        "buckets",
+                        "caches",
+                        "budget"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "org",
+                    "workloads",
+                    "cap",
+                    "quota",
+                    "storage"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sites": {
+      "get": {
+        "operationId": "listSites",
+        "summary": "The resources the caller can see, each with the caller's resolved capability set.",
+        "tags": [
+          "sites"
+        ],
+        "parameters": [
+          {
+            "name": "org",
+            "in": "query",
+            "required": false,
+            "description": "Filter to one org by slug (caller must be a member).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sites": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "name": {
+                            "type": "string"
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "site",
+                              "app",
+                              "database",
+                              "bucket",
+                              "cache",
+                              "auth"
+                            ]
+                          },
+                          "owner": {
+                            "type": "string"
+                          },
+                          "visibility": {
+                            "type": "string",
+                            "enum": [
+                              "public",
+                              "private",
+                              "password"
+                            ]
+                          },
+                          "url": {
+                            "type": "string"
+                          },
+                          "current": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "org": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "slug": {
+                                    "type": "string"
+                                  },
+                                  "name": {
+                                    "type": "string"
+                                  },
+                                  "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                      "personal",
+                                      "team"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "slug",
+                                  "name",
+                                  "kind"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "capabilities": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "enum": [
+                                "read",
+                                "logs",
+                                "publish",
+                                "deploy",
+                                "db:create",
+                                "connect",
+                                "exec",
+                                "query",
+                                "rollback",
+                                "configure",
+                                "expose",
+                                "share",
+                                "transfer",
+                                "delete",
+                                "config.read"
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "type",
+                          "owner",
+                          "visibility",
+                          "url",
+                          "current",
+                          "org",
+                          "capabilities"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "sites"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sites/{name}": {
+      "get": {
+        "operationId": "getSite",
+        "summary": "A single resource's metadata, versions, capabilities, best-effort live detail, and status.",
+        "tags": [
+          "sites"
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "site",
+                        "app",
+                        "database",
+                        "bucket",
+                        "cache",
+                        "auth"
+                      ]
+                    },
+                    "owner": {
+                      "type": "string"
+                    },
+                    "org": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "slug": {
+                              "type": "string"
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "personal",
+                                "team"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "slug",
+                            "name",
+                            "kind"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "collaborators": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "members": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "email": {
+                            "type": "string"
+                          },
+                          "role": {
+                            "type": "string",
+                            "enum": [
+                              "owner",
+                              "editor",
+                              "viewer"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "email",
+                          "role"
+                        ]
+                      }
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "public",
+                        "private",
+                        "password"
+                      ]
+                    },
+                    "current": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "url": {
+                      "type": "string"
+                    },
+                    "versions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "publishedBy": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "fileCount": {
+                            "type": "number"
+                          },
+                          "bytes": {
+                            "type": "number"
+                          },
+                          "config": {
+                            "type": "object",
+                            "additionalProperties": {}
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "publishedBy",
+                          "createdAt",
+                          "fileCount",
+                          "bytes"
+                        ]
+                      }
+                    },
+                    "capabilities": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "read",
+                          "logs",
+                          "publish",
+                          "deploy",
+                          "db:create",
+                          "connect",
+                          "exec",
+                          "query",
+                          "rollback",
+                          "configure",
+                          "expose",
+                          "share",
+                          "transfer",
+                          "delete",
+                          "config.read"
+                        ]
+                      }
+                    },
+                    "status": {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "running",
+                            "asleep",
+                            "progressing",
+                            "degraded",
+                            "stopped",
+                            "error"
+                          ]
+                        },
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "reason"
+                      ]
+                    },
+                    "app": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    },
+                    "database": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    },
+                    "cache": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    },
+                    "auth": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    },
+                    "bucket": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    },
+                    "tcp": {
+                      "type": "object",
+                      "additionalProperties": {}
+                    },
+                    "previews": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "label": {
+                            "type": "string"
+                          },
+                          "versionId": {
+                            "type": "string"
+                          },
+                          "url": {
+                            "type": "string"
+                          },
+                          "createdBy": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "expiresAt": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": "string"
+                          },
+                          "hasDb": {
+                            "type": "boolean"
+                          },
+                          "branchedFrom": {
+                            "type": "string"
+                          },
+                          "branchedAt": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "label",
+                          "versionId",
+                          "url",
+                          "createdBy",
+                          "createdAt",
+                          "expiresAt",
+                          "kind",
+                          "hasDb"
+                        ]
+                      }
+                    },
+                    "uptime": {
+                      "type": "object",
+                      "properties": {
+                        "last24hPct": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "lastCheck": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "ok": {
+                                  "type": "boolean"
+                                },
+                                "latencyMs": {
+                                  "type": "number"
+                                },
+                                "status": {
+                                  "type": "number"
+                                },
+                                "at": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "ok",
+                                "latencyMs",
+                                "status",
+                                "at"
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "last24hPct",
+                        "lastCheck"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "type",
+                    "owner",
+                    "org",
+                    "collaborators",
+                    "members",
+                    "visibility",
+                    "current",
+                    "url",
+                    "versions",
+                    "capabilities",
+                    "status"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sites/{name}/versions": {
+      "post": {
+        "operationId": "publishSiteVersion",
+        "summary": "Publish a new static-site version from a gzipped tarball; flips the live pointer (or a preview).",
+        "tags": [
+          "sites"
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "org",
+            "in": "query",
+            "required": false,
+            "description": "Owning org slug when first claiming the name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "preview",
+            "in": "query",
+            "required": false,
+            "description": "Publish as a named preview instead of flipping current_version.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "expire_days",
+            "in": "query",
+            "required": false,
+            "description": "Preview lifetime in days (default 7).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "A gzipped tarball of the site's files.",
+          "content": {
+            "application/gzip": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    },
+                    "version": {
+                      "type": "string"
+                    },
+                    "files": {
+                      "type": "number"
+                    },
+                    "bytes": {
+                      "type": "number"
+                    },
+                    "preview": {
+                      "type": "object",
+                      "properties": {
+                        "label": {
+                          "type": "string"
+                        },
+                        "url": {
+                          "type": "string"
+                        },
+                        "versionId": {
+                          "type": "string"
+                        },
+                        "expiresAt": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "label",
+                        "url",
+                        "versionId",
+                        "expiresAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "url",
+                    "version",
+                    "files",
+                    "bytes"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

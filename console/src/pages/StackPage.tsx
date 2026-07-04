@@ -147,6 +147,81 @@ function CreateEnvModal({ stack, onClose, onCreated }: { stack: string; onClose:
   );
 }
 
+// (B3) GitOps badge — repo/branch/path + last-sync sha/status/error/time, a "sync now" action, and (for
+// dry-run-only links) the review-&-apply affordance for a parked pending change. ADDITIVE: renders
+// nothing when the stack has no link (retry off — a 404/older API simply hides it). Polls with the same
+// cadence as the rest of the page so a background poller sync shows up without a manual refresh.
+function GitopsBadge({ stack }: { stack: string }) {
+  const qc = useQueryClient();
+  const [err, setErr] = useState<string | null>(null);
+  const q = useQuery({
+    queryKey: ["/v1/stacks", stack, "link"],
+    queryFn: () => apiExtra.stackLink(stack),
+    retry: false,
+    refetchInterval: POLL_DETAIL_MS,
+  });
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ["/v1/stacks", stack, "link"] });
+    void qc.invalidateQueries({ queryKey: ["/v1/stacks", stack, "graph"] }); // an apply changes the graph
+  };
+  const sync = useMutation({
+    mutationFn: () => apiExtra.stackLinkSync(stack),
+    onSuccess: (r) => {
+      setErr(r.result.outcome === "failed" ? r.result.error ?? "sync failed" : null);
+      refresh();
+    },
+    onError: (e) => setErr((e as Error).message),
+  });
+  const apply = useMutation({
+    mutationFn: () => apiExtra.stackLinkApply(stack),
+    onSuccess: (r) => {
+      setErr(r.result.outcome === "failed" ? r.result.error ?? "apply failed" : null);
+      refresh();
+    },
+    // A 409 (file moved since review) surfaces here with the server's clear message; the refetched
+    // link then carries the NEW pending sha for a fresh review.
+    onError: (e) => {
+      setErr((e as Error).message);
+      refresh();
+    },
+  });
+  const link = q.data?.link;
+  if (!link) return null;
+  const status = link.lastStatus ?? "not synced yet";
+  const pendingReview = link.lastStatus === "pending_review" && !!link.pendingSha;
+  return (
+    <div className="gitops-badge" data-testid="gitops-badge" style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap", margin: "8px 0" }}>
+      <span className="pill">GitOps</span>
+      <span className="gitops-src muted" title={`${link.repo} (${link.branch}:${link.path})`}>
+        {link.repo} · {link.branch}:{link.path}
+      </span>
+      <span className={`pill gitops-status gitops-${link.lastStatus ?? "none"}${link.lastStatus === "failed" ? " pill-warn" : ""}`} data-testid="gitops-status">
+        {status}
+      </span>
+      {link.lastSha && (
+        <code className="gitops-sha" title={`last applied content sha ${link.lastSha}`}>
+          {link.lastSha.slice(0, 12)}
+        </code>
+      )}
+      {link.lastSyncedAt && <span className="muted small">synced {new Date(link.lastSyncedAt).toLocaleString()}</span>}
+      {link.dryRunOnly && <span className="pill">dry-run-only</span>}
+      <Button size="sm" data-testid="gitops-sync-btn" loading={sync.isPending} onClick={() => sync.mutate()}>
+        Sync now
+      </Button>
+      {pendingReview && (
+        <Button size="sm" variant="primary" data-testid="gitops-apply-btn" loading={apply.isPending} onClick={() => apply.mutate()} title={`apply the reviewed change ${link.pendingSha}`}>
+          Apply reviewed change ({link.pendingSha!.slice(0, 8)})
+        </Button>
+      )}
+      {(err ?? link.lastError) && (
+        <span className="err gitops-err" data-testid="gitops-error">
+          {err ?? link.lastError}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function StackPage({ name }: { name: string }) {
   // (E3) The selected environment. "default" is the unnamed default env; a named env re-scopes the whole
   // page (graph + metric chips + plan drawer + canvas) to its `<stack>-<env>-<key>` resources. The graph
@@ -248,6 +323,10 @@ function StackView({ graph, env, setEnv }: { graph: StackGraph; env: string; set
           )}
         </div>
       </div>
+
+      {/* (B3) GitOps badge — shown only when the stack is linked (`drop stack link`). Stack-level:
+          GitOps syncs the DEFAULT env, so the badge stays visible regardless of the selected env. */}
+      <GitopsBadge stack={graph.name} />
 
       {/* (D2) update-available banner — opens the upstream-diff review view. */}
       {updateAvailable && (

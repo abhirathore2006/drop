@@ -26,6 +26,27 @@ const banner = {
 const common = { bundle: true, platform: "node", format: "esm", target: "node24", banner, define: { __DROP_VERSION__: JSON.stringify(VERSION) } };
 console.log(`building drop ${VERSION}`);
 
+// (L5) @drop/client is a workspace package that the drop CLI bundle CONSUMES (src/cli/client.ts), unlike
+// @drop/auth / @drop/config (which are app-side SDKs). So its dist/ must exist BEFORE the cli target
+// bundles. On a full build (or `… packages`) we also REGENERATE the committed OpenAPI spec + docs
+// reference + the client's typed source from the route registry (src/api/openapi) first — deterministic,
+// so it re-emits identical bytes when nothing changed. Both gen scripts use esbuild internally (no new dep).
+const here = fileURLToPath(new URL(".", import.meta.url));
+const buildClient = !only.length || only.includes("cli") || only.includes("mcp") || only.includes("packages");
+if (buildClient) {
+  if (!only.length || only.includes("packages")) {
+    for (const script of ["scripts/gen-openapi.mjs", "scripts/gen-client.mjs"]) {
+      const r = spawnSync(process.execPath, [script], { stdio: "inherit", cwd: here });
+      if (r.status !== 0) {
+        console.error(`✗ ${script} failed`);
+        process.exit(r.status ?? 1);
+      }
+    }
+  }
+  await build({ bundle: true, format: "esm", platform: "neutral", target: "es2022", entryPoints: ["packages/client/src/index.ts"], outfile: "packages/client/dist/index.js" });
+  console.log("✓ built packages/client/dist/index.js (@drop/client)");
+}
+
 const targets = [
   { tag: "cli", entry: "bin/drop.ts", out: "dist/drop.js" },
   { tag: "mcp", entry: "bin/mcp.ts", out: "dist/mcp.js" },
@@ -61,7 +82,6 @@ if (!only.length || only.includes("packages")) {
 // API (src/api/dashboard.ts); it never enters the api/edge node bundles, which stay
 // React-free. Shelled out so esbuild stays the only bundler for the node targets.
 if (!only.length || only.includes("ui")) {
-  const here = fileURLToPath(new URL(".", import.meta.url));
   const viteBin = fileURLToPath(new URL("./node_modules/vite/bin/vite.js", import.meta.url));
   const r = spawnSync(process.execPath, [viteBin, "build", "--config", "console/vite.config.ts"], {
     stdio: "inherit",

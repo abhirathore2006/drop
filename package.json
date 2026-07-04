@@ -20,6 +20,9 @@
     "mcp": "node dist/mcp.js",
     "drop": "node dist/drop.js",
     "build:binary": "bun build --compile ./bin/drop.ts --outfile dist/drop",
+    "gen:openapi": "node scripts/gen-openapi.mjs",
+    "gen:client": "node scripts/gen-client.mjs",
+    "check:openapi": "node scripts/check-openapi.mjs",
     "test": "bun test"
   },
   "dependencies": {
