@@ -48,15 +48,18 @@ export class Client {
   previewRemove(name: string, label: string) {
     return this.req("DELETE", `/v1/sites/${name}/previews/${encodeURIComponent(label)}`);
   }
-  deploy(name: string, app: AppConfig, org?: string, noStart?: boolean, preview?: { label: string; withDb?: boolean; expireDays?: number }) {
+  deploy(name: string, app: AppConfig, org?: string, noStart?: boolean, preview?: { label: string; withDb?: boolean; fromBackup?: boolean; at?: string; expireDays?: number }) {
     const q = new URLSearchParams();
     if (org) q.set("org", org);
     if (noStart) q.set("start", "false");
     // (E2) A preview deploys a parallel `<name>-p-<label>` workload at <name>--<label>; --with-db clones
     // an empty database; expire_days overrides the 7d default. The live app is untouched.
+    // (L2) --from-backup branches the --with-db clone from the parent db's Barman backup (--at = PITR).
     if (preview) {
       q.set("preview", preview.label);
       if (preview.withDb) q.set("with_db", "true");
+      if (preview.fromBackup) q.set("from_backup", "true");
+      if (preview.at) q.set("at", preview.at);
       if (preview.expireDays != null) q.set("expire_days", String(preview.expireDays));
     }
     const qs = q.toString();

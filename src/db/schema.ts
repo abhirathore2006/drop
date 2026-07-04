@@ -250,6 +250,11 @@ export interface PreviewsTable {
   expires_at: Ts;
   kind: ColumnType<PreviewKind, PreviewKind | undefined, PreviewKind>; // (E2) 'site' (E1) | 'app' (E2); db-default 'site'
   has_db: ColumnType<boolean, boolean | undefined, boolean>; // (E2) app preview owns a --with-db CNPG clone; db-default false
+  // (L2) provenance for a `--from-backup` branch: the SOURCE db name + the point-in-time the branch was
+  // taken (the `--at` target, or the branch time when latest). NULL for an empty --with-db clone and for
+  // every site/plain app preview — so the console can show "branched from <db>@<ts>" only when set.
+  branched_from: ColumnType<string | null, string | null | undefined, string | null | undefined>;
+  branched_at: ColumnType<Date | null, Date | string | null | undefined, Date | string | null | undefined>;
 }
 
 /** A preview's kind (E2): `site` is the E1 static-version preview; `app` is a parallel container manifest

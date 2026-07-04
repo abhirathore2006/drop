@@ -342,21 +342,32 @@ export function buildProgram(): Command {
     .option("--no-start", "deploy without starting the pod (set secrets/config first, then `drop start <app>`) — avoids a broken first boot")
     .option("--preview [label]", "deploy as a PREVIEW at <name>--<label> (parallel, scale 0/1, leaves the live app untouched); label defaults to a short random suffix")
     .option("--with-db", "with --preview: clone a FRESH EMPTY database from the parent's bound-db spec (torn down at expiry) instead of sharing the parent's")
+    .option("--from-backup", "with --with-db: BRANCH the clone from the parent db's latest backup (a full copy of prod data) instead of empty — needs manage (db:create) on the parent db; counts as a full copy against the storage budget")
+    .option("--at <iso>", "with --from-backup: recover to a point-in-time (ISO date-time), e.g. 2026-07-01T12:00:00Z; default is the latest backup")
     .option("--expire-days <n>", "preview expiry in days, 1-30 (default 7); only with --preview", (v) => parseInt(v, 10))
-    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; build?: boolean; dockerfile?: string; start?: boolean; preview?: string | boolean; withDb?: boolean; expireDays?: number }) => {
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; build?: boolean; dockerfile?: string; start?: boolean; preview?: string | boolean; withDb?: boolean; fromBackup?: boolean; at?: string; expireDays?: number }) => {
       const { name, source, app } = await loadAppDeploy(dir, nameArg);
+      // (L2) client-side guards for clearer errors (the server enforces the same): --from-backup needs
+      // --with-db (there's no clone to branch), and --at needs --from-backup (it's the PITR target).
+      if (opts.fromBackup && !opts.withDb) throw new Error("--from-backup requires --with-db");
+      if (opts.at && !opts.fromBackup) throw new Error("--at (point-in-time) requires --from-backup");
       if (opts.build || opts.dockerfile) {
         const { image } = await buildAndPushImage(await client(), dir, name, { org: opts.org, dockerfile: opts.dockerfile });
         app.image = image; // deploy the just-pushed image instead of the drop.yaml ref
       }
       // commander maps `--no-start` to opts.start === false; `[label]` (optional value) gives `true` for a bare --preview.
       const noStart = opts.start === false;
-      const preview = opts.preview === undefined ? undefined : { label: typeof opts.preview === "string" ? opts.preview : randomPreviewLabel(), withDb: opts.withDb, expireDays: opts.expireDays };
-      console.log(`  ▸ deploying ${name}  (${app.image})${preview ? ` (preview: ${preview.label}${preview.withDb ? ", own db" : ""})` : ""}${noStart ? " — not starting yet" : ""}…`);
+      const preview =
+        opts.preview === undefined
+          ? undefined
+          : { label: typeof opts.preview === "string" ? opts.preview : randomPreviewLabel(), withDb: opts.withDb, fromBackup: opts.fromBackup, at: opts.at, expireDays: opts.expireDays };
+      const dbNote = preview?.withDb ? (preview.fromBackup ? `, branched db${preview.at ? `@${preview.at}` : ""}` : ", own db") : "";
+      console.log(`  ▸ deploying ${name}  (${app.image})${preview ? ` (preview: ${preview.label}${dbNote})` : ""}${noStart ? " — not starting yet" : ""}…`);
       const res = await (await client()).deploy(name, app, opts.org, noStart, preview);
       if (res.preview) {
         console.log(`  ✓ preview live at ${res.preview.url}  (expires ${res.preview.expiresAt})`);
-        if (res.preview.db) console.log(`     own empty database: ${res.preview.db}`);
+        if (res.preview.branchedFrom) console.log(`     branched database: ${res.preview.db} (from ${res.preview.branchedFrom}${res.preview.branchedAt ? `@${res.preview.branchedAt}` : ""})`);
+        else if (res.preview.db) console.log(`     own empty database: ${res.preview.db}`);
       } else if (res.started === false) {
         console.log(`  ✓ deployed ${name} (stopped). Set its secrets/config, then start it:`);
         console.log(`      drop start ${name}`);

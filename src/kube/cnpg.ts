@@ -53,6 +53,13 @@ export interface DatabaseManifests {
   networkPolicy: Record<string, unknown>; // cnpg-system ingress + API/object-store egress for DB pods
   secret?: Record<string, unknown>; // S3 creds (local only; omitted under IRSA)
   appSecret?: Record<string, unknown>; // basic-auth `app` creds — set only at create (when ctx.appPassword is present)
+  // (L2 database branching / FM item 9 recovery) present ONLY on a `recoveryDatabaseManifests` result:
+  // the SOURCE database's Barman ObjectStore (+ its local S3 creds Secret) that `bootstrap.recovery`
+  // reads to clone the source's backup objects. A normal (empty-init) database omits both. applyDatabase
+  // applies them BEFORE the Cluster (its externalClusters ref the ObjectStore); deleteDatabase reaps them
+  // by their fixed `<name>-recovery-src[-creds]` names (idempotent, 404-safe for a non-branch db).
+  sourceObjectStore?: Record<string, unknown>; // barmancloud.cnpg.io/v1 ObjectStore — the READ-ONLY recovery source
+  sourceSecret?: Record<string, unknown>; // S3 creds for reading the source backup (local only; IRSA omits)
 }
 
 /** Build the CNPG objects for one managed database in a tenant namespace. */
@@ -196,6 +203,113 @@ export function databaseManifests(db: DatabaseConfig, ctx: DatabaseManifestConte
       type: "kubernetes.io/basic-auth",
       metadata: { name: `${ctx.name}-app`, namespace: ctx.namespace, labels },
       stringData: { username: "app", password: ctx.appPassword },
+    };
+  }
+  return out;
+}
+
+/** A database RECOVERY source: another database's Barman object-store backup (its S3 path + creds) plus
+ *  an optional point-in-time. `recoveryDatabaseManifests` bootstraps a fresh Cluster FROM this — reading
+ *  the backup OBJECTS only, never the source's live volume/primary. Shared machinery: L2 preview
+ *  branching AND FM item 9 (restore-to-new-db) both build the same shape from this one export. */
+export interface RecoverySource {
+  clusterName: string; // the SOURCE CNPG Cluster name (== its Barman `serverName` under destinationPath)
+  destinationPath: string; // s3://<bucket>/databases/<ns>/<sourceDb> — the source's Barman backup ROOT (read-only)
+  s3?: { endpointURL?: string; accessKeyId?: string; secretAccessKey?: string }; // local static creds to READ the source backup; omit under IRSA
+  iamRoleArn?: string; // prod IRSA: read the source backup via the recovered instance's SA role (inheritFromIAMRole)
+  targetTime?: string; // optional point-in-time (ISO) → bootstrap.recovery.recoveryTarget.targetTime; omit → latest base backup
+}
+
+/** A `recoveryDatabaseManifests` result: a normal DatabaseManifests set whose Cluster is bootstrapped
+ *  via `bootstrap.recovery`, PLUS the source ObjectStore (always) and its creds Secret (local only). */
+export interface RecoveryDatabaseManifests extends DatabaseManifests {
+  sourceObjectStore: Record<string, unknown>; // narrowed: always present on a recovery result
+}
+
+/** Build the CNPG objects for a database RECOVERED (branched) from another database's Barman
+ *  object-store backup — the shared `bootstrap.recovery` machinery (L2 preview branching builds it here;
+ *  FM item 9 consumes the SAME export). The recovered Cluster:
+ *   - bootstraps via `bootstrap.recovery` from the SOURCE's backup OBJECTS (an ObjectStore CR + an
+ *     `externalClusters` entry that references it) — it NEVER touches the source's live volume or its
+ *     primary (no `pg_basebackup`, no `connectionParameters`): recovery only READS the backup objects,
+ *     so the source is completely untouched;
+ *   - is point-in-time to `source.targetTime` when given (`recoveryTarget.targetTime`), else the latest
+ *     base backup + WAL;
+ *   - gets its OWN generated `app` password (via `ctx.appPassword`) — `bootstrap.recovery.secret` re-sets
+ *     the recovered `app` owner's password to the branch's own Secret, so the branch is credential-
+ *     ISOLATED from the source even though the DATA is a copy;
+ *   - archives its OWN WAL + backups to its OWN ObjectStore (`<name>-store`, from the base manifests),
+ *     at its OWN destinationPath — a branch never writes into the source's backup prefix.
+ *  The NetworkPolicy is identical to a normal db: the source backup lives in the SAME bucket/endpoint, so
+ *  the egress the base manifests already grant (to that object store) also covers reading the source. */
+export function recoveryDatabaseManifests(db: DatabaseConfig, ctx: DatabaseManifestContext, opts: { source: RecoverySource }): RecoveryDatabaseManifests {
+  const { source } = opts;
+  // Reuse the standard manifests for the recovered cluster's OWN ObjectStore/ScheduledBackup/NetworkPolicy/
+  // app Secret/S3 creds Secret — we only SWAP the Cluster's bootstrap (initdb → recovery) and add the
+  // source as an external cluster. (ctx.appPassword present ⇒ appSecret emitted = the branch's own creds.)
+  const base = databaseManifests(db, ctx);
+  const labels = (base.cluster as { metadata: { labels: Record<string, string> } }).metadata.labels;
+
+  // The SOURCE's Barman ObjectStore — a DISTINCT CR (its own `<name>-recovery-src` name) so it never
+  // collides with THIS cluster's own `<name>-store`. Points at the source db's backup root; recovery
+  // reads these objects. Its own creds (static local, or IRSA) mirror the base store's credential model.
+  const srcStoreName = `${ctx.name}-recovery-src`;
+  const srcCredsSecretName = `${srcStoreName}-creds`;
+  const useSrcStaticCreds = !!(source.s3?.accessKeyId && source.s3?.secretAccessKey);
+  const sourceObjectStore = {
+    apiVersion: "barmancloud.cnpg.io/v1",
+    kind: "ObjectStore",
+    metadata: { name: srcStoreName, namespace: ctx.namespace, labels },
+    spec: {
+      configuration: {
+        destinationPath: source.destinationPath,
+        ...(source.s3?.endpointURL ? { endpointURL: source.s3.endpointURL } : {}),
+        s3Credentials: useSrcStaticCreds
+          ? {
+              accessKeyId: { name: srcCredsSecretName, key: "ACCESS_KEY_ID" },
+              secretAccessKey: { name: srcCredsSecretName, key: "ACCESS_SECRET_KEY" },
+            }
+          : { inheritFromIAMRole: true },
+        wal: { compression: "gzip" },
+        data: { compression: "gzip" },
+      },
+    },
+  };
+
+  // Swap the base Cluster's bootstrap: initdb → recovery. The recovered `app` database/owner come FROM the
+  // backup; `secret` re-sets the owner's password to the branch's own generated creds (credential
+  // isolation). `recoveryTarget.targetTime` → point-in-time when `--at` was given. externalClusters wires
+  // the source ObjectStore via the plugin (barmanObjectName + the source's serverName under the root) —
+  // the plugin path, matching how `databaseManifests` archives (NOT the deprecated inline barmanObjectStore).
+  const cluster = {
+    ...base.cluster,
+    spec: {
+      ...(base.cluster as { spec: Record<string, unknown> }).spec,
+      bootstrap: {
+        recovery: {
+          source: srcStoreName,
+          database: "app",
+          owner: "app",
+          secret: { name: `${ctx.name}-app` },
+          ...(source.targetTime ? { recoveryTarget: { targetTime: source.targetTime } } : {}),
+        },
+      },
+      externalClusters: [
+        {
+          name: srcStoreName,
+          plugin: { name: PLUGIN_NAME, parameters: { barmanObjectName: srcStoreName, serverName: source.clusterName } },
+        },
+      ],
+    },
+  };
+
+  const out: RecoveryDatabaseManifests = { ...base, cluster, sourceObjectStore };
+  if (useSrcStaticCreds) {
+    out.sourceSecret = {
+      apiVersion: "v1",
+      kind: "Secret",
+      metadata: { name: srcCredsSecretName, namespace: ctx.namespace, labels },
+      stringData: { ACCESS_KEY_ID: source.s3!.accessKeyId, ACCESS_SECRET_KEY: source.s3!.secretAccessKey },
     };
   }
   return out;

@@ -245,6 +245,8 @@ export interface PreviewInfo {
   expiresAt: string;
   kind?: "site" | "app"; // (E2) omitted on an older API → treat as "site"
   hasDb?: boolean; // (E2) app preview owns a --with-db clone
+  branchedFrom?: string; // (L2) a --from-backup branch's SOURCE db (present only when the clone was branched from a backup)
+  branchedAt?: string | null; // (L2) the point-in-time the branch was taken at (ISO); the --at target or the branch time
 }
 export interface SecretMeta {
   key: string;

@@ -339,6 +339,11 @@ export class KubeApiClient implements KubeClient {
     // exists and bootstrap is immutable, so we leave it untouched (never re-rotate).
     if (m.appSecret) await this.apply(this.secretPath(namespace, this.objName(m.appSecret)), m.appSecret as Record<string, unknown>);
     if (m.secret) await this.apply(this.secretPath(namespace, this.objName(m.secret)), m.secret as Record<string, unknown>);
+    // (L2) a RECOVERY/branch cluster reads the source db's backup via a read-only source ObjectStore
+    // (+ its local creds Secret). Apply BOTH BEFORE the Cluster — its externalClusters references the
+    // source ObjectStore by name, so the CR must exist first. Absent for a normal (empty-init) db.
+    if (m.sourceSecret) await this.apply(this.secretPath(namespace, this.objName(m.sourceSecret)), m.sourceSecret as Record<string, unknown>);
+    if (m.sourceObjectStore) await this.apply(this.objectStorePath(namespace, this.objName(m.sourceObjectStore)), m.sourceObjectStore as Record<string, unknown>);
     await this.apply(this.objectStorePath(namespace, this.objName(m.objectStore)), m.objectStore as Record<string, unknown>);
     await this.apply(this.clusterPath(namespace, name), m.cluster as Record<string, unknown>);
     await this.apply(this.scheduledBackupPath(namespace, this.objName(m.scheduledBackup)), m.scheduledBackup as Record<string, unknown>);
@@ -350,6 +355,12 @@ export class KubeApiClient implements KubeClient {
     await this.call("DELETE", this.scheduledBackupPath(namespace, `${name}-daily`));
     await this.call("DELETE", this.clusterPath(namespace, name));
     await this.call("DELETE", this.objectStorePath(namespace, `${name}-store`));
+    // (L2) an L2 branch (recovery-bootstrapped) also carries a source ObjectStore + its local creds
+    // Secret — reap them by their fixed `<name>-recovery-src[-creds]` names. 404-safe: a normal db never
+    // had them, so these deletes no-op (the same shape as every other line here). This is why the expiry
+    // sweep / preview-rm tear a branch down with the SAME `deleteDatabase(ns, <name>-p-<label>-db)` call.
+    await this.call("DELETE", this.objectStorePath(namespace, `${name}-recovery-src`));
+    await this.call("DELETE", this.secretPath(namespace, `${name}-recovery-src-creds`));
     await this.call("DELETE", this.netpolPath(namespace, `${name}-db`));
     await this.call("DELETE", this.secretPath(namespace, `${name}-backup-creds`));
     await this.call("DELETE", this.secretPath(namespace, `${name}-app`)); // platform-owned creds (bootstrap.initdb + password rotation)

@@ -3310,6 +3310,169 @@ test("(E2) a non-owner cannot create or remove an app preview (deploy-gated)", a
   await db.destroy();
 });
 
+// ============================ (L2) database branching for previews ============================
+// `--from-backup` makes the --with-db clone a RECOVERY branch of the parent db's Barman backup (a full
+// copy of prod data) instead of an empty clone. Governance: the parent DB's manage tier; audited
+// db.branch; storage full-copy budget; point-in-time via --at; the branch reads the backup, not the
+// live volume; it dies with the preview.
+
+// Preset one completed base backup on the parent db so the recovery guard passes.
+function seedParentBackup(kube: any, ns: string, dbName: string) {
+  kube.backupsByDb.set(`${ns}/${dbName}`, [{ name: `${dbName}-b1`, phase: "completed", method: "plugin", startedAt: "2026-06-01T02:00:00Z", stoppedAt: "2026-06-01T02:01:00Z", error: null }]);
+}
+
+test("(L2) deploy ?preview&with_db&from_backup branches via bootstrap.recovery from the parent backup; provenance + audit + redirected uses", async () => {
+  const { app, kube, audit, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/appdb?org=acme", "alice", {})).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  const ns = kube.dbApplies.find((a: any) => a.name === "appdb")!.namespace;
+  seedParentBackup(kube, ns, "appdb");
+  const res = await call(app, "POST", "/v1/apps/web?org=acme&preview=pr1&with_db=true&from_backup=true", "alice", { image: "web:1", uses: [{ database: "appdb" }] });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.preview).toMatchObject({ withDb: true, db: "web-p-pr1-db", branchedFrom: "appdb" });
+  expect(typeof body.preview.branchedAt).toBe("string"); // latest → the branch-creation time
+  // the preview db is RECOVERY-bootstrapped (not empty init), reading the SOURCE's object store
+  const clone = kube.dbApplies.find((a: any) => a.name === "web-p-pr1-db")!;
+  const spec = (clone.manifests.cluster as any).spec;
+  expect(spec.bootstrap.recovery).toBeDefined();
+  expect(spec.bootstrap.initdb).toBeUndefined();
+  expect(spec.externalClusters[0].plugin.parameters.serverName).toBe("appdb");
+  expect((clone.manifests as any).sourceObjectStore.spec.configuration.destinationPath).toContain("/appdb");
+  expect(clone.manifests.appSecret).toBeTruthy(); // the branch's OWN generated app password
+  // the preview app is redirected to the BRANCH's creds (not the parent appdb's)
+  const pv = kube.applies.find((a: any) => a.name === "web-p-pr1")!;
+  expect((pv.manifests.deployment as any).spec.template.spec.containers[0].envFrom[0]).toEqual({ secretRef: { name: "web-p-pr1-db-app" } });
+  // audited db.branch WITH the source db + the point-in-time
+  const { entries } = await audit.list({ action: "db.branch", target: "web-p-pr1-db" });
+  expect(entries).toHaveLength(1);
+  expect(entries[0]!.detail?.sourceDb).toBe("appdb");
+  expect(entries[0]!.detail?.targetTime).toBe("latest");
+  await db.destroy();
+});
+
+test("(L2) --at renders a point-in-time recoveryTarget and records it on the branch + audit", async () => {
+  const { app, kube, audit, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/appdb?org=acme", "alice", {})).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  const ns = kube.dbApplies.find((a: any) => a.name === "appdb")!.namespace;
+  seedParentBackup(kube, ns, "appdb");
+  const at = "2026-07-01T12:00:00.000Z";
+  const res = await call(app, "POST", `/v1/apps/web?org=acme&preview=pr1&with_db=true&from_backup=true&at=${encodeURIComponent(at)}`, "alice", { image: "web:1", uses: [{ database: "appdb" }] });
+  expect(res.status).toBe(200);
+  expect((await res.json()).preview.branchedAt).toBe(at);
+  const clone = kube.dbApplies.find((a: any) => a.name === "web-p-pr1-db")!;
+  expect((clone.manifests.cluster as any).spec.bootstrap.recovery.recoveryTarget.targetTime).toBe(at);
+  expect((await audit.list({ action: "db.branch", target: "web-p-pr1-db" })).entries[0]!.detail?.targetTime).toBe(at);
+  await db.destroy();
+});
+
+test("(L2) --at requires --from-backup; --from-backup requires --with-db; a bad --at → 400", async () => {
+  const { app, db } = await mk();
+  expect((await call(app, "POST", "/v1/apps/web", "alice", { image: "web:1" })).status).toBe(200);
+  // --from-backup without --with-db → 400 (flag-shape validation fires before any db binding is needed)
+  const r1 = await call(app, "POST", "/v1/apps/web?preview=p1&from_backup=true", "alice", { image: "web:1" });
+  expect(r1.status).toBe(400);
+  expect((await r1.json()).error).toContain("--from-backup requires --with-db");
+  // --at without --from-backup → 400
+  const r2 = await call(app, "POST", "/v1/apps/web?preview=p2&with_db=true&at=2026-07-01T00:00:00Z", "alice", { image: "web:1" });
+  expect(r2.status).toBe(400);
+  expect((await r2.json()).error).toContain("--at");
+  // a malformed --at → 400
+  const r3 = await call(app, "POST", "/v1/apps/web?preview=p3&with_db=true&from_backup=true&at=not-a-date", "alice", { image: "web:1" });
+  expect(r3.status).toBe(400);
+  expect((await r3.json()).error).toContain("invalid --at");
+  await db.destroy();
+});
+
+test("(L2) governance: branching prod data needs manage (db:create) on the PARENT db, not just deploy on the app → 403", async () => {
+  const { app, kube, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/appdb?org=acme", "alice", {})).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  const ns = kube.dbApplies.find((a: any) => a.name === "appdb")!.namespace;
+  seedParentBackup(kube, ns, "appdb");
+  // bob is a per-site EDITOR on the APP only (deploy ✓) — never a member of appdb, never an org member
+  // (so no db:create on the parent db). This is exactly the actor the governance gate must stop.
+  await call(app, "POST", "/v1/sites/web/collaborators", "alice", { email: "bob@example.com", role: "editor" });
+  // bob CAN make an empty --with-db clone (E2 rule: deploy on the app is enough; no prod data moves)…
+  expect((await call(app, "POST", "/v1/apps/web?org=acme&preview=empty&with_db=true", "bob", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  // …but he CANNOT branch prod data from backup — 403, and no branch cluster is applied
+  const res = await call(app, "POST", "/v1/apps/web?org=acme&preview=branch&with_db=true&from_backup=true", "bob", { image: "web:1", uses: [{ database: "appdb" }] });
+  expect(res.status).toBe(403);
+  expect((await res.json()).error).toContain("db:create");
+  expect(kube.dbApplies.some((a: any) => a.name === "web-p-branch-db")).toBe(false);
+  // alice (org owner ⇒ db:create on appdb) CAN branch it
+  expect((await call(app, "POST", "/v1/apps/web?org=acme&preview=branch&with_db=true&from_backup=true", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  await db.destroy();
+});
+
+test("(L2) a branch is a FULL COPY — it counts against the org storage budget → 429 when over", async () => {
+  const { app, kube, db } = await mk({ admins: ["alice@example.com"] });
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "team", name: "Team" })).status).toBe(200);
+  await call(app, "PUT", "/v1/admin/orgs/team/quotas", "alice", { quotas: { storage_budget_bytes: "1536Mi" } }); // 1.5Gi
+  expect((await call(app, "POST", "/v1/databases/appdb?org=team", "alice", { storage: "1Gi" })).status).toBe(200); // parent uses 1Gi (< 1.5Gi)
+  expect((await call(app, "POST", "/v1/apps/web?org=team", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  const ns = kube.dbApplies.find((a: any) => a.name === "appdb")!.namespace;
+  seedParentBackup(kube, ns, "appdb");
+  // a same-size (1Gi) branch would bring the org to 2Gi > 1.5Gi budget → 429
+  const res = await call(app, "POST", "/v1/apps/web?org=team&preview=pr1&with_db=true&from_backup=true", "alice", { image: "web:1", uses: [{ database: "appdb" }] });
+  expect(res.status).toBe(429);
+  expect((await res.json()).error).toMatch(/storage budget exceeded/);
+  await db.destroy();
+});
+
+test("(L2) branching with no completed backup on the parent → 409", async () => {
+  const { app, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/appdb?org=acme", "alice", {})).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  // no backup seeded → recovery has nothing to restore from
+  const res = await call(app, "POST", "/v1/apps/web?org=acme&preview=pr1&with_db=true&from_backup=true", "alice", { image: "web:1", uses: [{ database: "appdb" }] });
+  expect(res.status).toBe(409);
+  expect((await res.json()).error).toContain("no completed backup");
+  await db.destroy();
+});
+
+test("(L2) the branch dies with the preview: preview rm tears down the recovery cluster (same deleteDatabase path as the sweep)", async () => {
+  const { app, kube, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/appdb?org=acme", "alice", {})).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  const ns = kube.dbApplies.find((a: any) => a.name === "appdb")!.namespace;
+  seedParentBackup(kube, ns, "appdb");
+  expect((await call(app, "POST", "/v1/apps/web?org=acme&preview=pr1&with_db=true&from_backup=true", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  // removing the preview tears down the parallel workload AND the recovery-bootstrapped branch db —
+  // the identical `deleteDatabase(ns, <name>-p-<label>-db)` the expiry sweep (bin/api.ts) calls.
+  const rm = await call(app, "DELETE", "/v1/sites/web/previews/pr1", "alice");
+  expect(rm.status).toBe(200);
+  expect(kube.deletes.some((x: any) => x.name === "web-p-pr1")).toBe(true);
+  expect(kube.dbDeletes.some((x: any) => x.name === "web-p-pr1-db")).toBe(true);
+  const det = await (await call(app, "GET", "/v1/sites/web", "alice")).json();
+  expect(det.previews).toHaveLength(0);
+  await db.destroy();
+});
+
+test("(L2) the parent app detail surfaces the branch provenance (console 'branched from <db>@<ts>')", async () => {
+  const { app, kube, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/appdb?org=acme", "alice", {})).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  const ns = kube.dbApplies.find((a: any) => a.name === "appdb")!.namespace;
+  seedParentBackup(kube, ns, "appdb");
+  const at = "2026-07-01T12:00:00.000Z";
+  expect((await call(app, "POST", `/v1/apps/web?org=acme&preview=pr1&with_db=true&from_backup=true&at=${encodeURIComponent(at)}`, "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  const det = await (await call(app, "GET", "/v1/sites/web", "alice")).json();
+  expect(det.previews[0]).toMatchObject({ label: "pr1", kind: "app", hasDb: true, branchedFrom: "appdb", branchedAt: at });
+  // an EMPTY --with-db clone (or a plain preview) carries no provenance
+  expect((await call(app, "POST", "/v1/apps/web?org=acme&preview=plain", "alice", { image: "web:1" })).status).toBe(200);
+  const det2 = await (await call(app, "GET", "/v1/sites/web", "alice")).json();
+  expect(det2.previews.find((p: any) => p.label === "plain").branchedFrom).toBeUndefined();
+  await db.destroy();
+});
+
 // ---- (L4) runtime config / feature flags ------------------------------------------------------
 
 test("(L4) config set/get: stores non-secret KV, returns map + ETag; If-None-Match → 304", async () => {

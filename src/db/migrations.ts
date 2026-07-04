@@ -626,6 +626,25 @@ const m0020_log_objects: Migration = {
   },
 };
 
+// (L2) Database branching for previews. Two additive, nullable columns on `previews` record the
+// provenance of a `drop deploy --preview --with-db --from-backup` branch: the SOURCE database the
+// --with-db clone was recovered from, and the point-in-time it was taken at (the `--at` PITR target, or
+// the branch-creation time when recovering the latest backup). Both NULL for a site preview, a plain app
+// preview, and an EMPTY --with-db clone — so the console shows "branched from <db>@<ts>" ONLY for a real
+// branch. No backfill needed (default NULL). E3 owns 0019, G4 owns 0020; this is 0021.
+const m0021_preview_branch: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .alterTable("previews")
+      .addColumn("branched_from", "text") // nullable: the source db a --from-backup clone was recovered from
+      .addColumn("branched_at", "timestamptz") // nullable: the point-in-time the branch was taken at
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -650,6 +669,7 @@ export class InlineMigrations implements MigrationProvider {
       "0018_app_configs": m0018_app_configs,
       "0019_environments": m0019_environments,
       "0020_log_objects": m0020_log_objects,
+      "0021_preview_branch": m0021_preview_branch,
     };
   }
 }

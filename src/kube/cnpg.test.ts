@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { databaseManifests, databasePasswordJob, poolerManifest, poolerName } from "./cnpg.ts";
+import { databaseManifests, recoveryDatabaseManifests, databasePasswordJob, poolerManifest, poolerName } from "./cnpg.ts";
 import type { DatabaseConfig } from "../db-config.ts";
 
 const base: DatabaseConfig = { engine: "postgres-18", storage: "10Gi", hibernation: "none" };
@@ -196,6 +196,102 @@ test("databaseManifests: extensions render as postInitApplicationSQL CREATE EXTE
 test("databaseManifests: no extensions → no postInitApplicationSQL key", () => {
   const m = databaseManifests(base, localCtx);
   expect((m.cluster as any).spec.bootstrap.initdb.postInitApplicationSQL).toBeUndefined();
+});
+
+// ---- (L2) database branching — recoveryDatabaseManifests (shared with FM item 9) ----------------
+const branchCtx = {
+  name: "web-p-pr1-db", // the preview's OWN cluster name
+  namespace: "drop-t-alice",
+  destinationPath: "s3://drop/databases/drop-t-alice/web-p-pr1-db", // the BRANCH's own ongoing-backup path
+  s3: { endpointURL: "http://floci:4566", accessKeyId: "test", secretAccessKey: "test" },
+  appPassword: "branch-own-pw", // the branch's OWN generated app password (credential isolation)
+};
+const source = {
+  clusterName: "billing-db", // the SOURCE db name == its Barman serverName
+  destinationPath: "s3://drop/databases/drop-t-alice/billing-db", // the SOURCE's backup root (read-only)
+  s3: { endpointURL: "http://floci:4566", accessKeyId: "test", secretAccessKey: "test" },
+};
+
+test("recoveryDatabaseManifests: Cluster bootstraps via bootstrap.recovery from the source ObjectStore — NEVER a live volume", () => {
+  const m = recoveryDatabaseManifests(base, branchCtx, { source });
+  const spec = (m.cluster as any).spec;
+  // recovery bootstrap, NOT initdb — and NEVER pg_basebackup (that would stream from the live primary)
+  expect(spec.bootstrap.recovery).toBeDefined();
+  expect(spec.bootstrap.initdb).toBeUndefined();
+  expect(spec.bootstrap.pg_basebackup).toBeUndefined();
+  expect(spec.bootstrap.recovery.source).toBe("web-p-pr1-db-recovery-src");
+  // the external cluster resolves the source backup via the plugin (barmanObjectName + the source's
+  // serverName) — an OBJECT-STORE source, never `connectionParameters` (which would be a live connection).
+  const ext = spec.externalClusters[0];
+  expect(ext.name).toBe("web-p-pr1-db-recovery-src");
+  expect(ext.connectionParameters).toBeUndefined();
+  expect(ext.plugin.name).toBe("barman-cloud.cloudnative-pg.io");
+  expect(ext.plugin.parameters.barmanObjectName).toBe("web-p-pr1-db-recovery-src");
+  expect(ext.plugin.parameters.serverName).toBe("billing-db"); // the SOURCE's server dir under its backup root
+});
+
+test("recoveryDatabaseManifests: source ObjectStore points at the source backup path + creds (read-only)", () => {
+  const m = recoveryDatabaseManifests(base, branchCtx, { source });
+  const src = m.sourceObjectStore as any;
+  expect(src.apiVersion).toBe("barmancloud.cnpg.io/v1");
+  expect(src.kind).toBe("ObjectStore");
+  expect(src.metadata.name).toBe("web-p-pr1-db-recovery-src");
+  expect(src.metadata.namespace).toBe("drop-t-alice");
+  expect(src.spec.configuration.destinationPath).toBe("s3://drop/databases/drop-t-alice/billing-db"); // the SOURCE root
+  expect(src.spec.configuration.endpointURL).toBe("http://floci:4566");
+  expect(src.spec.configuration.s3Credentials.accessKeyId.name).toBe("web-p-pr1-db-recovery-src-creds");
+  // and its local creds Secret is emitted with the source's creds
+  const ss = m.sourceSecret as any;
+  expect(ss.kind).toBe("Secret");
+  expect(ss.metadata.name).toBe("web-p-pr1-db-recovery-src-creds");
+  expect(ss.stringData.ACCESS_KEY_ID).toBe("test");
+});
+
+test("recoveryDatabaseManifests: the branch keeps its OWN ongoing-backup store + OWN app password (isolated from the source)", () => {
+  const m = recoveryDatabaseManifests(base, branchCtx, { source });
+  // the branch archives its OWN WAL/backups to its OWN store at its OWN path — never the source's prefix
+  const own = m.objectStore as any;
+  expect(own.metadata.name).toBe("web-p-pr1-db-store");
+  expect(own.spec.configuration.destinationPath).toBe("s3://drop/databases/drop-t-alice/web-p-pr1-db");
+  expect((m.cluster as any).spec.plugins[0].parameters.barmanObjectName).toBe("web-p-pr1-db-store"); // WAL archiver → own store
+  // own generated app password: a fresh <name>-app basic-auth Secret, and recovery re-sets the app owner to it
+  const app = m.appSecret as any;
+  expect(app.metadata.name).toBe("web-p-pr1-db-app");
+  expect(app.stringData.password).toBe("branch-own-pw");
+  const rec = (m.cluster as any).spec.bootstrap.recovery;
+  expect(rec.database).toBe("app");
+  expect(rec.owner).toBe("app");
+  expect(rec.secret.name).toBe("web-p-pr1-db-app"); // CNPG resets the recovered app owner's password to the branch's Secret
+});
+
+test("recoveryDatabaseManifests: --at renders recoveryTarget.targetTime; omitted → latest (no recoveryTarget)", () => {
+  const withAt = recoveryDatabaseManifests(base, branchCtx, { source: { ...source, targetTime: "2026-07-01T12:00:00.000Z" } });
+  expect((withAt.cluster as any).spec.bootstrap.recovery.recoveryTarget.targetTime).toBe("2026-07-01T12:00:00.000Z");
+  const latest = recoveryDatabaseManifests(base, branchCtx, { source });
+  expect((latest.cluster as any).spec.bootstrap.recovery.recoveryTarget).toBeUndefined();
+});
+
+test("recoveryDatabaseManifests: prod (IRSA) omits both creds Secrets and inherits the role on both stores", () => {
+  const prod = recoveryDatabaseManifests(base, {
+    name: "web-p-pr1-db",
+    namespace: "drop-t-alice",
+    destinationPath: "s3://drop-prod/db/web-p-pr1-db",
+    iamRoleArn: "arn:aws:iam::123:role/drop-db",
+    appPassword: "branch-own-pw",
+  }, {
+    source: { clusterName: "billing-db", destinationPath: "s3://drop-prod/db/billing-db", iamRoleArn: "arn:aws:iam::123:role/drop-db" },
+  });
+  expect(prod.secret).toBeUndefined(); // own store: IRSA → no static creds Secret
+  expect(prod.sourceSecret).toBeUndefined(); // source store: IRSA → no static creds Secret
+  expect((prod.sourceObjectStore as any).spec.configuration.s3Credentials.inheritFromIAMRole).toBe(true);
+  expect((prod.sourceObjectStore as any).spec.configuration.endpointURL).toBeUndefined(); // real S3
+});
+
+test("recoveryDatabaseManifests: NetworkPolicy + ScheduledBackup are the SAME shape as a normal db (so deleteDatabase/the sweep tear it down identically)", () => {
+  const m = recoveryDatabaseManifests(base, branchCtx, { source });
+  expect((m.networkPolicy as any).metadata.name).toBe("web-p-pr1-db-db");
+  expect((m.scheduledBackup as any).metadata.name).toBe("web-p-pr1-db-daily");
+  expect((m.scheduledBackup as any).spec.method).toBe("plugin");
 });
 
 test("poolerManifest: CNPG Pooler (rw, one instance) named <db>-pooler-rw with the pgbouncer pool mode", () => {

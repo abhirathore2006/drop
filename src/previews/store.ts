@@ -18,6 +18,11 @@ export interface Preview {
   expiresAt: string; // ISO
   kind: PreviewKind; // (E2) 'site' | 'app' — the sweep/rm branch on this
   hasDb: boolean; // (E2) app preview owns a --with-db CNPG clone (`<name>-p-<label>-db`)
+  // (L2) when `--from-backup` branched the --with-db clone from the parent db's Barman backup: the
+  // SOURCE db name and the point-in-time the branch was taken at (the `--at` target, or the branch
+  // time when latest). Null on an empty --with-db clone and on every site/plain app preview.
+  branchedFrom: string | null;
+  branchedAt: string | null; // ISO
 }
 
 function toPreview(row: Record<string, unknown>): Preview {
@@ -30,6 +35,8 @@ function toPreview(row: Record<string, unknown>): Preview {
     expiresAt: iso(row.expires_at),
     kind: (row.kind as PreviewKind | undefined) ?? "site",
     hasDb: !!row.has_db,
+    branchedFrom: (row.branched_from as string | null | undefined) ?? null,
+    branchedAt: row.branched_at != null ? iso(row.branched_at) : null,
   };
 }
 
@@ -65,15 +72,20 @@ export class PreviewStore {
     versionId: string,
     createdBy: string,
     expiresAt: Date,
-    opts: { kind?: PreviewKind; hasDb?: boolean } = {},
+    opts: { kind?: PreviewKind; hasDb?: boolean; branchedFrom?: string | null; branchedAt?: Date | string | null } = {},
   ): Promise<Preview> {
     const createdAt = this.now();
     const kind = opts.kind ?? "site";
     const hasDb = opts.hasDb ?? false;
+    // (L2) branch provenance is additive: default null so the E1 publish path + an empty --with-db clone
+    // keep writing NULLs (a re-point of a from-backup label to a plain deploy also correctly clears it).
+    const branchedFrom = opts.branchedFrom ?? null;
+    const branchedAt = opts.branchedAt ?? null;
+    const set = { version_id: versionId, created_by: createdBy, created_at: createdAt, expires_at: expiresAt, kind, has_db: hasDb, branched_from: branchedFrom, branched_at: branchedAt };
     const row = await this.db
       .insertInto("previews")
-      .values({ site_name: siteName, label, version_id: versionId, created_by: createdBy, created_at: createdAt, expires_at: expiresAt, kind, has_db: hasDb })
-      .onConflict((oc) => oc.columns(["site_name", "label"]).doUpdateSet({ version_id: versionId, created_by: createdBy, created_at: createdAt, expires_at: expiresAt, kind, has_db: hasDb }))
+      .values({ site_name: siteName, label, ...set })
+      .onConflict((oc) => oc.columns(["site_name", "label"]).doUpdateSet(set))
       .returningAll()
       .executeTakeFirstOrThrow();
     return toPreview(row as Record<string, unknown>);

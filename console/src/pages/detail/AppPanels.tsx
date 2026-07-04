@@ -56,7 +56,8 @@ function AppPreviewsPanel({ d }: { d: Detail }) {
               </a>
               {" · expires "}
               {fmtStamp(p.expiresAt)}
-              {p.hasDb && " · own db"}
+              {/* (L2) a --from-backup branch shows its provenance; an empty --with-db clone shows "own db". */}
+              {p.branchedFrom ? ` · branched from ${p.branchedFrom}${p.branchedAt ? `@${fmtStamp(p.branchedAt)}` : ""}` : p.hasDb && " · own db"}
             </div>
           </div>
           {canManage && (
