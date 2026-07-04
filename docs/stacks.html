@@ -106,8 +106,36 @@
 <span class="tok-c">$ drop stack rm myproduct --cascade</span> <span class="tok-c"># delete the stack AND tear down its resources</span></code></pre>
 <p><code>drop stack rm</code> defaults to <strong>orphaning</strong>: it removes the stack grouping but leaves the databases/apps/sites in place (the response records which were orphaned). <code>--cascade</code> tears each resource down using the same delete path as <code>drop rm</code>. Both are audited (<code>stack.up</code>, <code>stack.delete</code>).</p>
 
+<h2 id="detect">drop detect</h2>
+<p><code>drop detect [dir]</code> proposes a <code>stack:</code> section from what's already on disk — no server call, purely local heuristics, so it works before you've ever logged in. It's the fastest way to bootstrap a stack for an existing repo instead of hand-writing the resources:</p>
+<table class="tbl">
+<thead><tr><th>Signal</th><th>Proposes</th></tr></thead>
+<tbody>
+<tr><td>a <code>Dockerfile</code> (any casing) in a directory</td><td>an <code>app</code> resource, <code>dir:</code> that directory</td></tr>
+<tr><td>a <code>prisma/</code> dir; <code>pg</code>/<code>postgres</code>/<code>postgres.js</code>/<code>drizzle-orm</code> in package.json deps; <code>PG*</code>/<code>DATABASE_URL</code> in <code>.env.example</code></td><td>a <code>database</code> resource + <code>uses: [{ database }]</code> on that directory's app</td></tr>
+<tr><td><code>ioredis</code>/<code>redis</code>/<code>bullmq</code> in package.json deps; <code>REDIS_URL</code> in <code>.env.example</code></td><td>a <code>cache</code> resource + <code>uses: [{ cache }]</code> on that directory's app</td></tr>
+<tr><td>a <code>package.json</code> <code>build</code> script mentioning <code>dist</code>/<code>out</code>/<code>build</code>, or an existing <code>dist/index.html</code></td><td>a <code>site</code> resource (no Dockerfile in the same directory — a Dockerfile always wins)</td></tr>
+<tr><td><code>package.json</code> <code>workspaces</code> (resolved one level; members must have their own <code>package.json</code>/<code>Dockerfile</code>)</td><td>one resource per workspace member, keyed from its sanitized dirname, each analyzed with the same rules above</td></tr>
+</tbody>
+</table>
+<p>Deterministic — the same directory always proposes the same spec (sorted, stable resource keys). It only ever proposes what it found real evidence for: scale, resources, env, healthchecks, and everything else are left for you to add by hand.</p>
+<pre><code><span class="tok-c">$ drop detect ./guestbook-node</span>
+stack:
+  name: guestbook-node
+  resources:
+    app:
+      type: app
+      dir: .
+      uses: [{ database: db }]
+    db:
+      type: database
+  · .: Dockerfile → app resource (dir: .)
+  · .: "pg" in package.json deps → database resource + uses binding on app
+  tip: pass --write to merge this into ./guestbook-node/drop.yaml</code></pre>
+<p><code>--write</code> merges the proposal into <code>&lt;dir&gt;/drop.yaml</code> (creating the file if it doesn't exist yet); it refuses to clobber an existing <code>stack:</code> section unless you also pass <code>--force</code>. Review the printed proposal — and its resources' fixture-suite regression coverage (every example under <code>examples/</code> is checked against an exact expected spec) — before trusting it on a real repo.</p>
+
 <h2>Agents &amp; the console</h2>
-<p>The MCP tools mirror the CLI with an agent-safe shape: <code>stack_plan</code> (dry-run — show the plan before touching anything), then <code>stack_up</code> to apply, and <code>stack_status</code> to inspect. The dry-run plan is the same one the read-only canvas renders as a pending-changes overlay, so an agent, the CLI and the console all reconcile through one endpoint and can never diverge.</p>
+<p>The MCP tools mirror the CLI with an agent-safe shape: <code>detect</code> (local heuristics → a proposed spec, as JSON — review before applying), <code>stack_plan</code> (dry-run — show the plan before touching anything), then <code>stack_up</code> to apply, and <code>stack_status</code> to inspect. The dry-run plan is the same one the read-only canvas renders as a pending-changes overlay, so an agent, the CLI and the console all reconcile through one endpoint and can never diverge.</p>
 
 <div class="next">
   <a href="processes.html"><div class="d">← Back</div><div class="t">Processes, health &amp; releases</div></a>

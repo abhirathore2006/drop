@@ -13,6 +13,7 @@ import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate } from "./resolve-name.ts";
 import { buildAndPushImage } from "./build-push.ts";
 import { runStackUp } from "./stack.ts";
+import { runDetect, serializeDetectedStack, writeDetectedStack } from "./detect.ts";
 import { parseStackConfig } from "../stack-config.ts";
 import { CONFIG_FILE_YAML } from "../site-config.ts";
 import { validateName } from "../names.ts";
@@ -316,6 +317,30 @@ export function buildProgram(): Command {
     .option("--org <slug>", "the stack's organisation")
     .option("--cascade", "also delete the stack's resources (destructive)")
     .action(async (name: string, opts: { org?: string; cascade?: boolean }) => show(await (await client()).stackDelete(name, { org: opts.org, cascade: opts.cascade })));
+
+  // ---- repo detection (F1): propose a stack: section from local heuristics — no server call ----
+  program
+    .command("detect [dir]")
+    .description("Propose a stack: section from local heuristics (Dockerfile/package.json/.env.example/workspaces) — purely local, no server call")
+    .option("--write", "merge the proposal into <dir>/drop.yaml (refuses to overwrite an existing stack: section)")
+    .option("--force", "with --write, overwrite an existing stack: section")
+    .action(async (dir: string | undefined, opts: { write?: boolean; force?: boolean }) => {
+      const target = dir ?? ".";
+      const { spec, notes } = await runDetect(target);
+      if (Object.keys(spec.resources).length === 0) {
+        console.log(`  (nothing detected in ${target})`);
+        for (const n of notes) console.log(`  · ${n}`);
+        return;
+      }
+      console.log(serializeDetectedStack(spec).replace(/\n$/, ""));
+      for (const n of notes) console.log(`  · ${n}`);
+      if (opts.write) {
+        const { path, created } = await writeDetectedStack(target, spec, { force: opts.force });
+        console.log(`  ✓ ${created ? "wrote" : "updated"} ${path}`);
+      } else {
+        console.log(`  tip: pass --write to merge this into ${target === "." ? "" : target + "/"}${CONFIG_FILE_YAML}`);
+      }
+    });
 
   // ---- templates (D1): the golden-path registry ----
   const template = program.command("template").description("Publish + browse reusable stack templates");

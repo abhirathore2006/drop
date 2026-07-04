@@ -7,6 +7,7 @@ import { packDir } from "../cli/pack.ts";
 import { devLoginToken, serverLogin } from "../cli/login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate } from "../cli/resolve-name.ts";
 import { runStackUp } from "../cli/stack.ts";
+import { runDetect } from "../cli/detect.ts";
 
 function apiBase(s?: Session): string {
   return process.env.DROP_API ?? s?.apiBase ?? "https://api.drop.example.com";
@@ -354,6 +355,18 @@ export function buildMcp(): McpServer {
       inputSchema: { name: z.string(), org: z.string().optional().describe("the stack's organisation slug (disambiguates a name across orgs)") },
     },
     async ({ name, org }) => run(() => getClient().then((c) => c.stackGet(name, org))),
+  );
+
+  // ---- repo detection (F1): local heuristics → a proposed stack: spec. No server call, agent-friendly
+  // JSON (unlike the CLI's `drop detect`, which prints YAML for a human to paste into drop.yaml). ----
+  server.registerTool(
+    "detect",
+    {
+      description:
+        "Locally detect a proposed stack: spec from a directory's Dockerfile/package.json/.env.example/workspaces (Postgres/Redis signals, static-build output, monorepo workspaces) — purely local heuristics, no server call. Review the returned spec, then hand it to stack_plan/stack_up or template_publish.",
+      inputSchema: { directory: z.string().optional().describe("folder to scan (default: .)") },
+    },
+    async ({ directory }) => run(() => runDetect(directory ?? ".")),
   );
 
   // ---- templates (D1): the golden-path registry. Agent-safe: dry_run returns the plan before applying. ----

@@ -33,8 +33,8 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 11 | D1 Template registry | done | see log | reconcileStack shared with up; fail-closed strip; seeds via make seed-templates |
 | 12 | E1 Static previews · H2 cron | done | see log | E1 this commit; H2 in eba3cc9 |
 | 13 | I2 Valkey · I3 PG depth | done | see log | cache rotate absent by design; ext add live db = 409 |
-| 14 | L1b Queue-scaled workers | todo | | |
-| 15 | A3 `db:proxy` tunnel | todo | | |
+| 14 | L1b Queue-scaled workers | done | ee23fd2 | TriggerAuth reads <cache>-cache secret; min-0 workers legal with scale_on |
+| 15 | A3 `db:proxy` tunnel | done | caad9dc | in-cluster dial only v1 (local API 501s); src/ws/frames.ts shared codec |
 | 16 | F1 `drop detect` + stack MCP | todo | | |
 | 17 | M1 Console IA: sidebar/⌘K/onboarding | done | 38530d2 | pulled ahead of order (console-only); ?org= context; templates/tokens/webhooks stubs pending D1/J1/G3 |
 | 18 | J2 Generic OIDC login | todo | | |
