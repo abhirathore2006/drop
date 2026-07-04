@@ -249,6 +249,36 @@ export interface TunnelTicketsTable {
   created_at: Ts; // set from the store's injectable clock (the column also has a now() default)
 }
 
+/** Per-host edge traffic rollup (G2). One row per (site_name, minute) — the edge accumulates
+ *  requests/bytes/status-classes/latency in-process and UPSERTs additively every ~15s. `site_name` is
+ *  the resolved serving HOST (a site name, or a preview `site--label`), not FK-bound to `sites`.
+ *  `requests`/`bytes_*` are bigint (a busy minute can exceed int4 bytes); the percentile fields are
+ *  approximations (see MetricsStore.flushTraffic for the merge honesty note). 30d retention, swept. */
+export interface TrafficMinutesTable {
+  site_name: string;
+  minute: ColumnType<Date, Date | string, Date | string>;
+  requests: ColumnType<number, number | bigint, number | bigint>;
+  bytes_in: ColumnType<number, number | bigint, number | bigint>;
+  bytes_out: ColumnType<number, number | bigint, number | bigint>;
+  p50_ms: number;
+  p95_ms: number;
+  s2xx: number;
+  s4xx: number;
+  s5xx: number;
+}
+
+/** Synthetic uptime-check rollup (G2b). One row per (site_name, minute), last-write-wins — the API
+ *  poller probes each qualifying workload on an interval and records the outcome. `site_name` is
+ *  always a live site (cascades on its delete). `status` is the probe's HTTP status, or 0 for a
+ *  TCP-connect probe (a database). 30d retention, swept alongside `traffic_minutes`. */
+export interface UptimeChecksTable {
+  site_name: string;
+  minute: ColumnType<Date, Date | string, Date | string>;
+  ok: boolean;
+  latency_ms: number;
+  status: number;
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -269,4 +299,6 @@ export interface Database {
   template_versions: TemplateVersionsTable;
   previews: PreviewsTable;
   tunnel_tickets: TunnelTicketsTable;
+  traffic_minutes: TrafficMinutesTable;
+  uptime_checks: UptimeChecksTable;
 }

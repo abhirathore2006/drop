@@ -7,6 +7,7 @@ import type { BlobStore } from "../blob/types.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { PreviewStore } from "../previews/store.ts";
 import { DiskCache } from "./disk-cache.ts";
+import type { Collector } from "../metrics/collector.ts";
 import type { SiteConfig } from "../site-config.ts";
 import type { Visibility, WorkloadType } from "../metastore/types.ts";
 import { basicAuthOk, corsHeaders, headersForPath, matchRedirect, passwordHashOk } from "../site-config.ts";
@@ -30,6 +31,10 @@ export interface EdgeDeps {
    *  gracefully degraded, same posture as `interceptorUrl`: without it, every preview host 404s
    *  rather than crashing an instance that hasn't wired one up. */
   previews?: PreviewStore;
+  /** (G2) In-process traffic collector. When set, EVERY served/proxied response is metered by the
+   *  resolved serving host (site or `site--label`); the entrypoint flushes it to `traffic_minutes`.
+   *  Optional + gracefully absent (tests, or an instance with metrics off) — same posture as previews. */
+  metrics?: Collector;
 }
 
 interface CacheEntry {
@@ -157,6 +162,9 @@ export function createEdge(d: EdgeDeps) {
   function buildHeaders(reqUrlPath: string, c: Cached, cfg: SiteConfig, cors: Record<string, string>): Record<string, string> {
     const headers: Record<string, string> = {
       "content-type": c.contentType,
+      // Explicit content-length (the body is a known-size Uint8Array): makes G2 byte accounting exact
+      // for the dominant static-serve path (a Response from a byte body doesn't expose length otherwise).
+      "content-length": String(c.body.byteLength),
       "cache-control": c.contentType.includes("text/html") ? "no-cache" : "public, max-age=300",
     };
     if (c.contentEncoding) headers["content-encoding"] = c.contentEncoding;
@@ -189,12 +197,27 @@ export function createEdge(d: EdgeDeps) {
   // Health endpoint for k8s probes (obscure path → won't shadow real site assets).
   app.get("/_drop_health", (c) => c.text("ok"));
   app.all("*", async (c) => {
+    const start = now();
     const res = await handleSiteRequest(c);
+    // Re-derive the host label the same way handleSiteRequest did (cheap, no DB) — it's both the
+    // preview-noindex trigger AND the G2 metering key. Metering is keyed on the WHOLE label so a
+    // preview host (`site--label`) rolls up separately from its parent (matches the plan's granularity).
+    const label = siteFromHost(c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "", d.baseDomain);
+    // (G2) Meter EVERY response the edge produced — static serve, app proxy, redirect, and every
+    // access denial (401/403) alike. bytes_out is the response content-length when known (static serves
+    // set it explicitly; a proxied app forwards the upstream's); a streamed/chunked body with no
+    // content-length contributes 0 bytes (documented approximation — WS/TCP byte counts are exact).
+    if (d.metrics && label) {
+      d.metrics.record(label, {
+        status: res.status,
+        bytesIn: Number(c.req.header("content-length")) || 0,
+        bytesOut: Number(res.headers.get("content-length")) || 0,
+        ms: now() - start,
+      });
+    }
     // (E1) Preview hosts (`<site>--<label>.<baseDomain>`) must never be indexed — stamp the header
     // on EVERY response for a preview host (200s, redirects, denials, 404s alike), not just
-    // successful serves. Cheap + pure (no DB): re-derive the host label the same way
-    // handleSiteRequest did rather than threading a flag through every one of its return points.
-    const label = siteFromHost(c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "", d.baseDomain);
+    // successful serves.
     if (label && parsePreviewHost(label)) {
       const headers = new Headers(res.headers);
       headers.set("x-robots-tag", "noindex");

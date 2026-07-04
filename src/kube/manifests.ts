@@ -274,7 +274,9 @@ function normalizeCommand(command?: string | string[]): string[] | undefined {
 // probe on the container port (better than nothing; there's no honest liveness signal without one).
 function webProbes(app: AppConfig, containerPort: number): { readinessProbe: Record<string, unknown>; livenessProbe?: Record<string, unknown> } {
   const hc = app.healthcheck;
-  if (!hc) return { readinessProbe: { tcpSocket: { port: containerPort }, periodSeconds: 10, timeoutSeconds: 2 } };
+  // No block, or a keep_warm-ONLY block (no HTTP path — G2b): fall back to the TCP-socket readiness
+  // probe. `keep_warm` is a uptime-poller signal, not a k8s probe, so it never emits an httpGet.
+  if (!hc || !hc.path) return { readinessProbe: { tcpSocket: { port: containerPort }, periodSeconds: 10, timeoutSeconds: 2 } };
   const httpGet = { path: hc.path, port: containerPort };
   const common = { periodSeconds: hc.interval ?? 10, timeoutSeconds: hc.timeout ?? 2, initialDelaySeconds: hc.grace ?? 15 };
   return { readinessProbe: { httpGet, ...common }, livenessProbe: { httpGet, ...common, failureThreshold: 3 } };

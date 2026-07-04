@@ -413,6 +413,50 @@ const m0013_tunnel_tickets: Migration = {
   },
 };
 
+// Edge traffic + uptime rollups (G2 / G2b). Two sibling minute-bucketed tables, both 30d-retained
+// (swept in the API housekeeping loop). `traffic_minutes` is the edge's per-host request rollup: the
+// edge (and edge-tcp) accumulate in-process and UPSERT one row per host per minute (additive merge —
+// see MetricsStore.flushTraffic for the percentile-merge honesty note). It carries NO foreign key to
+// `sites`: the collector key is the resolved HOST label, which can be a preview host (`site--label`)
+// or any string the edge served — not necessarily a live `sites` row — so retention (not a cascade)
+// is the sole cleanup. `uptime_checks` is the API poller's synthetic-probe rollup: its `site_name` is
+// ALWAYS a real site (the poller enumerates live workloads), so it DOES cascade on the site's delete.
+const m0014_edge_metrics: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("traffic_minutes")
+      .addColumn("site_name", "text", (c) => c.notNull())
+      .addColumn("minute", "timestamptz", (c) => c.notNull())
+      .addColumn("requests", "bigint", (c) => c.notNull().defaultTo(0))
+      .addColumn("bytes_in", "bigint", (c) => c.notNull().defaultTo(0))
+      .addColumn("bytes_out", "bigint", (c) => c.notNull().defaultTo(0))
+      .addColumn("p50_ms", "integer", (c) => c.notNull().defaultTo(0))
+      .addColumn("p95_ms", "integer", (c) => c.notNull().defaultTo(0))
+      .addColumn("s2xx", "integer", (c) => c.notNull().defaultTo(0))
+      .addColumn("s4xx", "integer", (c) => c.notNull().defaultTo(0))
+      .addColumn("s5xx", "integer", (c) => c.notNull().defaultTo(0))
+      .addPrimaryKeyConstraint("traffic_minutes_pk", ["site_name", "minute"])
+      .execute();
+    // The retention sweep deletes everything older than a cutoff cluster-wide — a `minute` index
+    // makes that a range scan, not a table scan (the PK leads with site_name, so it doesn't cover it).
+    await db.schema.createIndex("traffic_minutes_minute_idx").on("traffic_minutes").column("minute").execute();
+
+    await db.schema
+      .createTable("uptime_checks")
+      .addColumn("site_name", "text", (c) => c.notNull().references("sites.name").onDelete("cascade"))
+      .addColumn("minute", "timestamptz", (c) => c.notNull())
+      .addColumn("ok", "boolean", (c) => c.notNull())
+      .addColumn("latency_ms", "integer", (c) => c.notNull().defaultTo(0))
+      .addColumn("status", "integer", (c) => c.notNull().defaultTo(0)) // HTTP status, or 0 for a TCP-connect probe
+      .addPrimaryKeyConstraint("uptime_checks_pk", ["site_name", "minute"])
+      .execute();
+    await db.schema.createIndex("uptime_checks_minute_idx").on("uptime_checks").column("minute").execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -430,6 +474,7 @@ export class InlineMigrations implements MigrationProvider {
       "0011_templates": m0011_templates,
       "0012_previews": m0012_previews,
       "0013_tunnel_tickets": m0013_tunnel_tickets,
+      "0014_edge_metrics": m0014_edge_metrics,
     };
   }
 }

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Observability · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="templates.html">Templates</a>
+      <a href="buckets.html">Buckets (object storage)</a>
+      <a href="previews.html">Previews</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <a href="tokens.html">CI tokens (service accounts)</a>
+      <a href="observability.html" class="active">Observability</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Reference</p>
+<h1>Observability</h1>
+<p class="lead">Two signals, both produced entirely <strong>inside</strong> the network — no external prober, no third-party SaaS. <strong>Request metrics</strong> (G2): the edge meters every response it serves or proxies and rolls it up per minute. <strong>Uptime checks</strong> (G2b): the API polls each workload's own URL on an interval and records whether it answered. Everything lands in Postgres next to the rest of Drop's state, is readable over the same authenticated API, and is retained for 30 days.</p>
+
+<h2 id="metrics">Request metrics</h2>
+<p>Both edges — the HTTP edge and the L4 (<a href="tcp-access.html">TCP</a>) edge — accumulate per-host counters <strong>in-process</strong> and flush them every <strong>~15&nbsp;seconds</strong> into a <code>traffic_minutes</code> rollup: one row per host per minute. Writing the rollup is the only metastore <em>write</em> the edge performs (it stays a migrations reader); multiple edge replicas UPSERT the same <code>(host, minute)</code> row additively.</p>
+<table class="tbl">
+<thead><tr><th>Column</th><th>What it counts (per host, per minute)</th></tr></thead>
+<tbody>
+<tr><td><code>requests</code></td><td>Responses served (every static serve, app proxy, redirect, and auth denial) plus each closed WS/TCP stream.</td></tr>
+<tr><td><code>bytes_in</code> / <code>bytes_out</code></td><td>Request/response body bytes. Static serves set an exact content-length; a streamed body with none contributes 0 (WS/TCP byte counts are exact).</td></tr>
+<tr><td><code>p50_ms</code> / <code>p95_ms</code></td><td>Approximated upstream latency (see <a href="#percentiles">Percentile honesty</a>).</td></tr>
+<tr><td><code>s2xx</code> / <code>s4xx</code> / <code>s5xx</code></td><td>Response counts by status class. (1xx/3xx count toward <code>requests</code> but no class.)</td></tr>
+</tbody>
+</table>
+<p>A <a href="previews.html">preview</a> host <code>&lt;site&gt;--&lt;label&gt;</code> rolls up under its <strong>own</strong> key, separate from its parent site — the metering key is the resolved serving host, whatever it was.</p>
+
+<h2 id="reading">Reading it</h2>
+<p><code>GET /v1/sites/&lt;name&gt;/metrics?range=1h|24h|7d</code> (authz: <code>read</code>) returns a time-bucketed series plus window totals. The point count stays bounded regardless of range: <strong>1h</strong> is per-minute, <strong>24h</strong> aggregates to 10-minute buckets, <strong>7d</strong> to hourly — all server-side.</p>
+<pre><code>{
+  <span class="tok-k">"range"</span>: <span class="tok-s">"1h"</span>,
+  <span class="tok-k">"series"</span>: [
+    { <span class="tok-k">"minute"</span>: <span class="tok-s">"2026-07-04T10:00:00.000Z"</span>, <span class="tok-k">"requests"</span>: 812, <span class="tok-k">"p50"</span>: 8, <span class="tok-k">"p95"</span>: 62, <span class="tok-k">"errors"</span>: 3, <span class="tok-k">"bytesOut"</span>: 1734921 },
+    …
+  ],
+  <span class="tok-k">"totals"</span>: { <span class="tok-k">"requests"</span>: 1234, <span class="tok-k">"errors"</span>: 5, <span class="tok-k">"bytesIn"</span>: 40213, <span class="tok-k">"bytesOut"</span>: 3251902, <span class="tok-k">"p50"</span>: 8, <span class="tok-k">"p95"</span>: 62 }
+}</code></pre>
+<p>The CLI surfaces the totals as a one-liner; the console detail panel shows the same numbers (sparkline charts land in M4):</p>
+<pre><code>$ drop status myapp
+  <span class="tok-s">myapp (last hour): 1234 req · p50 8ms · p95 62ms · 0.4% errors · 3.1 MiB out</span></code></pre>
+
+<div class="note" id="percentiles"><span class="lbl">Percentile honesty</span><p><code>p50</code>/<code>p95</code> are <strong>approximated from fixed histogram buckets</strong> — <code>5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000&nbsp;ms</code> — never true percentiles, because Drop doesn't retain per-request samples. When flush windows merge into the same minute (four flushes a minute, and across edge replicas): summed counts are <strong>exact</strong>; merged <code>p95</code> is the <strong>max</strong> of the windows (conservative); merged <code>p50</code> is a <strong>request-weighted average</strong> of the windows' p50 approximations. WS/TCP stream durations are deliberately <strong>not</strong> folded into the latency histogram — a connection lifetime is not a request latency, and mixing them would corrupt <code>p95</code> — so a closed stream counts only toward <code>requests</code> and bytes.</p></div>
+
+<h2 id="uptime">Uptime checks</h2>
+<p>A poller inside the API probes each qualifying workload <strong>once</strong> on an interval (default 60s) and records the outcome into <code>uptime_checks</code> — one row per minute, last-write-wins. Who gets probed:</p>
+<table class="tbl">
+<thead><tr><th>Type</th><th>Probed?</th><th>How</th></tr></thead>
+<tbody>
+<tr><td>Site (static)</td><td><strong>Always</strong></td><td>HTTP GET through the edge.</td></tr>
+<tr><td>App</td><td>Only when <code>scale.min&nbsp;≥&nbsp;1</code> <strong>or</strong> <code>healthcheck.keep_warm: true</code></td><td>HTTP GET through the edge. A scale-to-zero app <em>without</em> <code>keep_warm</code> is deliberately <strong>not</strong> probed — a probe would wake the pod.</td></tr>
+<tr><td>Database</td><td>Only when the API is in-cluster (<code>DROP_TUNNEL_DIRECT=1</code>)</td><td>TCP connect to the CNPG <code>rw</code> Service. Otherwise skipped (the local API can't reach it).</td></tr>
+</tbody>
+</table>
+<p>HTTP probes go <strong>through the edge</strong> with the workload's own <code>Host</code> header, so they exercise real routing. A check is <strong>OK</strong> when the edge returns a non-5xx response within 5&nbsp;seconds — so a password-gated <code>401</code> or a <code>404</code> still counts as <em>reachable</em>. A <code>5xx</code>, a timeout, or a connection failure is <strong>DOWN</strong>.</p>
+<pre><code><span class="tok-c"># GET /v1/sites/&lt;name&gt;/uptime?range=24h  (authz: read)</span>
+{
+  <span class="tok-k">"range"</span>: <span class="tok-s">"24h"</span>,
+  <span class="tok-k">"checks"</span>: [ { <span class="tok-k">"minute"</span>: <span class="tok-s">"2026-07-04T10:00:00.000Z"</span>, <span class="tok-k">"ok"</span>: true, <span class="tok-k">"latencyMs"</span>: 45, <span class="tok-k">"status"</span>: 200 }, … ],
+  <span class="tok-k">"summary"</span>: { <span class="tok-k">"last24hPct"</span>: 99.8, <span class="tok-k">"lastCheck"</span>: { <span class="tok-k">"ok"</span>: true, <span class="tok-k">"latencyMs"</span>: 45, <span class="tok-k">"status"</span>: 200, <span class="tok-k">"at"</span>: <span class="tok-s">"2026-07-04T10:00:00.000Z"</span> } }
+}</code></pre>
+<p>The site detail response embeds the same <code>uptime</code> summary, and the console shows it as a line:</p>
+<pre><code>  <span class="tok-s">99.8% (24h) · 45ms</span></code></pre>
+
+<h2 id="keep-warm">keep_warm</h2>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">image</span>: <span class="tok-s">myapi:1</span>
+  <span class="tok-k">healthcheck</span>:
+    <span class="tok-k">keep_warm</span>: <span class="tok-s">true</span></code></pre>
+<div class="note"><span class="lbl">Opt-in observability only</span><p><code>keep_warm</code> opts a scale-to-zero app into uptime probing. It is <strong>purely an observability signal</strong> — it does <strong>not</strong> touch the KEDA scale bounds (<code>min</code> stays <code>0</code>), so the pod still scales down between probes and real traffic. Its only effect is that the poller will now GET the app on each sweep (and thus wake it briefly) instead of skipping it. It stands alone: you don't need an HTTP <code>healthcheck.path</code> to use it. See <a href="processes.html#healthcheck"><code>healthcheck:</code></a>.</p></div>
+
+<h2 id="prometheus">Prometheus</h2>
+<p><code>GET /metrics</code> on the API exposes the rollup in Prometheus text format, <strong>admin-gated</strong>. It reflects the <strong>last flushed minute</strong> per site — a cheap <code>traffic_minutes</code> query, <em>not</em> a live in-process counter (the API is not the meter; the edge is). Because each value is a per-minute snapshot rather than a monotonic total, every metric is a <strong>gauge</strong>. This is for operators who already run Prometheus — Drop doesn't ship dashboards.</p>
+<pre><code><span class="tok-c"># HELP drop_edge_requests Requests served for a site in the last flushed minute.</span>
+<span class="tok-c"># TYPE drop_edge_requests gauge</span>
+drop_edge_requests{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>} 812
+drop_edge_bytes_out{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>} 1734921
+drop_edge_bytes_in{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>} 40213
+drop_edge_p50_ms{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>} 8
+drop_edge_p95_ms{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>} 62
+drop_edge_status{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>,<span class="tok-k">class</span>=<span class="tok-s">"2xx"</span>} 809
+drop_edge_status{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>,<span class="tok-k">class</span>=<span class="tok-s">"4xx"</span>} 2
+drop_edge_status{<span class="tok-k">site</span>=<span class="tok-s">"myapp"</span>,<span class="tok-k">class</span>=<span class="tok-s">"5xx"</span>} 1</code></pre>
+
+<h2 id="config">Retention &amp; config</h2>
+<p>Both <code>traffic_minutes</code> and <code>uptime_checks</code> are retained <strong>30 days</strong> and swept in the API's housekeeping loop (a range delete over the <code>minute</code> index, not a table scan).</p>
+<table class="tbl">
+<thead><tr><th>Env var</th><th>Default</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>DROP_METRICS_FLUSH_INTERVAL_MS</code></td><td><code>15000</code></td><td>How often each edge flushes its in-process counters to <code>traffic_minutes</code>.</td></tr>
+<tr><td><code>DROP_UPTIME_INTERVAL_MS</code></td><td><code>60000</code></td><td>How often the API's uptime poller sweeps.</td></tr>
+<tr><td><code>DROP_EDGE_INTERNAL_URL</code></td><td><em>(unset)</em></td><td>The internal edge origin the poller GETs (Host-routed), e.g. <code>http://drop-edge.drop-system.svc</code>. <strong>Unset → HTTP uptime probes are disabled</strong> (with a startup warning); database TCP probes still run.</td></tr>
+<tr><td><code>DROP_METRICS_RETENTION_DAYS</code></td><td><code>30</code></td><td>Retention window for both rollup tables.</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="lbl">On crash loops</span><p>A workload's current <strong>restart count</strong> already shows live on the app-status and stack-graph endpoints (it comes straight from the pods). A <em>persistent</em> crash-loop timeline — history you can chart and alert on — is a later piece (G3), landing with the events/alerting work.</p></div>
+
+<div class="next">
+  <a href="tcp-access.html"><div class="d">← Back</div><div class="t">TCP access (L4)</div></a>
+  <a href="architecture.html"><div class="d">Next →</div><div class="t">Architecture</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

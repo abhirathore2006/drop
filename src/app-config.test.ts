@@ -165,6 +165,24 @@ test("sanitizeAppConfig healthcheck is round-trip safe", () => {
   expect(twice.healthcheck).toEqual({ path: "/z", interval: 30, timeout: 2, grace: 15 });
 });
 
+test("sanitizeAppConfig healthcheck keep_warm (G2b): survives with or without a path, round-trip safe", () => {
+  // keep_warm-only block (no HTTP path) — kept for the uptime poller, no k8s probe fields.
+  expect(sanitizeAppConfig({ image: "x:1", healthcheck: { keep_warm: true } })!.healthcheck).toEqual({ keepWarm: true });
+  // alongside a path, both survive.
+  expect(sanitizeAppConfig({ image: "x:1", healthcheck: { path: "/h", keep_warm: true } })!.healthcheck).toEqual({
+    path: "/h",
+    interval: 10,
+    timeout: 2,
+    grace: 15,
+    keepWarm: true,
+  });
+  // keep_warm false (or absent) with no path → the block is empty and dropped.
+  expect(sanitizeAppConfig({ image: "x:1", healthcheck: { keep_warm: false } })!.healthcheck).toBeUndefined();
+  // round-trip safe: the sanitized `keepWarm` re-sanitizes unchanged.
+  const once = sanitizeAppConfig({ image: "x:1", healthcheck: { path: "/z", keep_warm: true } })!;
+  expect(sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!.healthcheck).toEqual(once.healthcheck);
+});
+
 // ---- release ----
 
 test("sanitizeAppConfig release: string shorthand + object form; timeout default 5m, cap 15m", () => {

@@ -2524,3 +2524,71 @@ test("preview GET is embedded in the site detail response too", async () => {
   expect(detail.previews[0].label).toBe("pr-1");
   await db.destroy();
 });
+
+// ---- (G2 / G2b) metrics + uptime routes + Prometheus scrape ----------------------------------
+import { MetricsStore } from "../metrics/store.ts";
+
+const nowMinute = () => new Date(Math.floor(Date.now() / 60_000) * 60_000);
+
+test("G2 metrics route: owner reads {range, series, totals}; range param honored", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  const ms = new MetricsStore(db);
+  await ms.flushTraffic(nowMinute(), [
+    { siteName: "myapp", requests: 10, bytesIn: 0, bytesOut: 500, p50Ms: 20, p95Ms: 120, s2xx: 8, s4xx: 1, s5xx: 1 },
+  ]);
+  const res = await call(app, "GET", "/v1/sites/myapp/metrics", "alice");
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.range).toBe("1h");
+  expect(body.totals.requests).toBe(10);
+  expect(body.totals.errors).toBe(2);
+  expect(body.totals.p95).toBe(120);
+  expect(body.series.length).toBeGreaterThanOrEqual(1);
+  const wide = await (await call(app, "GET", "/v1/sites/myapp/metrics?range=7d", "alice")).json();
+  expect(wide.range).toBe("7d");
+  await db.destroy();
+});
+
+test("G2 metrics route: authz — non-member 403, unknown site 404", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  expect((await call(app, "GET", "/v1/sites/myapp/metrics", "bob")).status).toBe(403);
+  expect((await call(app, "GET", "/v1/sites/ghost/metrics", "alice")).status).toBe(404);
+  await db.destroy();
+});
+
+test("G2b uptime route + detail summary: last-24h % and lastCheck", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  const ms = new MetricsStore(db);
+  await ms.recordUptime("myapp", nowMinute(), { ok: true, latencyMs: 40, status: 200 });
+  const res = await call(app, "GET", "/v1/sites/myapp/uptime", "alice");
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.range).toBe("24h");
+  expect(body.checks).toHaveLength(1);
+  expect(body.summary.last24hPct).toBe(100);
+  expect(body.summary.lastCheck.status).toBe(200);
+  // the same summary is embedded in the site detail response
+  const detail = await (await call(app, "GET", "/v1/sites/myapp", "alice")).json();
+  expect(detail.uptime.last24hPct).toBe(100);
+  await db.destroy();
+});
+
+test("G2 Prometheus /metrics: admin-gated, text format", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await pub(app, "alice", "myapp", await tgz({ "index.html": "x" }));
+  const ms = new MetricsStore(db);
+  await ms.flushTraffic(nowMinute(), [
+    { siteName: "myapp", requests: 7, bytesIn: 0, bytesOut: 99, p50Ms: 5, p95Ms: 50, s2xx: 7, s4xx: 0, s5xx: 0 },
+  ]);
+  const unauth = await app.request("/metrics");
+  expect(unauth.status).toBe(401);
+  expect((await call(app, "GET", "/metrics", "bob")).status).toBe(403); // not an admin
+  const ok = await call(app, "GET", "/metrics", "alice");
+  expect(ok.status).toBe(200);
+  const text = await ok.text();
+  expect(text).toContain('drop_edge_requests{site="myapp"} 7');
+  await db.destroy();
+});

@@ -188,6 +188,10 @@ export class Client {
   info(name: string) {
     return this.req("GET", `/v1/sites/${name}`);
   }
+  /** (G2) Edge request metrics for a workload — `{range, series, totals}`. `range` is 1h|24h|7d. */
+  metrics(name: string, range?: string) {
+    return this.req("GET", `/v1/sites/${name}/metrics${range ? `?range=${encodeURIComponent(range)}` : ""}`);
+  }
   // TCP (L4) exposure (A2b): opt-in, default off. mode 'sni' (shared port, no port consumed) or
   // 'port' (dedicated allocated port). Response carries the connect string.
   expose(name: string, opts: { mode: "sni" | "port"; protocol?: string }) {

@@ -153,6 +153,41 @@ export interface TcpExposure {
   sslmode?: string; // an sslmode hint for postgres
 }
 
+/** (G2b) The most recent synthetic uptime check. `status` is the HTTP status, or 0 for a TCP probe. */
+export interface UptimeLastCheck {
+  ok: boolean;
+  latencyMs: number;
+  status: number;
+  at: string; // ISO
+}
+/** (G2b) Uptime summary on the detail response: last-24h OK % (null when no checks) + the latest check. */
+export interface UptimeSummary {
+  last24hPct: number | null;
+  lastCheck: UptimeLastCheck | null;
+}
+/** (G2) One aggregated traffic point (M4 renders these as a sparkline; v1 shows totals only). */
+export interface MetricsSeriesPoint {
+  minute: string;
+  requests: number;
+  p50: number;
+  p95: number;
+  errors: number;
+  bytesOut: number;
+}
+export interface MetricsTotals {
+  requests: number;
+  errors: number;
+  bytesIn: number;
+  bytesOut: number;
+  p50: number;
+  p95: number;
+}
+export interface SiteMetrics {
+  range: string;
+  series: MetricsSeriesPoint[];
+  totals: MetricsTotals;
+}
+
 export interface Detail {
   name: string;
   type: WorkloadType;
@@ -166,6 +201,7 @@ export interface Detail {
   versions: Version[];
   previews?: PreviewInfo[]; // (E1) active previews — present for type=site only
   status?: ServerStatus | null;
+  uptime?: UptimeSummary; // (G2b) present for site/app/database
   tcp?: TcpExposure; // (A2b) present when the app/database is TCP-exposed
   app?: {
     image: string | null;
@@ -305,6 +341,9 @@ export const api = {
   list: () => req<{ sites: ListItem[] }>("GET", "/v1/sites"),
   adminList: (qs: string) => req<{ sites: ListItem[]; nextCursor?: string }>("GET", "/v1/admin/sites" + (qs ? `?${qs}` : "")),
   get: (name: string) => req<Detail>("GET", `/v1/sites/${name}`),
+  // (G2/G2b) edge request metrics (window totals + series) + the uptime strip (M4 renders charts).
+  metrics: (name: string, range: "1h" | "24h" | "7d" = "1h") => req<SiteMetrics>("GET", `/v1/sites/${name}/metrics?range=${range}`),
+  uptime: (name: string) => req<{ range: string; checks: UptimeLastCheck[]; summary: UptimeSummary }>("GET", `/v1/sites/${name}/uptime`),
   logs: (name: string) => req<{ logs: string }>("GET", `/v1/sites/${name}/logs?tail=200`),
   rollback: (name: string, to: string) => req("POST", `/v1/sites/${name}/rollback`, { to }),
   setVisibility: (name: string, visibility: string, password?: string) =>

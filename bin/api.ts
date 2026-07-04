@@ -12,6 +12,8 @@ import { AuditStore } from "../src/audit/store.ts";
 import { ServiceTokenStore } from "../src/tokens/store.ts";
 import { TunnelTicketStore } from "../src/tokens/tunnel-tickets.ts";
 import { PreviewStore } from "../src/previews/store.ts";
+import { MetricsStore } from "../src/metrics/store.ts";
+import { UptimePoller } from "../src/metrics/uptime.ts";
 import { createDbTunnelHandler } from "../src/api/db-tunnel.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
@@ -100,10 +102,11 @@ const quotas = new QuotaStore(db); // (item 10) per-org quota overrides
 const tokens = new ServiceTokenStore(db); // (J1) service accounts / scoped CI tokens
 const previews = new PreviewStore(db); // (E1) preview registry
 const tickets = new TunnelTicketStore(db, undefined, cfg.tunnelTicketTtlMs); // (A3) db:proxy tunnel tickets — ONE instance shared by issuance (createApp) + redemption (the upgrade handler below)
+const metrics = new MetricsStore(db); // (G2/G2b) edge traffic + uptime rollups — read by the API routes/Prometheus, written by the poller + swept below
 // Accept `Authorization: Bearer drop_st_…` alongside human logins. TokenVerifier goes FIRST in the
 // chain; it returns null for any non-service token so session/Google verification still runs after it.
 verifier = new ChainVerifier([new TokenVerifier(tokens, orgs), verifier]);
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens, previews, tickets });
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens, previews, tickets, metrics });
 const server = serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });
@@ -147,4 +150,38 @@ setInterval(() => {
   // (A3) Reap spent/expired tunnel tickets on the same tick — they're tiny + 60s-lived, but unredeemed
   // ones would otherwise accumulate. Same posture as the preview sweep: best-effort, unaudited, never throws.
   tickets.deleteExpired(new Date()).catch((e) => console.error("tunnel-ticket sweep failed:", (e as Error).message));
+  // (G2/G2b) Retention sweep — drop traffic_minutes + uptime_checks older than the retention window
+  // (default 30d). Same best-effort posture; a range delete over the `minute` index, not a table scan.
+  //
+  // G3: crash-loop history is deliberately NOT persisted in v1. The plan considered recording per-sweep
+  // restart-count deltas here (listNamespaceAppStatuses per active namespace), but that's N cluster
+  // calls/sweep for a history table that doesn't exist yet (the G3 `events` table). Current restart
+  // COUNTS already surface live on the app-status + graph endpoints (appStatus.restarts), so v1 keeps
+  // it honest: no persisted crash-loop timeline. When G3 lands, the restart-delta detection + event
+  // emit go RIGHT HERE (bounded to namespaces with running apps, ≤1/min, skipped when compute is off).
+  const cutoff = new Date(Date.now() - cfg.metricsRetentionDays * 24 * 60 * 60 * 1000);
+  metrics
+    .sweepTraffic(cutoff)
+    .then((n) => n > 0 && console.log(`traffic sweep: removed ${n} row(s) older than ${cfg.metricsRetentionDays}d`))
+    .catch((e) => console.error("traffic sweep failed:", (e as Error).message));
+  metrics.sweepUptime(cutoff).catch((e) => console.error("uptime sweep failed:", (e as Error).message));
 }, cfg.previewSweepIntervalMs).unref();
+
+// (G2b) Synthetic uptime poller — probes each qualifying workload on its own interval (default 60s)
+// and records the outcome into `uptime_checks`. HTTP probes (sites/apps) go through the EDGE
+// (DROP_EDGE_INTERNAL_URL, Host-routed); database probes TCP-connect the CNPG rw Service, but only when
+// the API is in-cluster (DROP_TUNNEL_DIRECT — the same reachability signal db:proxy uses). Best-effort:
+// a sweep error logs and the next tick retries; never throws.
+if (!cfg.edgeInternalUrl) {
+  console.warn("uptime poller: DROP_EDGE_INTERNAL_URL is unset — HTTP uptime probes (sites/apps) are DISABLED (database TCP probes still run when DROP_TUNNEL_DIRECT=1). Set it to the internal edge origin (e.g. http://drop-edge.drop-system.svc) to enable them.");
+}
+const uptime = new UptimePoller({
+  meta,
+  metrics,
+  baseDomain: cfg.baseDomain,
+  edgeInternalUrl: cfg.edgeInternalUrl,
+  probeDatabases: cfg.tunnelDirect,
+});
+setInterval(() => {
+  uptime.sweep().catch((e) => console.error("uptime poll failed:", (e as Error).message));
+}, cfg.uptimeIntervalMs).unref();

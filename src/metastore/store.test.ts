@@ -150,3 +150,29 @@ test("countSitesInOrg + orgWorkloadCounts by type", async () => {
   expect(await meta.orgWorkloadCounts(empty.id)).toEqual({ site: 0, app: 0, database: 0, bucket: 0, cache: 0, total: 0 });
   await db.destroy();
 });
+
+test("listUptimeTargets: deployed sites/apps/dbs only, with scale + keep_warm from the current version", async () => {
+  const { db, meta, orgs } = await fix();
+  const o = await orgs.ensurePersonalOrg("alice@x.com");
+  const nowIso = new Date().toISOString();
+  const deploy = async (name: string, type: "site" | "app" | "database", config: unknown) => {
+    await claim({ meta, orgs }, name, "alice@x.com", type);
+    await meta.putVersion(name, { id: "v1", publishedBy: "alice@x.com", createdAt: nowIso, fileCount: 0, bytes: 0, config: config as never });
+    await meta.updateSite(name, (s) => ({ ...s, currentVersion: "v1" }));
+  };
+  await deploy("site1", "site", { name: "site1" });
+  await deploy("app1", "app", { image: "x:1", services: [{ internalPort: 8080, protocol: "http" }], scale: { min: 1, max: 3 } });
+  await deploy("app2", "app", { image: "x:1", services: [{ internalPort: 8080, protocol: "http" }], healthcheck: { keepWarm: true } });
+  await deploy("db1", "database", { storage: "1Gi" });
+  await claim({ meta, orgs }, "app3", "alice@x.com", "app"); // UNDEPLOYED — no current version → excluded
+
+  const byName = Object.fromEntries((await meta.listUptimeTargets()).map((t) => [t.name, t]));
+  expect(Object.keys(byName).sort()).toEqual(["app1", "app2", "db1", "site1"]);
+  expect(byName.app1!.scaleMin).toBe(1);
+  expect(byName.app1!.keepWarm).toBe(false);
+  expect(byName.app2!.scaleMin).toBe(0);
+  expect(byName.app2!.keepWarm).toBe(true);
+  expect(byName.site1!.namespace).toBe(o.namespace);
+  expect(byName.db1!.type).toBe("database");
+  await db.destroy();
+});

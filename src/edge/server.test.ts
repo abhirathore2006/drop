@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import * as http from "node:http";
 import { createEdge, parsePreviewHost } from "./server.ts";
+import { Collector } from "../metrics/collector.ts";
 import { FakeBlob } from "../blob/fake.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { PreviewStore } from "../previews/store.ts";
@@ -341,4 +342,50 @@ test("preview inherits the PARENT site's visibility/password gate (never its own
   const ok = await edge.request("/", { headers: { host: "myapp--pr1.drop.example.com", authorization: tok } });
   expect(ok.status).toBe(200);
   expect(await ok.text()).toBe("preview");
+});
+
+// ---- (G2) edge metering: a served/denied request lands in the collector ----------------------
+async function setupMetered() {
+  const { meta, blob, orgs } = await base();
+  await claim(meta, orgs, "myapp", "alice@example.com");
+  const prefix = meta.filesPrefix("myapp", "v1");
+  await blob.put(prefix + "index.html", Buffer.from("<html>metered</html>"), 20, "text/html");
+  await meta.updateSite("myapp", (s) => ({ ...s, currentVersion: "v1" }));
+  const metrics = new Collector();
+  return { app: createEdge({ meta, blob, baseDomain: "drop.example.com", metrics }), metrics };
+}
+
+test("G2: a served static request is metered (requests, bytes_out, 2xx)", async () => {
+  const { app, metrics } = await setupMetered();
+  const res = await get(app, "myapp.drop.example.com", "/", "text/html");
+  expect(res.status).toBe(200);
+  const [row] = metrics.flush();
+  expect(row!.siteName).toBe("myapp");
+  expect(row!.requests).toBe(1);
+  expect(row!.s2xx).toBe(1);
+  expect(row!.bytesOut).toBe(20); // exact content-length of the served body
+});
+
+test("G2: a 404 is metered as a 4xx (denials/misses count too)", async () => {
+  const { app, metrics } = await setupMetered();
+  const res = await get(app, "nope.drop.example.com", "/");
+  expect(res.status).toBe(404);
+  const [row] = metrics.flush();
+  expect(row!.siteName).toBe("nope");
+  expect(row!.s4xx).toBe(1);
+});
+
+test("G2: the health probe is NOT metered (no site host)", async () => {
+  const { app, metrics } = await setupMetered();
+  await app.request("/_drop_health");
+  expect(metrics.size()).toBe(0);
+});
+
+test("G2: a preview host meters under its own `site--label` key", async () => {
+  const { meta, blob, previews } = await setupPreview();
+  const metrics = new Collector();
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", previews, metrics });
+  await edge.request("/", { headers: { host: "myapp--pr1.drop.example.com", accept: "text/html" } });
+  const [row] = metrics.flush();
+  expect(row!.siteName).toBe("myapp--pr1");
 });

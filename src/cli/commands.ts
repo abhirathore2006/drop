@@ -892,6 +892,23 @@ export function buildProgram(): Command {
       console.log(`  ✓ now serving ${res.version} at ${res.url}`);
     });
 
+  program
+    .command("status <name>")
+    .description("One-line edge traffic rate for a workload (requests, p95 latency, error %, bytes out)")
+    .option("--range <r>", "window: 1h | 24h | 7d (default 1h)", "1h")
+    .action(async (name: string, opts: { range?: string }) => {
+      const range = opts.range === "24h" || opts.range === "7d" ? opts.range : "1h";
+      const res = (await (await client()).metrics(name, range)) as {
+        totals: { requests: number; errors: number; bytesOut: number; p50: number; p95: number };
+      };
+      const t = res.totals;
+      const errPct = t.requests > 0 ? ((t.errors / t.requests) * 100).toFixed(1) : "0.0";
+      const window = range === "24h" ? "last 24h" : range === "7d" ? "last 7d" : "last hour";
+      const kib = 1024;
+      const bytes = t.bytesOut < kib ? `${t.bytesOut} B` : t.bytesOut < kib * kib ? `${(t.bytesOut / kib).toFixed(1)} KiB` : t.bytesOut < kib * kib * kib ? `${(t.bytesOut / (kib * kib)).toFixed(1)} MiB` : `${(t.bytesOut / (kib * kib * kib)).toFixed(1)} GiB`;
+      console.log(`  ${name} (${window}): ${t.requests} req · p50 ${t.p50}ms · p95 ${t.p95}ms · ${errPct}% errors · ${bytes} out`);
+    });
+
   program.command("info <name>").description("Show site metadata").action(async (name: string) => show(await (await client()).info(name)));
   program.command("members <name>").description("Show owner + collaborators").action(async (name: string) => show(await (await client()).info(name)));
   program

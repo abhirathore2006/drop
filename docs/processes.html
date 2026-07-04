@@ -26,6 +26,7 @@
       <a href="processes.html" class="active">Processes, health &amp; releases</a>
       <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
       <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="observability.html">Observability</a>
       <div class="group">Reference</div>
       <a href="architecture.html">Architecture</a>
       <a href="deployment.html">Deployment</a>
@@ -60,6 +61,9 @@
 </tbody>
 </table>
 <div class="note"><span class="lbl">Note</span><p>With <strong>no</strong> <code>healthcheck</code>, Drop still attaches a <strong>TCP-socket readiness probe</strong> on the container port — better than nothing, and honest about it: a listening socket isn't proof the app is healthy, but it stops traffic reaching a pod that hasn't bound its port yet. Add an HTTP <code>healthcheck</code> for a real readiness signal and for liveness restarts. Probes apply to the <code>web</code> process only.</p></div>
+<div class="note"><span class="lbl">keep_warm</span><p>A fourth key, <code>keep_warm: true</code>, opts a <strong>scale-to-zero</strong> app into synthetic <strong>uptime probing</strong> — Drop otherwise won't probe an app that can scale to zero, because a probe would wake the pod. It's a pure observability toggle: it changes <strong>nothing</strong> about scaling (KEDA's <code>min</code> stays <code>0</code>), and it doesn't require an HTTP <code>path</code> to be set. See <a href="observability.html#keep-warm">Observability</a>.</p>
+<pre><code><span class="tok-k">healthcheck</span>:
+  <span class="tok-k">keep_warm</span>: <span class="tok-s">true</span></code></pre></div>
 
 <h3 id="release">release:</h3>
 <p>A one-shot <strong>Job</strong> run <strong>before</strong> the new version rolls out — the home for database migrations. It runs with the <strong>same image, env, secrets, and <a href="configuration.html#uses"><code>uses</code> bindings</a></strong> as the app (so <code>PG*</code> and the write-only <code>&lt;app&gt;-secret</code> are all present), <code>backoffLimit: 0</code> / <code>restartPolicy: Never</code> — one shot, never a silent retry of a migration.</p>

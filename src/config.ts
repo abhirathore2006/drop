@@ -49,6 +49,11 @@ export interface Config {
   wsMaxPerHost: number; // edge: per-host concurrent WebSocket-upgrade cap (0 falls back to the default)
   wsIdleTimeoutMs: number; // edge: WS idle timeout — destroy both sockets after this long with no bytes
   wsDirect: boolean; // edge: DROP_WS_DIRECT — bypass the interceptor, dial the app Service directly (wake shim)
+  // --- edge metrics + uptime (G2 / G2b) ---
+  metricsFlushIntervalMs: number; // edge: how often the in-process traffic collector flushes to traffic_minutes (default 15s)
+  metricsRetentionDays: number; // api: retention for traffic_minutes + uptime_checks; swept in housekeeping (default 30d)
+  uptimeIntervalMs: number; // api: how often the synthetic uptime poller sweeps (default 60s)
+  edgeInternalUrl?: string; // api: the edge origin the uptime poller GETs (Host-routed). Unset → HTTP probes skipped (DB TCP still runs)
   docsDir: string; // api: static docs site served at /docs (relative to cwd)
   cliDir: string; // api: dir holding the CLI bundles served at /cli (relative to cwd)
   // --- app secrets backend (chosen at deploy time) ---
@@ -149,6 +154,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     wsMaxPerHost: Number(env.DROP_WS_MAX_PER_HOST ?? "100") || 100,
     wsIdleTimeoutMs: Number(env.DROP_WS_IDLE_TIMEOUT_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
     wsDirect: env.DROP_WS_DIRECT === "1",
+    metricsFlushIntervalMs: Number(env.DROP_METRICS_FLUSH_INTERVAL_MS ?? "15000") || 15000,
+    metricsRetentionDays: Number(env.DROP_METRICS_RETENTION_DAYS ?? "30") || 30,
+    uptimeIntervalMs: Number(env.DROP_UPTIME_INTERVAL_MS ?? "60000") || 60000,
+    edgeInternalUrl: env.DROP_EDGE_INTERNAL_URL || undefined,
     dbBackupRoleArn: env.DROP_DB_BACKUP_ROLE_ARN || undefined,
     dbBackupEndpoint: env.DROP_DB_BACKUP_S3_ENDPOINT || undefined,
     dbBackupEgressCidr: env.DROP_DB_BACKUP_S3_EGRESS_CIDR || undefined,

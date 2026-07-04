@@ -28,10 +28,15 @@ export interface AppUse {
 // reads them. Same endpoint drives both probes by default; readiness gates traffic, liveness
 // restarts a wedged pod. Absent → a TCP-socket readiness probe on the container port (see manifests).
 export interface AppHealthcheck {
-  path: string; // HTTP path, must start with "/" (else the block is dropped → default TCP probe)
+  path?: string; // HTTP path, must start with "/" (else no HTTP probe → default TCP probe)
   interval?: number; // periodSeconds; 1–300, default 10
   timeout?: number; // timeoutSeconds; 1–60, default 2
   grace?: number; // initialDelaySeconds; 0–600, default 15
+  // (G2b) Opt-in: keep this app warm enough to be uptime-probed even when it can scale to zero. A
+  // scale-to-zero app is NOT probed by default (a probe would wake the pod); set keep_warm to accept
+  // that cost in exchange for proactive uptime data. Purely an observability signal — it does NOT
+  // change the KEDA scale bounds (min stays 0), so the pod still scales down between probes/traffic.
+  keepWarm?: boolean;
 }
 // A pre-rollout release phase: a Kubernetes Job (same image/env/bindings/secrets as the app) run
 // BEFORE the new Deployment is applied. Failure halts the deploy — the old version keeps serving.
@@ -255,12 +260,17 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
   if (raw.healthcheck && typeof raw.healthcheck === "object") {
     const h = raw.healthcheck as Record<string, unknown>;
     const path = str(h.path, 256);
-    if (path && path.startsWith("/")) {
+    // (G2b) accept drop.yaml's `keep_warm` AND the sanitized `keepWarm` (round-trip safe: CLI→JSON→API).
+    const keepWarm = (h.keep_warm ?? h.keepWarm) === true;
+    const hasPath = !!path && path.startsWith("/");
+    // A healthcheck block survives if it declares a real HTTP path (drives k8s probes) OR opts into
+    // keep_warm (drives the uptime poller) — otherwise it's empty and dropped, same as before.
+    if (hasPath || keepWarm) {
       cfg.healthcheck = {
-        path,
-        interval: boundedSeconds(h.interval, 1, 300, 10),
-        timeout: boundedSeconds(h.timeout, 1, 60, 2),
-        grace: boundedSeconds(h.grace, 0, 600, 15),
+        ...(hasPath
+          ? { path, interval: boundedSeconds(h.interval, 1, 300, 10), timeout: boundedSeconds(h.timeout, 1, 60, 2), grace: boundedSeconds(h.grace, 0, 600, 15) }
+          : {}),
+        ...(keepWarm ? { keepWarm: true } : {}),
       };
     }
   }

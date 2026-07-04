@@ -14,6 +14,7 @@ import {
   type RuntimeState,
   SiteNotFoundError,
 } from "./types.ts";
+import type { UptimeTarget } from "../metrics/uptime.ts";
 
 const iso = (v: unknown): string => (v instanceof Date ? v.toISOString() : String(v));
 const parseCfg = (v: unknown): SiteConfig | undefined =>
@@ -380,5 +381,39 @@ export class MetaStore {
       if (cfg?.persistent && typeof cfg.memory === "string") out.push(cfg.memory);
     }
     return out;
+  }
+
+  /** (G2b) Every DEPLOYED workload the uptime poller may probe (sites/apps/databases with a current
+   *  version). Joins the org for the namespace (DB TCP path) + the current version's config to surface
+   *  an app's `scale.min` + `healthcheck.keep_warm` — the poller's scale-to-zero gating inputs. Bounded
+   *  to the probeable types; the poller itself decides what actually gets probed (see probeKind). */
+  async listUptimeTargets(): Promise<UptimeTarget[]> {
+    const rows = await this.db
+      .selectFrom("sites")
+      .leftJoin("organisations", "organisations.id", "sites.org_id")
+      .leftJoin("versions", (j) => j.onRef("versions.site_name", "=", "sites.name").onRef("versions.id", "=", "sites.current_version"))
+      .select([
+        "sites.name as name",
+        "sites.type as type",
+        "sites.runtime_state as runtime_state",
+        "organisations.namespace as ns",
+        "versions.config as vconfig",
+      ])
+      .where("sites.type", "in", ["site", "app", "database"])
+      .where("sites.current_version", "is not", null)
+      .execute();
+    return rows.map((r) => {
+      const cfg = parseVersionCfg((r as Record<string, unknown>).vconfig) as
+        | { scale?: { min?: number }; healthcheck?: { keepWarm?: boolean } }
+        | undefined;
+      return {
+        name: r.name as string,
+        type: (r.type as WorkloadType) ?? "site",
+        namespace: (r.ns as string | null) ?? null,
+        runtimeState: ((r.runtime_state as string) ?? "running") === "stopped" ? "stopped" : "running",
+        scaleMin: typeof cfg?.scale?.min === "number" ? cfg.scale.min : 0,
+        keepWarm: cfg?.healthcheck?.keepWarm === true,
+      };
+    });
   }
 }

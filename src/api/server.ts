@@ -49,6 +49,8 @@ import { fingerprint, validateSecretKey } from "../secrets/secrets.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
 import { consoleShell, consoleAsset } from "./dashboard.ts";
 import { normalizeStatus } from "./status.ts";
+import { MetricsStore } from "../metrics/store.ts";
+import { aggregateSeries, parseRange, rangeWindowMs, summarizeUptime, formatPrometheus } from "../metrics/aggregate.ts";
 import type { AuditStore, AuditEntry } from "../audit/store.ts";
 
 export interface Deps {
@@ -72,6 +74,7 @@ export interface Deps {
   tokens?: ServiceTokenStore; // (J1) service accounts / scoped CI tokens; defaults over `db`
   previews?: PreviewStore; // (E1) preview registry (previews); defaults over `db`
   tickets?: TunnelTicketStore; // (A3) db:proxy single-use tunnel tickets; defaults over `db`. Share ONE instance with the tunnel upgrade handler (bin/api.ts) so issuance + redemption hit the same table.
+  metrics?: MetricsStore; // (G2/G2b) edge traffic + uptime rollups; defaults over `db`
   now?: () => Date;
 }
 
@@ -93,6 +96,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const tokens = d.tokens ?? new ServiceTokenStore(d.db); // (J1) service accounts / scoped CI tokens
   const previews = d.previews ?? new PreviewStore(d.db); // (E1) preview registry
   const tickets = d.tickets ?? new TunnelTicketStore(d.db, now, d.cfg.tunnelTicketTtlMs); // (A3) db:proxy tunnel tickets
+  const metrics = d.metrics ?? new MetricsStore(d.db); // (G2/G2b) edge traffic + uptime rollups
 
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
   // (E1) The preview hostname, `<name>--<label>.<baseDomain>` — reserved via src/names.ts (site
@@ -187,6 +191,18 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     "/v1/*",
     authMiddleware(d.verifier, { isSuspended: async (email) => (await d.users.getUser(email))?.status === "suspended" }),
   );
+
+  // (G2) Prometheus scrape — admin-gated, with its OWN auth pass (it lives outside /v1/*, at the
+  // conventional `/metrics` path a scraper expects). It exposes the LAST flushed minute per site from
+  // `traffic_minutes` (one cheap indexed query) — NOT a live in-process counter, because the API is not
+  // the meter, the edge is. All-gauges (each value is a per-minute snapshot, not monotonic).
+  app.use("/metrics", authMiddleware(d.verifier, { isSuspended: async (email) => (await d.users.getUser(email))?.status === "suspended" }));
+  app.get("/metrics", async (c) => {
+    if (!(await isPlatformAdmin(c.get("identity").email))) return c.json({ error: "admin only" }, 403);
+    const since = new Date(now().getTime() - 5 * 60_000); // drop sites that stopped serving minutes ago
+    const rows = await metrics.latestTrafficPerSite(since);
+    return c.body(formatPrometheus(rows), 200, { "content-type": "text/plain; version=0.0.4; charset=utf-8" });
+  });
 
   // First touch provisions the user AND their personal org (idempotent), so resources always have an
   // org to belong to and single-user flows keep working with no explicit org. A SERVICE-TOKEN principal
@@ -1701,6 +1717,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         out.tcp = { mode: ep.mode, port: ep.port, protocol: ep.protocol, connect, ...(sslmode ? { sslmode } : {}) };
       }
     }
+    // (G2b) Uptime summary — last-24h OK % + the most recent synthetic check. Probeable types only
+    // (sites/apps/databases); buckets/caches aren't uptime-probed in v1. Best-effort: a metrics read
+    // failure must never fail the metadata read, so it degrades to omitted.
+    if (site.type === "site" || site.type === "app" || site.type === "database") {
+      try {
+        const rows = await metrics.uptimeSince(name, new Date(now().getTime() - 24 * 60 * 60_000));
+        out.uptime = summarizeUptime(rows, now());
+      } catch {
+        /* leave uptime unset */
+      }
+    }
     // Normalized status contract (M0): ONE server-side mapping from the raw signals to the
     // console/CLI enum — the client trusts this field and only falls back to mirroring it
     // when talking to an older API (console/src/lib/status.ts).
@@ -1712,6 +1739,32 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       cacheStatus: ((out.cache as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["cacheStatus"],
     });
     return c.json(out);
+  });
+
+  // ---- edge request metrics (G2): time-bucketed rollup for the detail-page numbers + M4 sparklines ----
+  // authz `read`. `?range=1h|24h|7d` → server-side aggregation (raw minutes for 1h, 10-min buckets for
+  // 24h, hourly for 7d) so the point count stays bounded. `series` + window `totals` (see aggregateSeries).
+  app.get("/v1/sites/:name/metrics", async (c) => {
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (!can(await actorFor(c.get("identity"), site), "read")) return c.json({ error: "not permitted" }, 403);
+    const range = parseRange(c.req.query("range"));
+    const since = new Date(now().getTime() - rangeWindowMs(range));
+    const rows = await metrics.trafficSeries(name, since);
+    return c.json({ range, ...aggregateSeries(rows, range) });
+  });
+
+  // ---- uptime strip (G2b): the synthetic-check history + summary, for the console line + M4 strip ----
+  app.get("/v1/sites/:name/uptime", async (c) => {
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (!can(await actorFor(c.get("identity"), site), "read")) return c.json({ error: "not permitted" }, 403);
+    // v1 serves a 24h window (M4 consumes wider ranges later); one row per checked minute.
+    const nowTs = now();
+    const rows = await metrics.uptimeSince(name, new Date(nowTs.getTime() - 24 * 60 * 60_000));
+    return c.json({ range: "24h", checks: rows, summary: summarizeUptime(rows, nowTs) });
   });
 
   // ---- recent workload logs (crash diagnostics; apps + databases) ----
