@@ -2,7 +2,7 @@
 // agent. Same-origin fetch carries the session cookie, identical to lib/api.ts's `req`
 // (module-private there, so the tiny wrapper is duplicated here on purpose).
 
-import { ApiError, type GraphPlanStep, type Org, type TemplateSpec } from "./api.ts";
+import { ApiError, type GraphPlanStep, type Org, type StackGraph, type TemplateSpec } from "./api.ts";
 import type { EditorSpec } from "./stack-editor.ts";
 
 async function req<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
@@ -131,9 +131,44 @@ export interface UpgradeResult extends StackUpResult {
   resolved?: { key: string; how: string }[];
 }
 
+// ---- Environments (E3) — durable named instantiations with a per-env variable overlay ----------------
+/** One named environment (the default env is surfaced separately as `default`). */
+export interface EnvSummary {
+  name: string;
+  variables: Record<string, string>;
+  resources: number;
+  createdBy: string;
+  createdAt: string;
+}
+/** GET /v1/stacks/:name/environments. `default` is the implicit unnamed env every stack has. */
+export interface EnvList {
+  stack: string;
+  default: { name: "default"; resources: number };
+  environments: EnvSummary[];
+}
+
 export const apiExtra = {
   /** The stack's editable spec + spec_version (C2 editor bootstrap). */
   stackDetail: (name: string) => req<StackDetail>("GET", `/v1/stacks/${encodeURIComponent(name)}`),
+  // ---- Environments (E3) ----
+  /** The C1 graph scoped to an environment ('' / "default" = the default env). Mirrors api.stackGraph
+   *  but adds the `?env=` scope (api.ts is owned by a concurrent agent, so the env variant lives here). */
+  stackGraph: (name: string, env?: string) => {
+    const base = `/v1/stacks/${encodeURIComponent(name)}/graph`;
+    const q = env && env !== "default" ? `?include_plan=1&env=${encodeURIComponent(env)}` : "?include_plan=1";
+    return req<StackGraph>("GET", base + q);
+  },
+  /** List a stack's environments (named + the implicit default). */
+  stackEnvironments: (name: string) => req<EnvList>("GET", `/v1/stacks/${encodeURIComponent(name)}/environments`),
+  /** Create a named environment with an optional variable overlay. */
+  createEnvironment: (name: string, env: string, variables: Record<string, string>) =>
+    req<{ stack: string; env: string; variables: Record<string, string> }>("POST", `/v1/stacks/${encodeURIComponent(name)}/environments`, { env, variables }),
+  /** Delete an environment; `cascade` also tears down its resources. */
+  deleteEnvironment: (name: string, env: string, cascade = false) =>
+    req<{ stack: string; deleted: string }>("DELETE", `/v1/stacks/${encodeURIComponent(name)}/environments/${encodeURIComponent(env)}${cascade ? "?cascade=1" : ""}`),
+  /** Promote <source>'s applied spec into <target> (images pinned exact; target keeps its own variables). */
+  promoteEnvironment: (name: string, source: string, to: string) =>
+    req<StackUpResult & { from: string; to: string }>("POST", `/v1/stacks/${encodeURIComponent(name)}/environments/${encodeURIComponent(source || "default")}/promote`, { to }),
   /** (D2) Three-way diff of the stack vs its template's latest version. 404 → not template-derived. */
   stackOutdated: (name: string) => req<OutdatedResult>("GET", `/v1/stacks/${encodeURIComponent(name)}/outdated`),
   /** (D2) Apply upstream changes. `dry_run` returns the reconcile plan; a missing conflict resolution 409s. */

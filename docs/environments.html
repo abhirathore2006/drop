@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Environments · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="templates.html">Templates</a>
+      <a href="buckets.html">Buckets (object storage)</a>
+      <a href="previews.html">Previews</a>
+      <a href="environments.html" class="active">Environments</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <a href="tokens.html">CI tokens (service accounts)</a>
+      <a href="observability.html">Observability</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Environments</h1>
+<p class="lead">An <strong>environment</strong> is a named, <strong>durable</strong> instantiation of one <a href="stacks.html">stack</a> — <code>staging</code> and <code>prod</code> from a single <code>drop.yaml</code>, each with its own per-environment <strong>variables</strong>. Every stack already has an unnamed <strong>default</strong> environment (the one that exists the moment you first <code>drop up</code>); named environments are additional, parallel copies that live alongside it. Where a <a href="previews.html">preview</a> is an <em>ephemeral</em> branch that expires, an environment is a <em>permanent</em> parallel instantiation you promote between.</p>
+
+<h2 id="model">The model</h2>
+<p>A stack spec instantiates into environments the same way a template instantiates into a stack — it's the same variable machinery (<code>${var.x}</code>) all the way down. Each environment gets:</p>
+<ul>
+  <li>a row in <code>environments(stack_id, name, variables, …)</code> holding its variable overlay;</li>
+  <li>its own resource namespace — resources materialize as <code>&lt;stack&gt;-&lt;env&gt;-&lt;key&gt;</code> (see <a href="#naming">naming</a>);</li>
+  <li>a full <code>up</code> run with <code>${var.x}</code> resolved from <em>its</em> variables.</li>
+</ul>
+<p>The default environment keeps today's names (<code>&lt;stack&gt;-&lt;key&gt;</code>) and needs zero migration — an existing stack simply <em>is</em> its default environment.</p>
+
+<h2 id="preview-vs-env">Preview or environment?</h2>
+<p>Both give you a parallel copy of your app — they solve different problems. Reach for the right one:</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th></th><th>Preview</th><th>Environment</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Lifetime</strong></td><td>Ephemeral — expires (default 7 d), swept automatically</td><td>Durable — lives until you delete it</td></tr>
+    <tr><td><strong>Shape</strong></td><td>A single label-named branch of one workload</td><td>A full parallel instantiation of the whole stack</td></tr>
+    <tr><td><strong>Hostname</strong></td><td><code>&lt;name&gt;--&lt;label&gt;</code> (double dash)</td><td><code>&lt;stack&gt;-&lt;env&gt;-&lt;key&gt;</code> (single dash)</td></tr>
+    <tr><td><strong>Variables</strong></td><td>None — mirrors the parent's config</td><td>Per-environment <code>${var.x}</code> overlay</td></tr>
+    <tr><td><strong>Database</strong></td><td>Reuses the parent's (opt-in empty clone)</td><td>Its own, provisioned by the stack spec</td></tr>
+    <tr><td><strong>Typical use</strong></td><td>Review a pull request, share a WIP</td><td>Run <code>staging</code> / <code>prod</code>, promote releases</td></tr>
+    <tr><td><strong>Command</strong></td><td><code>drop deploy … --preview pr-42</code></td><td><code>drop env create staging …</code></td></tr>
+  </tbody>
+</table>
+</div>
+<p>Rule of thumb: if it should disappear on its own, it's a preview; if it's a place you keep running and ship to, it's an environment.</p>
+
+<h2 id="create">Creating an environment</h2>
+<p>An environment stores a <strong>variable overlay</strong>: values for the <code>${var.x}</code> placeholders in your <code>drop.yaml</code>. Provide them with repeatable <code>--set key=value</code>:</p>
+<pre><code><span class="tok-c"># the stack already exists (a plain `drop up` created its default env)</span>
+$ drop env create staging --stack shop --set db_size=512Mi --set region=eu
+  <span class="tok-s">✓ environment staging created for stack shop</span>
+  reconcile it:  drop up --env staging
+
+$ drop env ls shop
+$ drop env rm shop staging --cascade   <span class="tok-c"># --cascade also tears down its resources</span></code></pre>
+
+<h2 id="variables">Variables &amp; the overlay</h2>
+<p>Your <code>drop.yaml</code> stack spec can carry <code>${var.x}</code> placeholders anywhere a value goes — an app <code>env:</code> value, a database <code>storage:</code>, an image tag. At <code>up</code> time the placeholders are substituted from the target environment's stored variables:</p>
+<pre><code><span class="tok-k">stack</span>:
+  <span class="tok-k">name</span>: shop
+  <span class="tok-k">resources</span>:
+    <span class="tok-k">db</span>:
+      <span class="tok-k">type</span>: database
+      <span class="tok-k">storage</span>: <span class="tok-s">"${var.db_size}"</span>      <span class="tok-c"># 512Mi in staging, 20Gi in prod</span>
+    <span class="tok-k">api</span>:
+      <span class="tok-k">type</span>: app
+      <span class="tok-k">uses</span>: [{ <span class="tok-k">database</span>: db }]
+      <span class="tok-k">env</span>:
+        <span class="tok-k">REGION</span>: <span class="tok-s">"${var.region}"</span></code></pre>
+<pre><code>$ drop up --env staging     <span class="tok-c"># db → 512Mi, REGION → eu</span>
+$ drop up --env prod        <span class="tok-c"># db → 20Gi,  REGION → us  (prod's own overlay)</span></code></pre>
+<p>A referenced variable with no value in the target environment is a hard, clear error — <code>missing required variable(s) for env "staging": db_size</code> — surfaced <em>before</em> anything touches the cluster. The default environment carries no variables, so a placeholder-bearing spec is instantiated through named environments.</p>
+
+<h2 id="promote">Promotion</h2>
+<p>Promotion moves a <strong>tested spec</strong> from one environment to another. It re-runs the target's <code>up</code> with the <strong>source's currently-applied spec</strong> — and because container images are <strong>pinned refs</strong>, the exact artifact your source environment is running lands in the target, byte-for-byte. It is <em>not</em> a variable copy:</p>
+<pre><code>$ drop env promote shop staging prod
+  <span class="tok-s">✓ promoted staging → prod for stack shop</span></code></pre>
+<ul>
+  <li><strong>Spec, not variables.</strong> The target keeps its <em>own</em> variables; it receives the source's resolved spec shape. You promote what staging is <em>running</em>, not what staging is <em>configured with</em>.</li>
+  <li><strong>Exact images.</strong> Each app is pinned to the precise image the source environment is serving, so <code>prod</code> runs the identical build you validated in <code>staging</code> — never a fresh rebuild that could drift.</li>
+</ul>
+
+<h2 id="naming">Naming — single dash, not <code>--</code></h2>
+<p>Named-environment resources materialize as <code>&lt;stack&gt;-&lt;env&gt;-&lt;key&gt;</code> with <strong>single dashes</strong>: stack <code>shop</code>, env <code>staging</code>, resource <code>db</code> → <code>shop-staging-db</code>. The default environment keeps the original <code>&lt;stack&gt;-&lt;key&gt;</code> (<code>shop-db</code>).</p>
+<p>The double dash <code>--</code> is <strong>reserved for preview hostnames</strong> (<code>&lt;name&gt;--&lt;label&gt;</code>) and is rejected by site-name validation, so environments deliberately use a single dash to stay ordinary, valid, collision-free site names. Environment names are short DNS labels; <code>default</code> is reserved (it's the unnamed default env) and <code>--</code> is not allowed inside a name.</p>
+
+<h2 id="console">In the console</h2>
+<p>The stack page carries an <strong>environment switcher</strong> in its header — a dropdown listing <code>default</code> plus every named environment. Switching re-scopes the whole page (the live canvas, the per-resource metric chips, and the pending-changes drawer) to that environment's resources. A small form there creates a new environment (name + optional variables) inline.</p>
+
+<h2 id="quota">Quota — environments are not free</h2>
+<p>Each environment's resources are ordinary workloads: a <code>staging</code> and a <code>prod</code> copy of a three-resource stack is six workloads, and every one of them counts against your organisation's workload cap and storage budget exactly like any other. Environments are a first-class way to run parallel copies — they are not a way to run them for free. Delete an environment (<code>drop env rm … --cascade</code>) to reclaim its share.</p>
+
+<div class="next">
+  <a href="stacks.html"><div class="d">Back →</div><div class="t">Stacks</div></a>
+  <a href="previews.html"><div class="d">Compare →</div><div class="t">Previews</div></a>
+  <a href="templates.html"><div class="d">Related →</div><div class="t">Templates</div></a>
+</div>
+</article></main>
+</div>
+</body>
+</html>

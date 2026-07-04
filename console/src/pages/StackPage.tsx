@@ -60,11 +60,104 @@ function MetricChip({ t }: { t: MetricsTotals }) {
   );
 }
 
+// (E3) The env switcher that fills the M4 header slot: a <select> of "default" + the stack's named
+// environments (re-scopes the page on change) plus a "+ env" button that opens a create-env form.
+function EnvSwitcher({ stack, env, setEnv }: { stack: string; env: string; setEnv: (e: string) => void }) {
+  const qc = useQueryClient();
+  const [creating, setCreating] = useState(false);
+  const envsQ = useQuery({
+    queryKey: ["/v1/stacks", stack, "environments"],
+    queryFn: () => apiExtra.stackEnvironments(stack),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const names = ["default", ...(envsQ.data?.environments?.map((e) => e.name) ?? [])];
+  return (
+    <span className="env-switcher" data-testid="env-switcher-slot">
+      <label className="env-switcher-label">
+        <span className="env-switcher-cap">env</span>
+        <select className="env-select" data-testid="env-select" value={env} onChange={(e) => setEnv(e.target.value)}>
+          {names.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+      </label>
+      <Button size="sm" className="env-new-btn" data-testid="env-new-btn" onClick={() => setCreating(true)}>
+        + env
+      </Button>
+      {creating && (
+        <CreateEnvModal
+          stack={stack}
+          onClose={() => setCreating(false)}
+          onCreated={async (created) => {
+            setCreating(false);
+            await qc.invalidateQueries({ queryKey: ["/v1/stacks", stack, "environments"] });
+            setEnv(created); // jump straight to the new env (its graph refetches under the new key)
+          }}
+        />
+      )}
+    </span>
+  );
+}
+
+// (E3) The create-env form: a name + an optional variable overlay (one KEY=value per line). Server-side
+// validation (env-name shape, reserved "default"/"--", missing required var at up-time) surfaces as a toast/err.
+function CreateEnvModal({ stack, onClose, onCreated }: { stack: string; onClose: () => void; onCreated: (name: string) => void }) {
+  const [name, setName] = useState("");
+  const [varsText, setVarsText] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+  const create = useMutation({
+    mutationFn: () => {
+      const variables: Record<string, string> = {};
+      for (const line of varsText.split("\n")) {
+        const t = line.trim();
+        if (!t) continue;
+        const i = t.indexOf("=");
+        if (i > 0) variables[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+      }
+      return apiExtra.createEnvironment(stack, name.trim(), variables);
+    },
+    onSuccess: (r) => onCreated(r.env),
+    onError: (e) => setErr((e as Error).message),
+  });
+  return (
+    <Modal open title="New environment" onClose={onClose}>
+      <div className="modal-body env-form">
+        {err && <div className="err">{err}</div>}
+        <label className="field">
+          <span>Name</span>
+          <input data-testid="env-name-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="staging" autoFocus />
+        </label>
+        <label className="field">
+          <span>Variables (one KEY=value per line — optional)</span>
+          <textarea data-testid="env-vars-input" value={varsText} onChange={(e) => setVarsText(e.target.value)} rows={4} placeholder={"DB_SIZE=512Mi\nREGION=eu"} />
+        </label>
+      </div>
+      <div className="modal-actions">
+        <Button size="sm" onClick={onClose} disabled={create.isPending}>
+          cancel
+        </Button>
+        <Button size="sm" variant="primary" data-testid="env-create-submit" loading={create.isPending} disabled={!name.trim()} onClick={() => create.mutate()}>
+          Create
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
 export function StackPage({ name }: { name: string }) {
+  // (E3) The selected environment. "default" is the unnamed default env; a named env re-scopes the whole
+  // page (graph + metric chips + plan drawer + canvas) to its `<stack>-<env>-<key>` resources. The graph
+  // query key carries the env so a switch refetches; placeholderData keeps the old graph mounted meanwhile
+  // (so the env switcher itself never unmounts mid-switch).
+  const [env, setEnv] = useState("default");
   const q = useQuery({
-    queryKey: ["/v1/stacks", name, "graph"],
-    queryFn: () => api.stackGraph(name),
+    queryKey: ["/v1/stacks", name, "graph", env],
+    queryFn: () => apiExtra.stackGraph(name, env),
     refetchInterval: POLL_DETAIL_MS,
+    placeholderData: (prev) => prev,
   });
 
   return (
@@ -77,13 +170,14 @@ export function StackPage({ name }: { name: string }) {
       ) : q.isError ? (
         <div className="err">{q.error.message}</div>
       ) : (
-        <StackView graph={q.data} />
+        <StackView graph={q.data} env={env} setEnv={setEnv} />
       )}
     </div>
   );
 }
 
-function StackView({ graph }: { graph: StackGraph }) {
+function StackView({ graph, env, setEnv }: { graph: StackGraph; env: string; setEnv: (e: string) => void }) {
+  const isDefaultEnv = env === "default" || env === "";
   const pending = pendingByKey(graph.plan);
   const showPending = hasPending(graph.plan);
   // Edit mode (C2). The "Edit" toggle is shown UNCONDITIONALLY and the server is the authority: the `up`
@@ -139,15 +233,19 @@ function StackView({ graph }: { graph: StackGraph }) {
         </div>
         <div className="downer">
           {graph.org && <span title={`org slug: ${graph.org.slug}`}>org: {orgLabel(graph.org)} · </span>}
-          spec v{graph.specVersion} · {graph.nodes.length} resources
+          {!isDefaultEnv && <span className="pill env-pill">env: {env}</span>} spec v{graph.specVersion} · {graph.nodes.length} resources
           {showPending && <span className="pill pill-warn pending-pill">pending changes</span>}
         </div>
         <div className="stack-actions">
-          {/* E3: env switcher — a later slice mounts the environment picker here (dev/staging/prod). */}
-          <span className="env-switcher-slot" data-testid="env-switcher-slot" aria-hidden />
-          <Button size="sm" className="stack-edit-btn" onClick={() => setEditing(true)}>
-            Edit
-          </Button>
+          {/* (E3) env switcher — fills the M4 header slot: a dropdown of environments (incl. "default")
+              that re-scopes the page, plus a create-env form. */}
+          <EnvSwitcher stack={graph.name} env={env} setEnv={setEnv} />
+          {/* Editing authors the SHARED stack spec, so it's offered only on the default env. */}
+          {isDefaultEnv && (
+            <Button size="sm" className="stack-edit-btn" onClick={() => setEditing(true)}>
+              Edit
+            </Button>
+          )}
         </div>
       </div>
 

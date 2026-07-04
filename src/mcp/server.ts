@@ -402,9 +402,9 @@ export function buildMcp(): McpServer {
     "stack_status",
     {
       description: "Show a stack's spec + its resources' live status.",
-      inputSchema: { name: z.string(), org: z.string().optional().describe("the stack's organisation slug (disambiguates a name across orgs)") },
+      inputSchema: { name: z.string(), org: z.string().optional().describe("the stack's organisation slug (disambiguates a name across orgs)"), env: z.string().optional().describe("(E3) scope to a named environment") },
     },
-    async ({ name, org }) => run(() => getClient().then((c) => c.stackGet(name, org))),
+    async ({ name, org, env }) => run(() => getClient().then((c) => c.stackGet(name, { org, env }))),
   );
 
   // ---- repo detection (F1): local heuristics → a proposed stack: spec. No server call, agent-friendly

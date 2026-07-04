@@ -29,6 +29,20 @@ export interface StackResourceMap {
   siteName: string;
 }
 
+/** A resource mapping row across ALL envs of a stack (the cascade-delete / all-env view). */
+export interface StackResourceEnvMap extends StackResourceMap {
+  env: string;
+}
+
+/** (E3) One environment row — a named, durable instantiation with its own variable overlay. */
+export interface EnvironmentRow {
+  stackId: string;
+  name: string;
+  variables: Record<string, string>;
+  createdBy: string;
+  createdAt: string;
+}
+
 export class StackStore {
   constructor(private db: Db) {}
 
@@ -125,30 +139,94 @@ export class StackStore {
     return rows.map((r) => this.toRow(r as Record<string, unknown>));
   }
 
-  // ---- resource mapping (resource_key -> site_name) ----
+  // ---- resource mapping ((env, resource_key) -> site_name) ----
+  // (E3) The mapping is keyed by (stack_id, env, resource_key). `env` is '' for the unnamed default env
+  // (backward compatible: existing rows carry the '' default), and the named env's DNS-safe label otherwise.
 
-  async resources(stackId: string): Promise<StackResourceMap[]> {
-    const rows = await this.db.selectFrom("stack_resources").select(["resource_key", "site_name"]).where("stack_id", "=", stackId).orderBy("resource_key").execute();
+  /** The resources of ONE environment (default env when `env` omitted). */
+  async resources(stackId: string, env = ""): Promise<StackResourceMap[]> {
+    const rows = await this.db
+      .selectFrom("stack_resources")
+      .select(["resource_key", "site_name"])
+      .where("stack_id", "=", stackId)
+      .where("env", "=", env)
+      .orderBy("resource_key")
+      .execute();
     return rows.map((r) => ({ resourceKey: r.resource_key, siteName: r.site_name }));
   }
 
-  /** key → site_name mapping (the planner's `mapping` input). */
-  async mapping(stackId: string): Promise<Record<string, string>> {
+  /** Every resource across EVERY env of the stack (the stack-delete cascade view). */
+  async allResources(stackId: string): Promise<StackResourceEnvMap[]> {
+    const rows = await this.db
+      .selectFrom("stack_resources")
+      .select(["env", "resource_key", "site_name"])
+      .where("stack_id", "=", stackId)
+      .orderBy("env")
+      .orderBy("resource_key")
+      .execute();
+    return rows.map((r) => ({ env: r.env, resourceKey: r.resource_key, siteName: r.site_name }));
+  }
+
+  /** key → site_name mapping for ONE env (the planner's `mapping` input). */
+  async mapping(stackId: string, env = ""): Promise<Record<string, string>> {
     const out: Record<string, string> = {};
-    for (const r of await this.resources(stackId)) out[r.resourceKey] = r.siteName;
+    for (const r of await this.resources(stackId, env)) out[r.resourceKey] = r.siteName;
     return out;
   }
 
-  /** Record (or refresh) a materialized resource. */
-  async setResource(stackId: string, resourceKey: string, siteName: string): Promise<void> {
+  /** Record (or refresh) a materialized resource in an env. */
+  async setResource(stackId: string, env: string, resourceKey: string, siteName: string): Promise<void> {
     await this.db
       .insertInto("stack_resources")
-      .values({ stack_id: stackId, resource_key: resourceKey, site_name: siteName })
-      .onConflict((oc) => oc.columns(["stack_id", "resource_key"]).doUpdateSet({ site_name: siteName }))
+      .values({ stack_id: stackId, env, resource_key: resourceKey, site_name: siteName })
+      .onConflict((oc) => oc.columns(["stack_id", "env", "resource_key"]).doUpdateSet({ site_name: siteName }))
       .execute();
   }
 
-  async deleteResource(stackId: string, resourceKey: string): Promise<void> {
-    await this.db.deleteFrom("stack_resources").where("stack_id", "=", stackId).where("resource_key", "=", resourceKey).execute();
+  async deleteResource(stackId: string, env: string, resourceKey: string): Promise<void> {
+    await this.db.deleteFrom("stack_resources").where("stack_id", "=", stackId).where("env", "=", env).where("resource_key", "=", resourceKey).execute();
+  }
+}
+
+/** (E3) The seam over `environments` — a stack's named, durable variable overlays. CRUD only; the
+ *  reconcile (substitute + up) lives in the API route, mirroring how StackStore/plan.ts split. */
+export class EnvironmentStore {
+  constructor(private db: Db) {}
+
+  private toRow(r: Record<string, unknown>): EnvironmentRow {
+    const v = r.variables;
+    const variables = typeof v === "string" ? (JSON.parse(v) as Record<string, string>) : ((v as Record<string, string>) ?? {});
+    return {
+      stackId: r.stack_id as string,
+      name: r.name as string,
+      variables,
+      createdBy: r.created_by as string,
+      createdAt: iso(r.created_at),
+    };
+  }
+
+  /** All named environments of a stack, alphabetical. (The default env '' is implicit — no row.) */
+  async list(stackId: string): Promise<EnvironmentRow[]> {
+    const rows = await this.db.selectFrom("environments").selectAll().where("stack_id", "=", stackId).orderBy("name").execute();
+    return rows.map((r) => this.toRow(r as Record<string, unknown>));
+  }
+
+  async get(stackId: string, name: string): Promise<EnvironmentRow | null> {
+    const r = await this.db.selectFrom("environments").selectAll().where("stack_id", "=", stackId).where("name", "=", name).executeTakeFirst();
+    return r ? this.toRow(r) : null;
+  }
+
+  /** Create an env row. Throws on a duplicate (stack_id, name). */
+  async create(opts: { stackId: string; name: string; variables: Record<string, string>; createdBy: string }): Promise<EnvironmentRow> {
+    const r = await this.db
+      .insertInto("environments")
+      .values({ stack_id: opts.stackId, name: opts.name, variables: JSON.stringify(opts.variables ?? {}), created_by: opts.createdBy.toLowerCase() })
+      .returningAll()
+      .executeTakeFirstOrThrow();
+    return this.toRow(r);
+  }
+
+  async delete(stackId: string, name: string): Promise<void> {
+    await this.db.deleteFrom("environments").where("stack_id", "=", stackId).where("name", "=", name).execute();
   }
 }

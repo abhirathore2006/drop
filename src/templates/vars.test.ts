@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { substituteTemplate, sanitizeVariables, validateVarKey, type TemplateVariable } from "./vars.ts";
+import { substituteTemplate, sanitizeVariables, validateVarKey, extractVarKeys, resolveEnvSpec, type TemplateVariable } from "./vars.ts";
 import type { StackSpec } from "../stack-config.ts";
 
 const vars = (a: TemplateVariable[]): TemplateVariable[] => a;
@@ -90,4 +90,42 @@ test("validateVarKey", () => {
   expect(validateVarKey("DB_URL")).toBeNull();
   expect(validateVarKey("1x")).not.toBeNull();
   expect(validateVarKey("")).not.toBeNull();
+});
+
+// (E3) env variable overlay: extractVarKeys finds referenced ${var.…} (not ${stack}); resolveEnvSpec
+// substitutes an env's { key: value } overlay, reporting a referenced-but-unprovided variable as missing.
+describe("E3 env overlay (extractVarKeys / resolveEnvSpec)", () => {
+  const spec: StackSpec = {
+    name: "shop",
+    resources: {
+      db: { type: "database", storage: "${var.size}" },
+      api: { type: "app", image: "x:1", env: { GREETING: "${var.greeting}", HOST: "${stack}-db-rw" } },
+    },
+  };
+
+  test("extractVarKeys returns the distinct ${var.…} keys, excluding ${stack}", () => {
+    expect(extractVarKeys(spec).sort()).toEqual(["greeting", "size"]);
+    expect(extractVarKeys({ name: "x", resources: { a: { type: "app", image: "x:1" } } })).toEqual([]);
+  });
+
+  test("resolveEnvSpec substitutes the overlay (typed + env values) and resolves ${stack}", () => {
+    const r = resolveEnvSpec(spec, { size: "512Mi", greeting: "hi" }, "shop");
+    expect(r.missing).toEqual([]);
+    expect(r.errors).toEqual([]);
+    expect(r.spec.resources.db!.storage).toBe("512Mi");
+    expect(r.spec.resources.api!.env!.GREETING).toBe("hi");
+    expect(r.spec.resources.api!.env!.HOST).toBe("shop-db-rw");
+  });
+
+  test("resolveEnvSpec reports a referenced-but-unprovided variable as missing", () => {
+    const r = resolveEnvSpec(spec, { size: "512Mi" }, "shop"); // greeting not provided
+    expect(r.missing).toContain("greeting");
+  });
+
+  test("resolveEnvSpec on a placeholder-free spec is a no-op", () => {
+    const concrete: StackSpec = { name: "shop", resources: { db: { type: "database", storage: "512Mi" } } };
+    const r = resolveEnvSpec(concrete, {}, "shop");
+    expect(r.missing).toEqual([]);
+    expect(r.spec.resources.db!.storage).toBe("512Mi");
+  });
 });

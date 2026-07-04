@@ -289,10 +289,53 @@ export function validateStackEdges(spec: StackSpec): string | null {
   return null;
 }
 
-/** The materialized site name for a resource: its explicit `name:`, else `<stack>-<key>`. The single
- *  authority for key→name; `stack_resources.resource_key → site_name` records the result. */
-export function resolveResourceName(stackName: string, key: string, res: StackResource): string {
+/** The materialized site name for a resource. The single authority for key→name;
+ *  `stack_resources.(env, resource_key) → site_name` records the result.
+ *  - DEFAULT env (`env === ""`): its explicit `name:`, else `<stack>-<key>` (unchanged pre-E3 behaviour).
+ *  - NAMED env (E3): `<stack>-<env>-<key>` (SINGLE dash — `--` is reserved for previews and rejected by
+ *    validateName). The explicit `name:` override is intentionally NOT honoured for named envs: two envs
+ *    of one stack would collide on it, so a named env always derives a fresh, unique, collision-free name. */
+export function resolveResourceName(stackName: string, key: string, res: StackResource, env = ""): string {
+  if (env) return `${stackName}-${env}-${key}`;
   return res.name ?? `${stackName}-${key}`;
+}
+
+/** (E3) An environment name: a short DNS label (same shape as a resource KEY), reused as the `<env>`
+ *  segment of `<stack>-<env>-<key>`. Must NOT be "default" ('' is the default env) and must not contain
+ *  `--` (single-dash naming; validateName rejects `--`). Returns an error string, or null. */
+export function validateEnvName(name: unknown): string | null {
+  if (typeof name !== "string" || !KEY_RE.test(name)) return "environment name must be 1–32 chars, lowercase a–z/0–9/-, not starting or ending with '-'";
+  // KEY_RE permits repeated hyphens ("sta--ging" matches its middle class), so reject `--` explicitly —
+  // the composed `<stack>-<env>-<key>` must stay single-dash (validateName rejects `--` too).
+  if (name.includes("--")) return `environment name "${name}": "--" is reserved for previews (use single dashes)`;
+  if (name === "default") return `environment name "default" is reserved (the unnamed default env)`;
+  return null;
+}
+
+/**
+ * (E3) Sanitize a stack spec BUT preserve `${var.…}` / `${stack}` placeholders that the full sanitizer
+ * would clobber in TYPED fields (e.g. a database `storage: "${var.size}"`, an app `image: "${var.tag}"`).
+ * Mirrors the D1 template-publish technique: `sanitizeStackConfig` is the STRUCTURE GATE (a valid name +
+ * at least one accepted resource), then for any resource whose raw form carries a placeholder we keep the
+ * RAW resource object (so its placeholder-bearing fields survive), otherwise we keep the fully-sanitized
+ * one. Placeholder-free specs are byte-identical to `sanitizeStackConfig` (fast-path), so existing stacks
+ * are unaffected. The concrete spec is fully re-sanitized at env-up AFTER substitution (`substituteTemplate`),
+ * so no un-sanitized value ever reaches the cluster.
+ */
+export function sanitizeStackConfigPreservingVars(input: unknown): StackSpec | undefined {
+  const skeleton = sanitizeStackConfig(input);
+  if (!skeleton) return undefined;
+  // Fast path: no placeholder anywhere → the sanitized skeleton already round-trips exactly.
+  if (!JSON.stringify(input).includes("${")) return skeleton;
+  const raw = (input as { resources?: Record<string, unknown> }).resources ?? {};
+  const resources: Record<string, StackResource> = {};
+  for (const key of Object.keys(skeleton.resources)) {
+    const rawRes = raw[key];
+    const hasVar = !!rawRes && typeof rawRes === "object" && JSON.stringify(rawRes).includes("${");
+    // Keep the RAW resource (placeholders intact) but force the sanitized `type` (the type must be sound).
+    resources[key] = hasVar ? ({ ...(rawRes as StackResource), type: skeleton.resources[key]!.type }) : skeleton.resources[key]!;
+  }
+  return { name: skeleton.name, resources };
 }
 
 /** Parse a `drop.yaml` body and return its `stack:` section, or undefined if absent/invalid. */

@@ -62,13 +62,14 @@ export function formatPlan(plan: PlanStep[]): string {
 export async function runStackUp(
   client: Client,
   dir: string,
-  opts: { org?: string; dryRun?: boolean; prune?: boolean; log?: (s: string) => void } = {},
+  opts: { org?: string; dryRun?: boolean; prune?: boolean; env?: string; log?: (s: string) => void } = {},
 ): Promise<{ dryRun: boolean; plan: PlanStep[]; needs: Need[]; result?: UpResponse }> {
   const log = opts.log ?? (() => {});
   const spec = await loadStackSpec(dir);
+  const env = opts.env; // (E3) target an environment: reconcile ITS resources with ITS variable overlay
 
   // 1) Dry-run → the plan + which content the CLI still owes + resource outputs.
-  const preview = (await client.stackUp(spec.name, spec, { org: opts.org, dryRun: true, prune: opts.prune })) as UpResponse & { specVersion: number };
+  const preview = (await client.stackUp(spec.name, spec, { org: opts.org, dryRun: true, prune: opts.prune, env })) as UpResponse & { specVersion: number };
   log(formatPlan(preview.plan));
   if (opts.dryRun) return { dryRun: true, plan: preview.plan, needs: preview.needs };
 
@@ -90,6 +91,7 @@ export async function runStackUp(
     prune: opts.prune,
     resolved,
     specVersion: preview.specVersion > 0 ? preview.specVersion : undefined,
+    env,
   })) as UpResponse;
 
   // 4) Publish site bytes to the rows the server created, substituting env_from outputs at pack time.

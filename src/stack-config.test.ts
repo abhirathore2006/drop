@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { sanitizeStackConfig, validateStackEdges, resolveResourceName, parseStackConfig, type StackSpec } from "./stack-config.ts";
+import { sanitizeStackConfig, sanitizeStackConfigPreservingVars, validateStackEdges, validateEnvName, resolveResourceName, parseStackConfig, type StackSpec } from "./stack-config.ts";
 
 const yaml = (s: string) => s;
 
@@ -288,4 +288,36 @@ stack:
   expect(spec.resources.web!.env_from![0]!.as).toBe("API_BASE");
   // an old CLI that doesn't know stack: sees nothing under app:/site:/database:
   expect(parseStackConfig("site:\n  name: foo\n")).toBeUndefined();
+});
+
+// (E3) env-aware materialized naming + env-name validation + placeholder-preserving sanitize.
+test("E3 resolveResourceName: named env → <stack>-<env>-<key> (single dash), overriding explicit name", () => {
+  const res = { type: "database" as const, name: "shared-pg" };
+  // default env honours the explicit name; a named env derives a collision-free <stack>-<env>-<key>
+  expect(resolveResourceName("shop", "db", res)).toBe("shared-pg");
+  expect(resolveResourceName("shop", "db", res, "")).toBe("shared-pg");
+  expect(resolveResourceName("shop", "db", { type: "database" }, "staging")).toBe("shop-staging-db");
+  expect(resolveResourceName("shop", "db", res, "prod")).toBe("shop-prod-db"); // explicit name NOT used (would collide)
+});
+
+test("E3 validateEnvName: accepts DNS labels, rejects 'default', '--', and bad shapes", () => {
+  expect(validateEnvName("staging")).toBeNull();
+  expect(validateEnvName("pr-42")).toBeNull();
+  expect(validateEnvName("default")).not.toBeNull(); // reserved: '' is the default env
+  expect(validateEnvName("sta--ging")).not.toBeNull(); // '--' reserved for previews
+  expect(validateEnvName("-lead")).not.toBeNull();
+  expect(validateEnvName("UPPER")).not.toBeNull();
+  expect(validateEnvName("")).not.toBeNull();
+});
+
+test("E3 sanitizeStackConfigPreservingVars: keeps ${var.…} in typed fields; placeholder-free is identical", () => {
+  // typed-field placeholder survives (the plain sanitizer would clamp storage to its default)
+  const preserved = sanitizeStackConfigPreservingVars({ name: "shop", resources: { db: { type: "database", storage: "${var.size}" } } });
+  expect(preserved!.resources.db!.storage).toBe("${var.size}");
+  // env-value placeholder survives (it always did — env maps keep any string)
+  const p2 = sanitizeStackConfigPreservingVars({ name: "shop", resources: { api: { type: "app", image: "x:1", env: { K: "${var.v}" } } } });
+  expect(p2!.resources.api!.env!.K).toBe("${var.v}");
+  // a placeholder-free spec is byte-identical to the plain sanitizer (fast path)
+  const plain = { name: "shop", resources: { db: { type: "database", storage: "512Mi" } } };
+  expect(JSON.stringify(sanitizeStackConfigPreservingVars(plain))).toBe(JSON.stringify(sanitizeStackConfig(plain)));
 });

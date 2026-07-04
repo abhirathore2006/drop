@@ -3,9 +3,9 @@
 // brief — this asserts on the always-rendered surfaces (header + resource legend, which carry the node
 // NAMES and detail links) and on the pending-changes overlay. The canvas's own logic is covered by the
 // isolated data-transform tests (lib/graph.test.ts) and node-body tests (components/StackNodeBody.test.tsx).
-import { setupDom } from "../test/setup.ts";
+import { setupDom, changeValue } from "../test/setup.ts";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { fireEvent, render, within } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ToastProvider } from "../components/Toast.tsx";
 import { makeQueryClient } from "../lib/query.ts";
@@ -50,10 +50,15 @@ const DRY_RUN_PLAN = {
   plan: [{ action: "create", key: "database", kind: "database", siteName: "shop-database", reason: "not present — will create" }],
 };
 
+// (E3) The environments list backing the env switcher: one named env ("staging") + the implicit default.
+const ENVIRONMENTS = { stack: "shop", default: { name: "default", resources: 3 }, environments: [{ name: "staging", variables: { REGION: "eu" }, resources: 3, createdBy: "a@x", createdAt: "2026-07-01T00:00:00Z" }] };
+
 let realFetch: typeof fetch;
 let graph: typeof GRAPH;
+let fetchCalls: { method: string; url: string; body?: string }[];
 beforeEach(() => {
   graph = structuredClone(GRAPH);
+  fetchCalls = [];
   // ReactFlow (if the lazy chunk resolves) reaches for ResizeObserver; stub it so it never throws loudly.
   (globalThis as any).ResizeObserver ??= class {
     observe() {}
@@ -61,9 +66,11 @@ beforeEach(() => {
     disconnect() {}
   };
   realFetch = globalThis.fetch;
-  globalThis.fetch = ((input: RequestInfo | URL) => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.pathname : new URL(input.url, "http://x").pathname;
-    const url = raw.split("?")[0]!; // strip the query so /…/up?dry_run=1 matches by path
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const full = typeof input === "string" ? input : input instanceof URL ? input.pathname + input.search : new URL(input.url, "http://x").pathname;
+    fetchCalls.push({ method: init?.method ?? "GET", url: full, body: init?.body as string | undefined });
+    const url = full.split("?")[0]!; // strip the query so /…/up?dry_run=1 matches by path
+    if (url.endsWith("/environments")) return Promise.resolve(json(ENVIRONMENTS)); // (E3) env list
     if (url.includes("/graph")) return Promise.resolve(json(graph));
     if (url.endsWith("/up")) return Promise.resolve(json(DRY_RUN_PLAN)); // dry-run + execute both hit /up
     if (url === "/v1/stacks/shop") return Promise.resolve(json(DETAIL));
@@ -109,6 +116,37 @@ describe("StackPage", () => {
     const drawer = r.container.querySelector(".pending-drawer") as HTMLElement;
     expect(drawer).toBeTruthy();
     expect(within(drawer).getByText(/not present — will create/)).toBeTruthy();
+  });
+});
+
+// (E3) env-switcher smoke: the switcher lists "default" + named envs; switching refetches the graph with
+// ?env=; the "+ env" button opens the create-env form and submitting POSTs to /environments.
+describe("StackPage env switcher (E3)", () => {
+  test("lists default + named envs; switching refetches the graph with ?env=", async () => {
+    const r = renderPage();
+    await r.findByText("shop"); // page loaded
+    const select = (await r.findByTestId("env-select")) as HTMLSelectElement;
+    // options: default + the mocked "staging"
+    const options = within(select).getAllByRole("option").map((o) => (o as HTMLOptionElement).value);
+    expect(options).toEqual(["default", "staging"]);
+    // switching to staging refetches the graph scoped to that env
+    fireEvent.change(select, { target: { value: "staging" } });
+    await new Promise((res) => setTimeout(res, 0));
+    expect(fetchCalls.some((c) => c.url.includes("/graph") && c.url.includes("env=staging"))).toBe(true);
+  });
+
+  test("the + env button opens the create form and submitting POSTs the new environment", async () => {
+    const r = renderPage();
+    await r.findByText("shop");
+    fireEvent.click(await r.findByTestId("env-new-btn"));
+    changeValue(await r.findByTestId("env-name-input"), "prod");
+    changeValue(r.getByTestId("env-vars-input"), "REGION=eu\nDB_SIZE=512Mi");
+    fireEvent.click(r.getByTestId("env-create-submit"));
+    await waitFor(() => expect(fetchCalls.find((c) => c.method === "POST" && c.url.endsWith("/environments"))).toBeTruthy());
+    const post = fetchCalls.find((c) => c.method === "POST" && c.url.endsWith("/environments"))!;
+    const body = JSON.parse(post.body!);
+    expect(body.env).toBe("prod");
+    expect(body.variables).toEqual({ REGION: "eu", DB_SIZE: "512Mi" });
   });
 });
 

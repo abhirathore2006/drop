@@ -169,3 +169,37 @@ export function substituteTemplate(
 
   return { spec, secretsToSet, missing, errors };
 }
+
+/** (E3) Every distinct `${var.KEY}` referenced anywhere in a spec (deep string scan). The `${stack}` token
+ *  is NOT a variable and is excluded. Used to synthesize env-variable declarations (each referenced key is
+ *  "required" for that env) so a missing env variable is reported as `missing`, not `unknown`. */
+export function extractVarKeys(spec: StackSpec): string[] {
+  const keys = new Set<string>();
+  const walk = (node: unknown): void => {
+    if (typeof node === "string") {
+      for (const m of node.matchAll(TOKEN_RE)) {
+        const tok = m[1]!;
+        if (tok.startsWith("var.")) keys.add(tok.slice(4));
+      }
+    } else if (Array.isArray(node)) {
+      for (const v of node) walk(v);
+    } else if (node && typeof node === "object") {
+      for (const v of Object.values(node as Record<string, unknown>)) walk(v);
+    }
+  };
+  walk(spec);
+  return [...keys];
+}
+
+/**
+ * (E3) Resolve a stack spec against an ENVIRONMENT's `{ key: value }` variable overlay: substitute every
+ * `${var.KEY}`/`${stack}`, treating each referenced variable as REQUIRED (a referenced token with no value
+ * → `missing`). Reuses `substituteTemplate` (the D1 unification point) with declarations synthesized from
+ * the spec's own placeholders — env variables carry no per-var declaration, so all are plain (non-secret).
+ * A placeholder-free spec resolves to itself (a no-op — the default env of a normal stack). `missing`
+ * non-empty → the caller should 400 with a clear "missing required variable" error.
+ */
+export function resolveEnvSpec(spec: StackSpec, values: Record<string, string>, stackName?: string): SubstituteResult {
+  const declarations: TemplateVariable[] = extractVarKeys(spec).map((key) => ({ key, required: true }));
+  return substituteTemplate(spec, declarations, values ?? {}, stackName ?? spec.name);
+}

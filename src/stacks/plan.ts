@@ -26,6 +26,7 @@ export interface PlanInput {
   mapping?: Record<string, string>; // resource_key -> site_name previously materialized (stack_resources)
   live?: Record<string, LivePresence>; // site_name -> what exists now (metastore)
   prune?: boolean; // affects only the DELETE steps' reason text (execution is the route's call)
+  env?: string; // (E3) '' = default env (`<stack>-<key>`); a named env materializes `<stack>-<env>-<key>`
 }
 
 /** Thrown when the desired spec's edges form a cycle (db→app→…→db) — no valid apply order exists. */
@@ -110,9 +111,10 @@ export function planStack(input: PlanInput): PlanStep[] {
   const prev = input.prevSpec ?? null;
   const mapping = input.mapping ?? {};
   const live = input.live ?? {};
+  const env = input.env ?? ""; // (E3) env-aware materialized naming (default '' keeps `<stack>-<key>`)
   const steps: PlanStep[] = [];
 
-  const nameOf = (key: string, res: StackResource) => mapping[key] ?? resolveResourceName(spec.name, key, res);
+  const nameOf = (key: string, res: StackResource) => mapping[key] ?? resolveResourceName(spec.name, key, res, env);
 
   for (const key of topoOrder(spec.resources)) {
     const res = spec.resources[key]!;
@@ -143,7 +145,7 @@ export function planStack(input: PlanInput): PlanStep[] {
     }
     for (const k of order) {
       const prevRes = prev?.resources[k];
-      const siteName = mapping[k] ?? (prev && prevRes ? resolveResourceName(prev.name, k, prevRes) : k);
+      const siteName = mapping[k] ?? (prev && prevRes ? resolveResourceName(prev.name, k, prevRes, env) : k);
       const kind: StackResourceKind = prevRes?.type ?? live[siteName]?.type ?? "app";
       const reason = input.prune
         ? "removed from spec — pruning"

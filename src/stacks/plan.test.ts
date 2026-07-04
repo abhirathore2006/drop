@@ -160,3 +160,34 @@ test("H3: a mutual app↔app reference is rejected as a cycle", () => {
   };
   expect(() => planStack({ spec: cyclic, prevSpec: null, mapping: {}, live: {} })).toThrow(StackCycleError);
 });
+
+// (E3) env-aware materialized naming: the default env keeps `<stack>-<key>`; a named env inserts the env
+// segment as a single dash — `<stack>-<env>-<key>` — for both fresh creates and previously-mapped rows.
+test("E3: named env materializes <stack>-<env>-<key> (single dash); default env unchanged", () => {
+  const fresh = planStack({ spec: shop, prevSpec: null, mapping: {}, live: {}, env: "staging" });
+  expect(fresh.map((s) => [s.action, s.key, s.siteName])).toEqual([
+    ["create", "db", "shop-staging-db"],
+    ["create", "api", "shop-staging-api"],
+    ["create", "web", "shop-staging-web"],
+  ]);
+  // the default env (env omitted / '') is byte-for-byte the pre-E3 naming
+  const def = planStack({ spec: shop, prevSpec: null, mapping: {}, live: {}, env: "" });
+  expect(def.map((s) => s.siteName)).toEqual(["shop-db", "shop-api", "shop-web"]);
+});
+
+test("E3: a named env's mapping override + removed-key delete both stay env-scoped", () => {
+  // db present+unchanged; api present but removed from the new spec → env-scoped delete name.
+  const specNoApi: StackSpec = { name: "shop", resources: { db: { type: "database", storage: "1Gi" } } };
+  const steps = planStack({
+    spec: specNoApi,
+    prevSpec: shop,
+    mapping: { db: "shop-staging-db", api: "shop-staging-api", web: "shop-staging-web" },
+    live: live(["shop-staging-db", "database"], ["shop-staging-api", "app"], ["shop-staging-web", "site"]),
+    env: "staging",
+    prune: true,
+  });
+  expect(steps.find((s) => s.key === "db")!.siteName).toBe("shop-staging-db");
+  const deletes = steps.filter((s) => s.action === "delete").map((s) => s.siteName);
+  expect(deletes).toContain("shop-staging-api");
+  expect(deletes).toContain("shop-staging-web");
+});
