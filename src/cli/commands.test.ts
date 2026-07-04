@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { buildProgram } from "./commands.ts";
+import { buildProgram, resolveSince } from "./commands.ts";
 import { VERSION } from "../version.ts";
 
 test("db is a command group with create + password subcommands (colon commands removed)", () => {
@@ -105,4 +105,19 @@ test("(L4) `config set` refuses credential-looking keys/values client-side (neve
   await expect(buildProgram().parseAsync(["node", "drop", "config", "set", "myapp", "BLOB=9aF3kQ2mZ7pL1xR8vT4wYbN6cD0eG5hJ7tWq"])).rejects.toThrow(/secret/i);
   // a malformed pair (no '=') is a clear error
   await expect(buildProgram().parseAsync(["node", "drop", "config", "set", "myapp", "novalue"])).rejects.toThrow(/KEY=value/);
+});
+
+test("(G4) `drop logs` carries the historical-search flags alongside the live -f follow", () => {
+  const p = buildProgram();
+  const logs = p.commands.find((c) => c.name() === "logs")!;
+  const longs = logs.options.map((o) => o.long);
+  for (const f of ["--since", "--until", "--grep", "--regex", "--ignore-case", "--follow", "--release"]) expect(longs).toContain(f);
+});
+
+test("(G4) resolveSince: a duration window is measured back from now; an ISO timestamp is absolute", () => {
+  const now = Date.parse("2026-07-04T12:00:00.000Z");
+  expect(resolveSince("2h", now)).toBe("2026-07-04T10:00:00.000Z");
+  expect(resolveSince("7d", now)).toBe("2026-06-27T12:00:00.000Z");
+  expect(resolveSince("2026-07-01T00:00:00.000Z", now)).toBe("2026-07-01T00:00:00.000Z");
+  expect(() => resolveSince("last tuesday", now)).toThrow(/invalid --since/);
 });

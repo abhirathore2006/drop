@@ -43,7 +43,7 @@
   <main class="content"><article>
 <p class="crumbs">Reference</p>
 <h1>Observability</h1>
-<p class="lead">Two signals, both produced entirely <strong>inside</strong> the network — no external prober, no third-party SaaS. <strong>Request metrics</strong> (G2): the edge meters every response it serves or proxies and rolls it up per minute. <strong>Uptime checks</strong> (G2b): the API polls each workload's own URL on an interval and records whether it answered. Everything lands in Postgres next to the rest of Drop's state, is readable over the same authenticated API, and is retained for 30 days.</p>
+<p class="lead">Two signals, both produced entirely <strong>inside</strong> the network — no external prober, no third-party SaaS. <strong>Request metrics</strong> (G2): the edge meters every response it serves or proxies and rolls it up per minute. <strong>Uptime checks</strong> (G2b): the API polls each workload's own URL on an interval and records whether it answered. Everything lands in Postgres next to the rest of Drop's state, is readable over the same authenticated API, and is retained for 30 days. A third signal — <a href="#logs"><strong>retained pod logs</strong></a> (G4) — tails running workloads into gzipped S3 objects for time-range, grep-grade <strong>search</strong> long after the pod is gone.</p>
 
 <h2 id="metrics">Request metrics</h2>
 <p>Both edges — the HTTP edge and the L4 (<a href="tcp-access.html">TCP</a>) edge — accumulate per-host counters <strong>in-process</strong> and flush them every <strong>~15&nbsp;seconds</strong> into a <code>traffic_minutes</code> rollup: one row per host per minute. Writing the rollup is the only metastore <em>write</em> the edge performs (it stays a migrations reader); multiple edge replicas UPSERT the same <code>(host, minute)</code> row additively.</p>
@@ -155,6 +155,33 @@ drop org webhook set https://hooks.slack.com/… --secret s3cr3t
 drop org webhook rm</code></pre>
 <p class="lead" style="font-size:15px">MCP has no events surface — alerting is a human/ops concern, not an agent one.</p>
 
+<h2 id="logs">Log retention &amp; search</h2>
+<p>Live logs (<code>drop logs -f</code>) die with the pod — a crash post-mortem needs history. Full Loki is against this platform's weight class, so Drop takes the <strong>middle path</strong>: the API tails each <strong>running</strong> workload's pod logs (one follow stream per workload, resumable by <code>sinceTime</code>), batches the lines, and writes them as <strong>gzipped NDJSON objects in the S3 the platform already owns</strong> — one object per <code>(site, hour)</code> at <code>logs/&lt;site&gt;/&lt;hour&gt;.ndjson.gz</code> — with one <code>log_objects</code> <strong>index row per object</strong>. No log database, no per-line index.</p>
+<p>Each NDJSON line is a structured record:</p>
+<pre><code>{ <span class="tok-k">"ts"</span>: <span class="tok-s">"2026-07-04T10:15:03.221Z"</span>, <span class="tok-k">"site"</span>: <span class="tok-s">"api"</span>, <span class="tok-k">"pod"</span>: <span class="tok-s">"api"</span>, <span class="tok-k">"stream"</span>: <span class="tok-s">"stdout"</span>, <span class="tok-k">"line"</span>: <span class="tok-s">"GET /health 200"</span> }</code></pre>
+<p>Collection is <strong>bounded</strong> on three axes so it never becomes a fleet-wide firehose: only <strong>running, opted-in</strong> workloads are tailed; a <strong>cap on concurrent tails</strong> (<code>DROP_LOG_MAX_CONCURRENT_TAILS</code>, default 50); and a per-hour in-memory line cap that drops the oldest under flood. The posture is <strong>at-least-once</strong>: a collector restart resumes a tail from the last line's timestamp so it doesn't re-ingest the whole backlog, but a few lines either side of the boundary may duplicate — grep-grade history doesn't need dedup.</p>
+
+<h3 id="logs-search">Search (grep-grade, honestly)</h3>
+<p>Search is <strong>time-range + text-match</strong>, not full-text. The range narrows to the set of objects via the index; the text match then <strong>streams through those objects server-side</strong> — a plain substring test (optionally case-insensitive) or an optional regex. There is no tokenizer and no inverted index: it is <code>grep</code> over the retained NDJSON, and the API says so. Objects are read <strong>newest-first</strong> up to a cap (default 1000 lines, a <code>truncated</code> flag when hit), so a wide range returns the freshest matches without reading — or buffering — the whole history.</p>
+<pre><code><span class="tok-c"># API (same `logs` capability as the live tail — see the warning below)</span>
+GET /v1/sites/&lt;name&gt;/logs/search?from=&lt;iso|epoch&gt;&amp;to=&lt;iso|epoch&gt;&amp;q=&lt;pattern&gt;[&amp;regex=1][&amp;i=1][&amp;limit=1000]
+
+<span class="tok-c"># CLI — a window (2h/24h/7d) or an ISO timestamp; distinct from the live `-f` follow</span>
+drop logs api --since 2h --grep <span class="tok-s">"ERROR"</span>
+drop logs api --since 2026-07-04T00:00:00Z --until 2026-07-04T06:00:00Z --grep <span class="tok-s">"timeout"</span> -i</code></pre>
+<p>In the <strong>console</strong>, the workload's logs panel has a <strong>history</strong> toggle beside the live tail: a quick 1h/24h/7d window + a search box render matching lines into the same log view. The live tail is untouched.</p>
+
+<div class="note"><span class="lbl">Secrets warning — read this</span><p>Retained logs can contain <strong>env-injected secret values</strong> — and persisting them makes that leak <strong>durable</strong>, not just momentary. Search is therefore behind the same <code>logs</code> capability as the live tail (strictly <strong>above viewer</strong> — a viewer is metadata-only). If an app logs its secrets, opt it out (below). <strong>Databases are EXCLUDED by default</strong> (Postgres logs are verbose and can echo query text / bound parameter values) — opt in explicitly.</p></div>
+
+<table class="tbl">
+<thead><tr><th>drop.yaml</th><th>Default</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>app.log_retention: false</code></td><td>apps/sites <strong>on</strong></td><td>Opt this app OUT — its pod logs are never retained (still available live via <code>-f</code>).</td></tr>
+<tr><td><code>database.log_retention: true</code></td><td>databases <strong>off</strong></td><td>Opt this database IN — otherwise a DB's verbose logs are not collected.</td></tr>
+</tbody>
+</table>
+<p>Retention defaults to <strong>7 days</strong> and is <strong>org-overridable</strong> via the quota table's <code>log_retention_days</code> key (<code>0</code> disables retention). The housekeeping sweep resolves each site's window from its owning org, then deletes each expired <strong>S3 object first, then its index row</strong> — orphan-safe: a crash between the two just re-issues the idempotent object delete on the next sweep, and no bytes are ever stranded without an index to find them.</p>
+
 <h2 id="config">Retention &amp; config</h2>
 <p><code>traffic_minutes</code>, <code>uptime_checks</code>, and the <code>events</code> feed are all retained <strong>30 days</strong> and swept in the API's housekeeping loop (a range delete over the <code>minute</code>/<code>created_at</code> index, not a table scan). Events are cheap and valuable for a post-mortem, so they ride the same window; an actively-flapping incident keeps a fresh timestamp (dedup bumps it), so only truly-stale rows are swept.</p>
 <table class="tbl">
@@ -164,6 +191,10 @@ drop org webhook rm</code></pre>
 <tr><td><code>DROP_UPTIME_INTERVAL_MS</code></td><td><code>60000</code></td><td>How often the API's uptime poller sweeps.</td></tr>
 <tr><td><code>DROP_EDGE_INTERNAL_URL</code></td><td><em>(unset)</em></td><td>The internal edge origin the poller GETs (Host-routed), e.g. <code>http://drop-edge.drop-system.svc</code>. <strong>Unset → HTTP uptime probes are disabled</strong> (with a startup warning); database TCP probes still run.</td></tr>
 <tr><td><code>DROP_METRICS_RETENTION_DAYS</code></td><td><code>30</code></td><td>Retention window for both rollup tables <strong>and</strong> the <a href="#events">events</a> feed.</td></tr>
+<tr><td><code>DROP_LOGS_COLLECT</code></td><td><code>1</code></td><td>Master enable for the <a href="#logs">log collector</a> (needs compute/kube). Set <code>0</code> to turn it off.</td></tr>
+<tr><td><code>DROP_LOG_RETENTION_DAYS</code></td><td><code>7</code></td><td>Default retention for retained log objects — org-overridable via the <code>log_retention_days</code> quota key.</td></tr>
+<tr><td><code>DROP_LOG_MAX_CONCURRENT_TAILS</code></td><td><code>50</code></td><td>Cap on concurrent pod-log follow streams — the collector's fan-out bound.</td></tr>
+<tr><td><code>DROP_LOG_FLUSH_INTERVAL_MS</code></td><td><code>10000</code></td><td>How often buffered lines are flushed to S3 objects.</td></tr>
 </tbody>
 </table>
 <div class="note"><span class="lbl">On crash loops</span><p>A workload's current <strong>restart count</strong> shows live on the app-status and stack-graph endpoints (straight from the pods). Persistent crash-loops are now also detected by the housekeeping sweep and surfaced as <a href="#events"><code>crashloop</code> events</a> — one open incident that resolves when the app recovers — so you get a feed entry + webhook, not just a live number.</p></div>

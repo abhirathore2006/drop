@@ -28,7 +28,19 @@ test("validateQuota: per-key rules; unknown key rejected", () => {
   expect(validateQuota("storage_budget_bytes", "10Gi")).toBeNull();
   expect(validateQuota("storage_budget_bytes", "99")).toBeNull();
   expect(validateQuota("storage_budget_bytes", "big")).toMatch(/byte count/);
+  expect(validateQuota("log_retention_days", "14")).toBeNull();
+  expect(validateQuota("log_retention_days", "0")).toBeNull(); // 0 = disable retention
+  expect(validateQuota("log_retention_days", "-1")).toMatch(/non-negative integer/);
+  expect(validateQuota("log_retention_days", "2 weeks")).toMatch(/non-negative integer/);
   expect(validateQuota("nope", "1")).toMatch(/unknown quota key/);
+});
+
+test("resolvedLogRetentionDays: override wins, else the platform default", async () => {
+  const { db, quotas, orgId } = await fix();
+  expect(await quotas.resolvedLogRetentionDays(orgId, 7)).toBe(7); // default until set
+  await quotas.set(orgId, "log_retention_days", "30", "alice@x.com");
+  expect(await quotas.resolvedLogRetentionDays(orgId, 7)).toBe(30);
+  await db.destroy();
 });
 
 test("resolvers fall back to the platform default until an override is set", async () => {

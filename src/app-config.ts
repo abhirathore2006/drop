@@ -92,6 +92,11 @@ export interface AppConfig {
   // scope v1) — enforced in assertProcesses, not here. No snapshots/backups v1: steer real persistence
   // needs at I1 buckets or the managed DB (this is the escape hatch, not the path).
   stateful?: AppStateful;
+  // (G4) Searchable-log retention opt-OUT. Apps/sites are collected to S3 by default; set
+  // `log_retention: false` to keep this app's pod logs OUT of the retained store (they still stream live
+  // via `drop logs -f`). WARNING: retained logs can contain env-injected SECRET VALUES — persisting them
+  // makes that leak durable, so an app that logs secrets should opt out. Omitted → default on.
+  logRetention?: boolean;
 }
 export interface AppStateful {
   volume: string; // PVC size, a k8s binary-SI quantity (e.g. "2Gi"); clamped to [64Mi,10Gi] here — see
@@ -429,6 +434,12 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
   // deploy via assertProcesses/expandProcesses, not here — sanitizing is purely syntactic.
   const stateful = sanitizeStateful(raw.stateful);
   if (stateful) cfg.stateful = stateful;
+
+  // (G4) `log_retention` (drop.yaml) / `logRetention` (round-tripped) → the searchable-log opt-out. Only
+  // a boolean is meaningful; default-on for apps means we only store an EXPLICIT false (opt-out). Kept
+  // additive — a harmless no-op when the log collector isn't running.
+  const logRetention = raw.log_retention ?? raw.logRetention;
+  if (typeof logRetention === "boolean") cfg.logRetention = logRetention;
 
   return cfg;
 }

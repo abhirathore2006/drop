@@ -137,11 +137,27 @@ export interface StacksTable {
   updated_at: Ts;
 }
 
-/** Maps a stack resource KEY to the site name it materialized as (`<stack>-<key>` or an override). */
+/** Maps a stack resource KEY to the site name it materialized as (`<stack>-<key>` for the default env,
+ *  `<stack>-<env>-<key>` for a named env — single-dash; `--` is reserved for previews). (E3) `env` is the
+ *  environment name, '' for the unnamed DEFAULT env that exists for every stack (zero migration for
+ *  existing stacks). PK is (stack_id, env, resource_key) so each env keeps its own key→site_name map. */
 export interface StackResourcesTable {
   stack_id: string;
+  env: ColumnType<string, string | undefined, string>; // '' = the unnamed default env
   resource_key: string;
   site_name: string;
+}
+
+/** (E3) A named, DURABLE instantiation of a stack spec — `staging`, `prod`, … — with its own variable
+ *  overlay (`${var.x}` substituted at up-time) and its own resource namespace (`<stack>-<name>-<key>`).
+ *  The DEFAULT env (name '') is implicit and has NO row here (it existed before E3). PK (stack_id, name);
+ *  cascades with the stack. `variables` is a flat `{ key: value }` map of the env's substitution values. */
+export interface EnvironmentsTable {
+  stack_id: string;
+  name: string;
+  variables: ColumnType<Record<string, string>, string, string>; // jsonb; JSON.stringify on write, parse on read
+  created_by: string;
+  created_at: Generated<Ts>;
 }
 
 /** Per-org quota OVERRIDES (Future.md item 10). One row per (org, key); the value is stored as text
@@ -336,6 +352,22 @@ export interface AppConfigsTable {
   updated_at: Generated<Ts>;
 }
 
+/** (G4) One retained-log object's index row. The collector batches each RUNNING workload's pod logs into
+ *  a gzipped NDJSON object per (site, hour) in S3 (`logs/<site>/<hour>.ndjson.gz`) and records ONE row per
+ *  object here. PK (site_name, hour) — a flush REWRITES an hour's object with its full accumulated set, so
+ *  the row upserts (lines/bytes reflect the object as it now stands). `site_name` is NOT FK-bound (like
+ *  `traffic_minutes`): a deleted site's rows survive so the retention sweep can still find + delete the S3
+ *  bytes (S3-delete-then-row, orphan-safe). Default 7d retention, org-overridable (`log_retention_days`),
+ *  swept in housekeeping. `hour` is indexed for the time-range search + the retention range delete. */
+export interface LogObjectsTable {
+  site_name: string;
+  hour: ColumnType<Date, Date | string, Date | string>;
+  key: string; // the S3 object key (logs/<site>/<hour>.ndjson.gz)
+  lines: number; // line count in the object (as last flushed)
+  bytes: number; // gzipped object size in bytes
+  created_at: Generated<Ts>;
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -349,6 +381,7 @@ export interface Database {
   locks: LocksTable;
   stacks: StacksTable;
   stack_resources: StackResourcesTable;
+  environments: EnvironmentsTable;
   org_quotas: OrgQuotasTable;
   tcp_endpoints: TcpEndpointsTable;
   service_tokens: ServiceTokensTable;
@@ -361,4 +394,5 @@ export interface Database {
   events: EventsTable;
   event_webhooks: EventWebhooksTable;
   app_configs: AppConfigsTable;
+  log_objects: LogObjectsTable;
 }

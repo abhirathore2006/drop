@@ -29,13 +29,13 @@ import { sanitizeCacheConfig, validateCacheMemory, cacheMemoryToBytes, type Cach
 import type { BucketStore } from "../buckets/types.ts";
 import { makeBucketStore } from "../buckets/factory.ts";
 import { QuotaStore, validateQuota, QUOTA_KEYS } from "../quotas/store.ts";
-import { sanitizeStackConfig, validateStackEdges, resolveResourceName, type StackSpec, type StackResource, type StackResourceKind } from "../stack-config.ts";
+import { sanitizeStackConfig, sanitizeStackConfigPreservingVars, validateStackEdges, validateEnvName, resolveResourceName, type StackSpec, type StackResource, type StackResourceKind } from "../stack-config.ts";
 import { planStack, StackCycleError, type LivePresence, type PlanStep } from "../stacks/plan.ts";
 import { diffStack, mergeUpgrade, type Resolution } from "../stacks/diff.ts";
-import { StackStore, type StackRow } from "../stacks/store.ts";
+import { StackStore, EnvironmentStore, type StackRow } from "../stacks/store.ts";
 import { TemplateStore, validateTemplateSlug } from "../templates/store.ts";
 import type { TemplateVisibility } from "../db/schema.ts";
-import { substituteTemplate, sanitizeVariables } from "../templates/vars.ts";
+import { substituteTemplate, sanitizeVariables, resolveEnvSpec, validateVarKey } from "../templates/vars.ts";
 import { stripStackSpec } from "../templates/strip.ts";
 import { appManifests, releaseJobManifest, tenantManifests, appUseEnvName, appUseUrl, type ExposedWorkload } from "../kube/manifests.ts";
 import { TcpEndpointStore, PortPoolExhaustedError, type TcpEndpoint } from "../edge-tcp/store.ts";
@@ -61,6 +61,7 @@ import { aggregateSeries, parseRange, rangeWindowMs, summarizeUptime, formatProm
 import type { AuditStore, AuditEntry } from "../audit/store.ts";
 import { EventStore, type EmitInput } from "../events/store.ts";
 import { AppConfigStore, ConfigValidationError } from "../appconfig/store.ts";
+import { searchLogObjects, makeMatcher, parseTs } from "../logs/search.ts";
 
 export interface Deps {
   cfg: Config;
@@ -78,6 +79,7 @@ export interface Deps {
   quotas?: QuotaStore; // (item 10) per-org quota overrides; defaults over `db`
   locks?: LockStore; // lease-based advisory locks (serialize deploy/release per app); defaults over `db`
   stacks?: StackStore; // stack metadata + resource mapping (B2); defaults over `db`
+  envs?: EnvironmentStore; // (E3) per-stack environments (named variable overlays); defaults over `db`
   templates?: TemplateStore; // (D1) template registry (templates + template_versions); defaults over `db`
   tcp?: TcpEndpointStore; // (A2b) TCP exposure registry (tcp_endpoints); defaults over `db`
   tokens?: ServiceTokenStore; // (J1) service accounts / scoped CI tokens; defaults over `db`
@@ -109,6 +111,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const now = d.now ?? (() => new Date());
   const locks = d.locks ?? new LockStore(d.db); // serialize deploy/release per app
   const stacks = d.stacks ?? new StackStore(d.db); // stack metadata + resource mapping
+  const envs = d.envs ?? new EnvironmentStore(d.db); // (E3) per-stack environments (named variable overlays)
   const templates = d.templates ?? new TemplateStore(d.db); // (D1) template registry
   const buckets = d.bucket ?? makeBucketStore(d.cfg); // (I1) tenant object storage (floci-prefix locally)
   const quotas = d.quotas ?? new QuotaStore(d.db); // (item 10) per-org quota overrides
@@ -2736,6 +2739,39 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return c.json({ logs });
   });
 
+  // ---- (G4) historical log search over the retained S3 NDJSON objects ----
+  // Same `logs` gate as the live tail: retained logs can contain env-injected SECRET VALUES, and
+  // persisting them makes that leak DURABLE — so search is strictly above viewer, identical to
+  // GET .../logs. The time range narrows to objects via the `log_objects` index; the text match then
+  // streams through those objects server-side (grep-grade substring/regex — NOT full-text). Results are
+  // capped (default 1000, `truncated` flag) and objects are read NEWEST-FIRST so a wide range returns the
+  // freshest matches without reading (or buffering) the whole history.
+  app.get("/v1/sites/:name/logs/search", async (c) => {
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    // Identical gate to live logs — logs may leak env-injected secrets (viewer is metadata-only).
+    if (!can(await actorFor(c.get("identity"), site), "logs")) return c.json({ error: "not permitted" }, 403);
+    const toMs = parseTs(c.req.query("to")) ?? now().getTime();
+    const fromMs = parseTs(c.req.query("from")) ?? toMs - 24 * 60 * 60 * 1000; // default window: last 24h
+    if (fromMs > toMs) return c.json({ error: "from must be <= to" }, 400);
+    const q = c.req.query("q") ?? "";
+    const regex = c.req.query("regex") === "1" || c.req.query("regex") === "true";
+    const ignoreCase = c.req.query("i") === "1" || c.req.query("ignore_case") === "1";
+    const limit = Math.min(Math.max(Number(c.req.query("limit") ?? "1000") || 1000, 1), 5000);
+    let match: (line: string) => boolean;
+    try {
+      match = makeMatcher(q, { regex, ignoreCase });
+    } catch (e) {
+      return c.json({ error: `invalid regex: ${(e as Error).message}` }, 400);
+    }
+    const from = new Date(fromMs);
+    const to = new Date(toMs);
+    const objects = await d.meta.listLogObjectsInRange(name, from, to);
+    const result = await searchLogObjects({ blob: d.blob, objects, from, to, match, limit });
+    return c.json(result);
+  });
+
   // ---- per-process status (drop ps): aggregate the web + worker Deployments for an app ----
   app.get("/v1/apps/:name/processes", async (c) => {
     const email = c.get("identity").email;
@@ -3222,9 +3258,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // Content is CLI-provided: an app's image (built + sent as `resolved`) and a site's bytes (published
   // to the created row) come from the client — the server owns EXISTENCE + CONFIG only.
 
-  // The materialized site name for a resource KEY (mapping override wins, else `<stack>-<key>`).
-  const siteNameForKey = (spec: StackSpec, mapping: Record<string, string>, key: string): string =>
-    mapping[key] ?? resolveResourceName(spec.name, key, spec.resources[key]!);
+  // (E3) Normalize an `?env=` query param → the stored env name. Absent / "" / "default" all mean the
+  // unnamed DEFAULT env (''); any other value is a named env (its shape is validated at env-create time).
+  const normalizeEnvParam = (raw: string | undefined): string => {
+    const v = (raw ?? "").trim();
+    return v === "" || v === "default" ? "" : v;
+  };
+
+  // The materialized site name for a resource KEY (mapping override wins, else `<stack>-<key>` for the
+  // default env / `<stack>-<env>-<key>` for a named env — E3). `env` defaults to '' (the default env).
+  const siteNameForKey = (spec: StackSpec, mapping: Record<string, string>, key: string, env = ""): string =>
+    mapping[key] ?? resolveResourceName(spec.name, key, spec.resources[key]!, env);
 
   // Claim the site row for a resource if it doesn't exist yet (apps/sites/databases share the name
   // namespace). ensureUser must have run first (owner membership FKs to users).
@@ -3285,8 +3329,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // (K1) Create/update an auth resource. Composes the SAME building blocks as POST /v1/auths/:name via
   // provisionAuth. The bound DB is the auth resource's `db:` KEY resolved to its site name (validated by
   // validateStackEdges as a same-stack database). JWT secret generated only on first create.
-  const applyAuthResource = async (spec: StackSpec, mapping: Record<string, string>, res: StackResource, siteName: string, ns: string, isCreate: boolean): Promise<void> => {
-    const db = siteNameForKey(spec, mapping, res.db!); // validateStackEdges guarantees res.db exists + is a database
+  const applyAuthResource = async (spec: StackSpec, mapping: Record<string, string>, res: StackResource, siteName: string, ns: string, isCreate: boolean, env = ""): Promise<void> => {
+    const db = siteNameForKey(spec, mapping, res.db!, env); // validateStackEdges guarantees res.db exists + is a database
     const cfg = sanitizeAuthConfig({ providers: res.providers, redirect_urls: res.redirect_urls, jwt_ttl: res.jwt_ttl, signup: res.signup, site_url: res.site_url, rbac: res.rbac })!;
     await ensureTenant(ns);
     const jwtSecret = isCreate ? generateJwtSecret() : (await d.kube!.readAuthJwtSecret(ns, siteName)) == null ? generateJwtSecret() : undefined;
@@ -3296,27 +3340,28 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // Create/update an app resource from a resolved image. Composes the SAME building blocks as
   // POST /v1/apps/:name (manifests + apply + secret binding). The release phase is intentionally NOT
   // run in the stack path v1 (migrations stay on `drop deploy`); noted as a deliberate deviation.
-  const applyAppResource = async (spec: StackSpec, mapping: Record<string, string>, res: StackResource, site: Site, image: string): Promise<void> => {
-    // Resolve `uses` edges: each references a resource KEY in this stack → its materialized site name.
+  const applyAppResource = async (spec: StackSpec, mapping: Record<string, string>, res: StackResource, site: Site, image: string, env = ""): Promise<void> => {
+    // Resolve `uses` edges: each references a resource KEY in this stack → its materialized site name
+    // (env-scoped — a named env's siblings resolve to `<stack>-<env>-<key>`, so an app binds to ITS env's DB).
     // DB edges wire the manifest (envFrom); bucket edges (I1) inject S3_* creds via the secret path,
     // labelled by the stack RESOURCE KEY so multiple buckets get distinct `<KEY>_`-prefixed env vars.
     // DB edges carry `via` (I3 pooler) through so the manifest's PGHOST override applies in stacks too.
     const uses = (res.uses ?? [])
       .filter((u) => u.database)
-      .map((u) => ({ database: siteNameForKey(spec, mapping, u.database!), ...(u.via ? { via: u.via } : {}) }));
+      .map((u) => ({ database: siteNameForKey(spec, mapping, u.database!, env), ...(u.via ? { via: u.via } : {}) }));
     // (I2) cache edges → mapped `{ cache: <site> }` uses so the app declares the dependency + REDIS_URL binds.
-    const cacheUses = (res.uses ?? []).filter((u) => u.cache).map((u) => ({ cache: siteNameForKey(spec, mapping, u.cache!) }));
+    const cacheUses = (res.uses ?? []).filter((u) => u.cache).map((u) => ({ cache: siteNameForKey(spec, mapping, u.cache!, env) }));
     // (K1) auth edges → mapped `{ auth: <site> }` uses so the app declares the dependency + AUTH_* bind.
-    const authUses = (res.uses ?? []).filter((u) => u.auth).map((u) => ({ auth: siteNameForKey(spec, mapping, u.auth!) }));
+    const authUses = (res.uses ?? []).filter((u) => u.auth).map((u) => ({ auth: siteNameForKey(spec, mapping, u.auth!, env) }));
     const bucketEntries = (res.uses ?? [])
       .filter((u) => u.bucket)
-      .map((u) => ({ bucketName: siteNameForKey(spec, mapping, u.bucket!), envLabel: u.bucket! }));
+      .map((u) => ({ bucketName: siteNameForKey(spec, mapping, u.bucket!, env), envLabel: u.bucket! }));
     const cacheEntries = (res.uses ?? [])
       .filter((u) => u.cache)
-      .map((u) => ({ cacheName: siteNameForKey(spec, mapping, u.cache!), envLabel: u.cache! }));
+      .map((u) => ({ cacheName: siteNameForKey(spec, mapping, u.cache!, env), envLabel: u.cache! }));
     const authEntries = (res.uses ?? [])
       .filter((u) => u.auth)
-      .map((u) => ({ authName: siteNameForKey(spec, mapping, u.auth!), envLabel: u.auth! }));
+      .map((u) => ({ authName: siteNameForKey(spec, mapping, u.auth!, env), envLabel: u.auth! }));
     const allUses = [...uses, ...cacheUses, ...authUses];
     const appCfg: AppConfig = {
       image,
@@ -3347,7 +3392,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const appUrlEnv = (res.uses ?? [])
       .filter((u) => u.app)
       .map((u) => {
-        const targetSite = siteNameForKey(spec, mapping, u.app!);
+        const targetSite = siteNameForKey(spec, mapping, u.app!, env);
         return {
           name: appUseEnvName(u.app!),
           value: appUseUrl({ targetName: targetSite, namespace: ns, publicHost: `${targetSite}.${d.cfg.baseDomain}`, minReplicas: spec.resources[u.app!]?.scale?.min ?? 0 }),
@@ -3445,22 +3490,42 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       provenance?: { fromTemplate: string; fromTemplateVersion: string };
       auditAction?: string;
       auditDetail?: Record<string, unknown>;
+      // (E3) The target ENVIRONMENT ('' = the unnamed default env) + its variable overlay. Named envs
+      // materialize resources as `<stack>-<env>-<key>`, keep a private (env, key)→site_name map, and do
+      // NOT touch the shared `stacks.spec`/spec_version (only the default env authors the spec).
+      env?: string;
+      variables?: Record<string, string>;
     },
   ): Promise<{ status: number; body: Record<string, unknown> }> => {
     const email = identity.email;
-    const { name, org, spec, prune, dryRun } = args;
+    const { name, org, prune, dryRun } = args;
+    const authoredSpec = args.spec; // the AS-AUTHORED spec (may carry ${var.…}); stored on the default env
+    const env = args.env ?? "";
+    const variables = args.variables ?? {};
     const resolved = args.resolved;
 
-    if (spec.name !== name) return { status: 400, body: { error: `stack name "${spec.name}" does not match target "${name}"` } };
+    if (authoredSpec.name !== name) return { status: 400, body: { error: `stack name "${authoredSpec.name}" does not match target "${name}"` } };
+
+    // (E3) Resolve the env's variable overlay: substitute ${var.…}/${stack} → a CONCRETE spec (a no-op for
+    // a placeholder-free default-env spec). A referenced-but-unprovided variable is a clean 400.
+    const sub = resolveEnvSpec(authoredSpec, variables, name);
+    if (sub.missing.length) return { status: 400, body: { error: `missing required variable(s) for env "${env || "default"}": ${sub.missing.join(", ")}` } };
+    if (sub.errors.length) return { status: 400, body: { error: sub.errors.join("; ") } };
+    const spec = sub.spec; // the CONCRETE, reconciled spec (env variables applied)
+
     const edgeErr = validateStackEdges(spec);
     if (edgeErr) return { status: 400, body: { error: edgeErr } };
 
     const existing = await stacks.getByName(org.id, name);
-    const mapping = existing ? await stacks.mapping(existing.id) : {};
+    if (!existing && env) return { status: 404, body: { error: `no such stack: ${name} — create it (and its default env) with \`drop up\` before reconciling env "${env}"` } };
+    const mapping = existing ? await stacks.mapping(existing.id, env) : {};
+    // The last-applied CONCRETE spec for THIS env (the shared authored spec re-resolved with this env's vars)
+    // → correct noop detection: an unchanged spec+vars re-resolves identically.
+    const prevConcrete = existing ? resolveEnvSpec(existing.spec, variables, name).spec : null;
 
     // Each resource materializes as a valid site name — surface an over-long/invalid name as a clean 400.
     for (const [key] of Object.entries(spec.resources)) {
-      const sn = siteNameForKey(spec, mapping, key);
+      const sn = siteNameForKey(spec, mapping, key, env);
       const e = validateName(sn);
       if (e) return { status: 400, body: { error: `resource "${key}" resolves to an invalid site name "${sn}": ${e}` } };
     }
@@ -3472,7 +3537,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
     // Live existence + cross-org conflict check over every candidate site name (spec + removed keys).
     const candidateNames = new Set<string>();
-    for (const key of Object.keys(spec.resources)) candidateNames.add(siteNameForKey(spec, mapping, key));
+    for (const key of Object.keys(spec.resources)) candidateNames.add(siteNameForKey(spec, mapping, key, env));
     for (const sn of Object.values(mapping)) candidateNames.add(sn);
     const live: Record<string, LivePresence> = {};
     for (const sn of candidateNames) {
@@ -3484,7 +3549,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
     // Per-resource authz on resources that ALREADY exist (new resources are covered by org create-rights).
     for (const [key, res] of Object.entries(spec.resources)) {
-      const sn = siteNameForKey(spec, mapping, key);
+      const sn = siteNameForKey(spec, mapping, key, env);
       if (!live[sn]) continue;
       const s = (await d.meta.getSitePlain(sn))!;
       if (!can(await actorFor(identity, s), actionForKind(res.type))) return { status: 403, body: { error: `not permitted to reconcile "${sn}" (${res.type})` } };
@@ -3493,7 +3558,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // Plan (pure). A dependency cycle has no apply order → 400.
     let plan: PlanStep[];
     try {
-      plan = planStack({ spec, prevSpec: existing?.spec ?? null, mapping, live, prune });
+      plan = planStack({ spec, prevSpec: prevConcrete, mapping, live, prune, env });
     } catch (e) {
       if (e instanceof StackCycleError) return { status: 400, body: { error: e.message } };
       throw e;
@@ -3503,7 +3568,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const outputs: Record<string, { url: string }> = {};
     const needs: { key: string; kind: "app-image" | "site-publish"; siteName: string }[] = [];
     for (const [key, res] of Object.entries(spec.resources)) {
-      const sn = siteNameForKey(spec, mapping, key);
+      const sn = siteNameForKey(spec, mapping, key, env);
       if (res.type === "app") {
         outputs[key] = { url: siteUrl(sn) };
         const image = resolved?.[key]?.image ?? res.image;
@@ -3540,9 +3605,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     let outcome: { applied: PlanStep[]; failure: { step: PlanStep; error: string } | null; newVersion: number };
     try {
       outcome = await locks.withLock(`stack:${stackId}`, STACK_LOCK_TTL_MS, async () => {
+        // The stack row stores the AS-AUTHORED spec (placeholders intact) so every env re-resolves it with
+        // its own variables. Only the default env creates/authors it (a named env requires it to exist).
         const stackRow =
           existing ??
-          (await stacks.create({ name, orgId: org.id, spec, createdBy: email, fromTemplate: args.provenance?.fromTemplate ?? null, fromTemplateVersion: args.provenance?.fromTemplateVersion ?? null }));
+          (await stacks.create({ name, orgId: org.id, spec: authoredSpec, createdBy: email, fromTemplate: args.provenance?.fromTemplate ?? null, fromTemplateVersion: args.provenance?.fromTemplateVersion ?? null }));
         const applied: PlanStep[] = [];
         let failure: { step: PlanStep; error: string } | null = null;
         for (const step of plan) {
@@ -3555,7 +3622,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
               if (!prune) continue; // flagged only — not executed
               const s = await d.meta.getSitePlain(step.siteName);
               if (s) await tearDownResource(s);
-              await stacks.deleteResource(stackRow.id, step.key);
+              await stacks.deleteResource(stackRow.id, env, step.key);
               applied.push(step);
               continue;
             }
@@ -3567,26 +3634,27 @@ export function createApp(d: Deps): Hono<AuthEnv> {
             } else if (res.type === "cache") {
               await applyCacheResource(res, step.siteName, site.namespace, step.action === "create"); // (I2)
             } else if (res.type === "auth") {
-              await applyAuthResource(spec, mapping, res, step.siteName, site.namespace, step.action === "create"); // (K1)
+              await applyAuthResource(spec, mapping, res, step.siteName, site.namespace, step.action === "create", env); // (K1)
             } else if (res.type === "app") {
               const image = resolved?.[step.key]?.image ?? res.image;
-              if (image) await applyAppResource(spec, mapping, res, site, image); // else: row claimed, awaits CLI image (in `needs`)
+              if (image) await applyAppResource(spec, mapping, res, site, image, env); // else: row claimed, awaits CLI image (in `needs`)
             } else if (res.type === "bucket") {
               await buckets.provision({ name: step.siteName, namespace: site.namespace, org: org.id }); // (I1) idempotent — ensures the prefix/creds exist for binders
             } // site: the row is claimed; bytes come from the CLI publish (in `needs`)
-            await stacks.setResource(stackRow.id, step.key, step.siteName);
+            await stacks.setResource(stackRow.id, env, step.key, step.siteName);
             applied.push(step);
           } catch (e) {
             failure = { step, error: (e as Error).message };
             break; // halt on first failure; applied steps persist; a retry converges
           }
         }
-        // Persist the new desired spec ONLY on full success — a partial run keeps the prior spec so a
-        // retry re-plans correctly (an unapplied "update" isn't mistaken for a noop against the new spec).
+        // Persist the AUTHORED spec ONLY on a successful DEFAULT-env run — that env authors the shared spec.
+        // A named env NEVER rewrites `stacks.spec`/spec_version (it only differs by variables), and a partial
+        // run keeps the prior spec so a retry re-plans correctly.
         let newVersion = existing ? existing.specVersion : 1;
-        if (!failure && existing) {
+        if (!failure && existing && !env) {
           newVersion = existing.specVersion + 1;
-          await stacks.updateSpec(stackRow.id, spec, newVersion);
+          await stacks.updateSpec(stackRow.id, authoredSpec, newVersion);
         }
         return { applied, failure, newVersion };
       });
@@ -3601,7 +3669,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       target: name,
       targetType: "stack",
       orgId: org.id,
-      detail: { applied: outcome.applied.map((s) => ({ action: s.action, key: s.key })), prune, failed: outcome.failure?.step.key ?? null, ...(args.auditDetail ?? {}) },
+      detail: { applied: outcome.applied.map((s) => ({ action: s.action, key: s.key })), prune, ...(env ? { env } : {}), failed: outcome.failure?.step.key ?? null, ...(args.auditDetail ?? {}) },
     });
     if (outcome.failure) {
       // Keyed on the STACK name (not a step) so a later successful `up` resolves it symmetrically.
@@ -3632,9 +3700,21 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     } catch {
       return c.json({ error: "invalid JSON body" }, 400);
     }
-    const spec = sanitizeStackConfig(body.spec);
+    // (E3) `?env=<env>` targets an environment: reconcile ITS resources with ITS variable overlay. The
+    // authored spec MAY carry ${var.…} placeholders (preserved through the sanitizer, resolved per-env).
+    const spec = sanitizeStackConfigPreservingVars(body.spec);
     if (!spec) return c.json({ error: "invalid stack spec (needs a name and at least one resource)" }, 400);
     const dryRun = c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true";
+    const envParam = normalizeEnvParam(c.req.query("env"));
+    let variables: Record<string, string> = {};
+    if (envParam) {
+      // A named env must exist; its stored variables are the overlay. The default env ('') has none here.
+      const found = await stacks.getByName(orgRes.org.id, name);
+      if (!found) return c.json({ error: `no such stack: ${name}` }, 404);
+      const envRow = await envs.get(found.id, envParam);
+      if (!envRow) return c.json({ error: `no such environment "${envParam}" for stack ${name} — create it with \`drop env create\`` }, 404);
+      variables = envRow.variables;
+    }
     const r = await reconcileStack(c.get("identity"), {
       name,
       org: orgRes.org,
@@ -3643,6 +3723,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       prune: body.prune === true,
       dryRun,
       specVersion: body.spec_version,
+      env: envParam,
+      variables,
     });
     return c.json(r.body as Record<string, unknown>, r.status as 200);
   });
@@ -3668,16 +3750,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return c.json({ stacks: out });
   });
 
-  // ---- GET /v1/stacks/:name : spec + resources + per-resource live status ----
+  // ---- GET /v1/stacks/:name : spec + resources + per-resource live status [+ ?env=<env> — E3] ----
   app.get("/v1/stacks/:name", async (c) => {
     const email = c.get("identity").email;
     const found = await findStack(c, email, c.req.param("name"));
     if ("err" in found) return found.err;
     const { stack } = found;
-    const mapping = await stacks.mapping(stack.id);
+    const env = normalizeEnvParam(c.req.query("env")); // '' = the default env; a named env scopes the names
+    const mapping = await stacks.mapping(stack.id, env);
     const resources = [];
     for (const [key, res] of Object.entries(stack.spec.resources)) {
-      const siteName = mapping[key] ?? resolveResourceName(stack.spec.name, key, res);
+      const siteName = mapping[key] ?? resolveResourceName(stack.spec.name, key, res, env);
       const s = await d.meta.getSitePlain(siteName);
       let status: unknown = null;
       if (d.kube && s) {
@@ -3690,7 +3773,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       }
       resources.push({ key, type: res.type, siteName, exists: !!s, url: siteUrl(siteName), runtimeState: s?.runtimeState ?? null, status });
     }
-    return c.json({ name: stack.name, org: await orgOf(stack.orgId), specVersion: stack.specVersion, fromTemplate: stack.fromTemplate, fromTemplateVersion: stack.fromTemplateVersion, spec: stack.spec, resources });
+    return c.json({ name: stack.name, org: await orgOf(stack.orgId), env, specVersion: stack.specVersion, fromTemplate: stack.fromTemplate, fromTemplateVersion: stack.fromTemplateVersion, spec: stack.spec, resources });
   });
 
   // ---- GET /v1/stacks/:name/graph : nodes (live status) + edges (from spec) [+ ?include_plan overlay] ----
@@ -3705,13 +3788,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if ("err" in found) return found.err;
     const { stack } = found;
     const spec = stack.spec;
-    const mapping = await stacks.mapping(stack.id);
+    const env = normalizeEnvParam(c.req.query("env")); // (E3) '' = default env; a named env scopes names + live status
+    const mapping = await stacks.mapping(stack.id, env);
 
     // Resolve each resource → its site row (namespace + version + runtimeState + existence).
     const nodesRaw: { key: string; res: StackResource; siteName: string; site: Site | null }[] = [];
     const namespaces = new Set<string>();
     for (const [key, res] of Object.entries(spec.resources)) {
-      const siteName = mapping[key] ?? resolveResourceName(spec.name, key, res);
+      const siteName = mapping[key] ?? resolveResourceName(spec.name, key, res, env);
       const site = await d.meta.getSitePlain(siteName);
       if (site) namespaces.add(site.namespace);
       nodesRaw.push({ key, res, siteName, site });
@@ -3754,7 +3838,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
           if (!targetKey) continue;
           const target = spec.resources[targetKey];
           if (!target) continue;
-          const tSite = mapping[targetKey] ?? resolveResourceName(spec.name, targetKey, target);
+          const tSite = mapping[targetKey] ?? resolveResourceName(spec.name, targetKey, target, env);
           const label = u.database ? `PG* via ${tSite}-app` : u.bucket ? `S3_* via ${tSite}` : u.cache ? `REDIS_URL via ${tSite}` : `injects ${appUseEnvName(targetKey)}`;
           edges.push({ from: targetKey, to: key, kind: "uses", label });
         }
@@ -3765,7 +3849,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         }
     }
 
-    const out: Record<string, unknown> = { name: stack.name, org: await orgOf(stack.orgId), specVersion: stack.specVersion, nodes, edges };
+    const out: Record<string, unknown> = { name: stack.name, org: await orgOf(stack.orgId), env, specVersion: stack.specVersion, nodes, edges };
 
     // Pending-changes overlay: planStack with the stored spec as BOTH desired and prev → unchanged
     // resources are noop, but anything absent from live state (deleted out-of-band) is create-pending.
@@ -3774,7 +3858,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       const live: Record<string, LivePresence> = {};
       for (const { siteName, site } of nodesRaw) if (site) live[siteName] = { type: site.type };
       try {
-        out.plan = planStack({ spec, prevSpec: spec, mapping, live }).filter((s) => s.action !== "noop");
+        out.plan = planStack({ spec, prevSpec: spec, mapping, live, env }).filter((s) => s.action !== "noop");
       } catch {
         out.plan = []; // a cycle in the stored spec must never fail the read
       }
@@ -3794,7 +3878,110 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!(await isPlatformAdmin(email)) && role !== "owner" && role !== "admin") return c.json({ error: "owner/admin only" }, 403);
     const cascade = c.req.query("cascade") === "1" || c.req.query("cascade") === "true";
     const resources = [];
-    for (const { resourceKey, siteName } of await stacks.resources(stack.id)) {
+    // (E3) Deleting a stack tears down EVERY env's resources (default + named), not just the default env's.
+    for (const { env, resourceKey, siteName } of await stacks.allResources(stack.id)) {
+      const s = await d.meta.getSitePlain(siteName);
+      if (cascade && s) {
+        await tearDownResource(s);
+        resources.push({ key: resourceKey, env, siteName, action: "deleted" });
+      } else {
+        resources.push({ key: resourceKey, env, siteName, action: s ? "orphaned" : "gone" });
+      }
+    }
+    await stacks.delete(stack.id); // cascades stack_resources AND environments (FK ON DELETE CASCADE)
+    await audit({ actor: email, action: "stack.delete", target: stack.name, targetType: "stack", orgId: org.id, detail: { cascade, resources: resources.map((r) => r.siteName) } });
+    return c.json({ deleted: stack.name, cascade, resources });
+  });
+
+  // ================================ Environments (E3) ================================
+  // A named, DURABLE instantiation of a stack spec with its own variable overlay. Resources materialize as
+  // `<stack>-<env>-<key>` (single-dash — `--` is reserved for previews and rejected by validateName). The
+  // DEFAULT env (unnamed, '') is the one every stack already has; it has no row here. Each env's resources
+  // count against the org workload cap like any other (reconcileStack enforces it).
+
+  // Does `email` hold create-rights in `org` (owner/admin/member with create, or a platform admin)?
+  const hasStackCreateRights = async (org: Org, email: string): Promise<boolean> => {
+    if (await isPlatformAdmin(email)) return true;
+    const role = await d.orgs.roleOf(org.id, email);
+    const platformRole = (await d.users.getUser(email))?.role ?? "member";
+    return canCreateInOrg(role, platformRole);
+  };
+
+  // Sanitize an env `variables` payload → a flat { key: value } string map (junk-ignoring; a malformed key
+  // is a hard error). Accepts an object; each value is coerced to a bounded string.
+  const sanitizeEnvVariables = (input: unknown): Record<string, string> | { error: string } => {
+    if (input == null) return {};
+    if (typeof input !== "object" || Array.isArray(input)) return { error: "variables must be an object of { key: value } strings" };
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+      const keyErr = validateVarKey(k);
+      if (keyErr) return { error: keyErr };
+      if (typeof v === "string") out[k] = v.slice(0, 4096);
+      else if (typeof v === "number" || typeof v === "boolean") out[k] = String(v);
+      // non-scalar values are ignored (junk-tolerant)
+    }
+    return out;
+  };
+
+  // ---- GET /v1/stacks/:name/environments : list the stack's named envs (the default is implicit) ----
+  app.get("/v1/stacks/:name/environments", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack } = found;
+    const rows = await envs.list(stack.id);
+    const out = [];
+    for (const e of rows) {
+      out.push({ name: e.name, variables: e.variables, resources: (await stacks.resources(stack.id, e.name)).length, createdBy: e.createdBy, createdAt: e.createdAt });
+    }
+    // The default env is always present (its resources live under env=''); surface it so callers list it too.
+    const defaultResources = (await stacks.resources(stack.id, "")).length;
+    return c.json({ stack: stack.name, default: { name: "default", resources: defaultResources }, environments: out });
+  });
+
+  // ---- POST /v1/stacks/:name/environments {env, variables} : create a named environment ----
+  app.post("/v1/stacks/:name/environments", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack, org } = found;
+    if (!(await hasStackCreateRights(org, email))) return c.json({ error: "not permitted to create an environment in this org" }, 403);
+    let body: { env?: unknown; variables?: unknown };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const envName = typeof body.env === "string" ? body.env.trim() : "";
+    const nameErr = validateEnvName(envName);
+    if (nameErr) return c.json({ error: nameErr }, 400);
+    const vars = sanitizeEnvVariables(body.variables);
+    if ("error" in vars) return c.json({ error: vars.error }, 400);
+    if (await envs.get(stack.id, envName)) return c.json({ error: `environment "${envName}" already exists for stack ${stack.name}` }, 409);
+    // Guard: the composed site name must be valid for at least one resource shape (single-dash naming).
+    const nameProbe = validateName(`${stack.name}-${envName}-x`);
+    if (nameProbe) return c.json({ error: `environment "${envName}" makes an invalid resource name: ${nameProbe}` }, 400);
+    const row = await envs.create({ stackId: stack.id, name: envName, variables: vars, createdBy: email });
+    await audit({ actor: email, action: "env.create", target: stack.name, targetType: "stack", orgId: org.id, detail: { env: envName, variables: Object.keys(vars) } });
+    return c.json({ stack: stack.name, env: row.name, variables: row.variables, createdAt: row.createdAt });
+  });
+
+  // ---- DELETE /v1/stacks/:name/environments/:env?cascade=1 : delete an env (mirror stack-delete semantics) ----
+  app.delete("/v1/stacks/:name/environments/:env", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack, org } = found;
+    const envName = normalizeEnvParam(c.req.param("env"));
+    if (!envName) return c.json({ error: "cannot delete the default environment (delete the stack instead)" }, 400);
+    // Owner/admin only — deleting an env (and, with cascade, its resources) is destructive (mirror stack delete).
+    const role = await d.orgs.roleOf(org.id, email);
+    if (!(await isPlatformAdmin(email)) && role !== "owner" && role !== "admin") return c.json({ error: "owner/admin only" }, 403);
+    const envRow = await envs.get(stack.id, envName);
+    if (!envRow) return c.json({ error: `no such environment "${envName}" for stack ${stack.name}` }, 404);
+    const cascade = c.req.query("cascade") === "1" || c.req.query("cascade") === "true";
+    const resources = [];
+    for (const { resourceKey, siteName } of await stacks.resources(stack.id, envName)) {
       const s = await d.meta.getSitePlain(siteName);
       if (cascade && s) {
         await tearDownResource(s);
@@ -3802,10 +3989,71 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       } else {
         resources.push({ key: resourceKey, siteName, action: s ? "orphaned" : "gone" });
       }
+      await stacks.deleteResource(stack.id, envName, resourceKey);
     }
-    await stacks.delete(stack.id); // cascades stack_resources
-    await audit({ actor: email, action: "stack.delete", target: stack.name, targetType: "stack", orgId: org.id, detail: { cascade, resources: resources.map((r) => r.siteName) } });
-    return c.json({ deleted: stack.name, cascade, resources });
+    await envs.delete(stack.id, envName);
+    await audit({ actor: email, action: "env.delete", target: stack.name, targetType: "stack", orgId: org.id, detail: { env: envName, cascade, resources: resources.map((r) => r.siteName) } });
+    return c.json({ stack: stack.name, deleted: envName, cascade, resources });
+  });
+
+  // ---- POST /v1/stacks/:name/environments/:env/promote {to} : re-run the TARGET env's up with the SOURCE
+  // env's CURRENTLY-APPLIED spec. Spec promotion (NOT a variable copy): the target keeps its own variables;
+  // it gets the source's resolved spec SHAPE with images pinned to the exact refs the source is running —
+  // so promotion is exact (a tested staging artifact lands byte-identical in prod). ----
+  app.post("/v1/stacks/:name/environments/:env/promote", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    await ensureUser(email);
+    const found = await findStack(c, email, name);
+    if ("err" in found) return found.err;
+    const { stack, org } = found;
+    if (!(await hasStackCreateRights(org, email))) return c.json({ error: "not permitted to promote in this org" }, 403);
+    const source = normalizeEnvParam(c.req.param("env")); // the env whose applied spec we promote FROM
+    let body: { to?: unknown };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const target = normalizeEnvParam(typeof body.to === "string" ? body.to : "");
+    if (!target) return c.json({ error: "promote target env is required (the `to` field; the default env is not a promote target)" }, 400);
+    if (source === target) return c.json({ error: "promote source and target must differ" }, 400);
+    // The source (if named) and the target (always named) must both exist as envs.
+    if (source && !(await envs.get(stack.id, source))) return c.json({ error: `no such source environment "${source}"` }, 404);
+    if (!(await envs.get(stack.id, target))) return c.json({ error: `no such target environment "${target}" — create it first with \`drop env create\`` }, 404);
+
+    // Resolve the SOURCE env's currently-applied concrete spec (shared authored spec + source's variables).
+    const sourceVars = source ? (await envs.get(stack.id, source))!.variables : {};
+    const sub = resolveEnvSpec(stack.spec, sourceVars, name);
+    if (sub.missing.length) return c.json({ error: `source env "${source || "default"}" is missing variable(s): ${sub.missing.join(", ")} — reconcile it first` }, 400);
+    if (sub.errors.length) return c.json({ error: sub.errors.join("; ") }, 400);
+    const concrete = sub.spec;
+
+    // Pin each app resource to the EXACT image the source env is RUNNING (deployedImageOf) by baking it
+    // INTO the promoted spec. Baking it into the spec (vs a side-channel `resolved`) makes the image part
+    // of the diff, so the target re-applies even when the spec shape is otherwise identical — exact artifact
+    // promotion, never a rebuild/re-resolve. An app with no deployed source image keeps its spec image (if
+    // any); a dir-only app then awaits a CLI image at the target (surfaced in `needs`).
+    const sourceMapping = await stacks.mapping(stack.id, source);
+    for (const [key, res] of Object.entries(concrete.resources)) {
+      if (res.type !== "app") continue;
+      const img = await deployedImageOf(siteNameForKey(concrete, sourceMapping, key, source));
+      if (img) res.image = img;
+    }
+
+    const r = await reconcileStack(c.get("identity"), {
+      name,
+      org,
+      spec: concrete, // already concrete + images pinned — the target reconciles the SOURCE's applied shape
+      prune: false,
+      dryRun: c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true",
+      env: target,
+      variables: {}, // concrete carries no placeholders → no further substitution; target's env row is left as-is
+      auditAction: "env.promote",
+      auditDetail: { from: source || "default", to: target },
+    });
+    const bodyOut = { ...r.body, from: source || "default", to: target };
+    return c.json(bodyOut as Record<string, unknown>, r.status as 200);
   });
 
   // ---- Template upstream diff (D2): resolve a template-derived stack's pinned + latest versions into

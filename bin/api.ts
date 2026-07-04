@@ -16,6 +16,8 @@ import { MetricsStore } from "../src/metrics/store.ts";
 import { UptimePoller } from "../src/metrics/uptime.ts";
 import { EventStore } from "../src/events/store.ts";
 import { diffCrashLoops, type AppStatusSnapshot } from "../src/events/crashloop.ts";
+import { LogCollector } from "../src/logs/collector.ts";
+import { sweepLogRetention } from "../src/logs/retention.ts";
 import { createDbTunnelHandler, writeHttpError } from "../src/api/db-tunnel.ts";
 import { createExecHandler } from "../src/api/exec-bridge.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
@@ -214,6 +216,12 @@ setInterval(() => {
     .catch((e) => console.error("traffic sweep failed:", (e as Error).message));
   metrics.sweepUptime(cutoff).catch((e) => console.error("uptime sweep failed:", (e as Error).message));
   events.sweep(cutoff).catch((e) => console.error("events sweep failed:", (e as Error).message));
+  // (G4) Searchable-log retention — delete S3 log objects + their index rows past the retention window
+  // (default 7d, org-overridable via the `log_retention_days` quota key). Orphan-safe: the sweep deletes
+  // each S3 object BEFORE its index row (see sweepLogRetention). Same best-effort posture as the others.
+  sweepLogRetention({ meta, blob, quotas, defaultDays: cfg.logRetentionDays })
+    .then((n) => n > 0 && console.log(`log retention sweep: removed ${n} object(s) past retention`))
+    .catch((e) => console.error("log retention sweep failed:", (e as Error).message));
   // (G3) Crash-loop detection — the formalization the plan assigned jointly to G2/G3. RIGHT HERE, as the
   // old G3 marker promised: per active namespace read live app statuses (restart counts + reason), diff
   // the restart counts against the PREVIOUS sweep (bounded state — `crashPrev` is rebuilt from each
@@ -281,3 +289,23 @@ const uptime = new UptimePoller({
 setInterval(() => {
   uptime.sweep().catch((e) => console.error("uptime poll failed:", (e as Error).message));
 }, cfg.uptimeIntervalMs).unref();
+
+// (G4) Searchable-log COLLECTOR — tails each RUNNING, opted-in workload's pod logs (one follow stream per
+// workload, resumable by sinceTime), batches structured lines, and flushes them as gzipped NDJSON objects
+// (`logs/<site>/<hour>.ndjson.gz`) + a `log_objects` index row. Runs only with compute on (needs kube to
+// tail pods) and DROP_LOGS_COLLECT unset to 0. Two ticks, both best-effort (never throw): reconcile()
+// starts/stops tails to match the running set (bounded by logMaxConcurrentTails); flush() writes dirty
+// hour buckets to S3. Databases are EXCLUDED by default (opt-in via `log_retention: true`); apps/sites are
+// on by default (opt-out via `log_retention: false`) — see LogCollector.shouldCollectLogs.
+if (kube && cfg.logsCollect) {
+  const collector = new LogCollector({ meta, kube, blob, maxConcurrentTails: cfg.logMaxConcurrentTails, log: (m) => console.log(m) });
+  setInterval(() => {
+    collector.reconcile().catch((e) => console.error("log collector reconcile failed:", (e as Error).message));
+  }, cfg.logReconcileIntervalMs).unref();
+  setInterval(() => {
+    collector.flush().catch((e) => console.error("log collector flush failed:", (e as Error).message));
+  }, cfg.logFlushIntervalMs).unref();
+  console.log(`drop-api log collector enabled (retention ${cfg.logRetentionDays}d, max ${cfg.logMaxConcurrentTails} tails)`);
+} else if (kube && !cfg.logsCollect) {
+  console.log("drop-api log collector disabled (DROP_LOGS_COLLECT=0)");
+}

@@ -90,6 +90,17 @@ function parseSinceMs(s: string): number {
   return n * mult;
 }
 
+/** (G4) Resolve `--since` for historical log search → an absolute ISO timestamp. A duration form (`2h`,
+ *  `24h`, `7d`, or a bare hour count) is a window measured back from `now`; anything that parses as a date
+ *  (ISO8601 / `YYYY-MM-DD…`) is taken as an absolute lower bound. */
+export function resolveSince(since: string, now: number): string {
+  const s = since.trim();
+  if (/^\d+\s*[mhd]?$/i.test(s)) return new Date(now - parseSinceMs(s)).toISOString(); // duration window
+  const t = Date.parse(s);
+  if (Number.isNaN(t)) throw new Error(`invalid --since "${since}" — use a window (30m, 24h, 7d) or an ISO timestamp`);
+  return new Date(t).toISOString();
+}
+
 /** (G3) The caller's personal org slug — the default org for `drop events` / `drop org webhook` when
  *  `--org` is omitted (personal is listed first by GET /v1/orgs). */
 async function personalOrgSlug(c: Client): Promise<string> {
@@ -375,16 +386,17 @@ export function buildProgram(): Command {
     .command("up [dir]")
     .description("Reconcile the stack: section of drop.yaml (creates DBs/apps/sites + wires their edges)")
     .option("--org <slug>", "create in this organisation (default: your personal org)")
+    .option("--env <env>", "reconcile a named environment (E3): its resources are <stack>-<env>-<key> with the env's variable overlay")
     .option("--dry-run", "print the plan without applying it")
     .option("--prune", "delete resources removed from the spec (default: they are only flagged)")
-    .action(async (dir: string | undefined, opts: { org?: string; dryRun?: boolean; prune?: boolean }) => {
+    .action(async (dir: string | undefined, opts: { org?: string; env?: string; dryRun?: boolean; prune?: boolean }) => {
       const c = await client();
-      const res = await runStackUp(c, dir ?? ".", { org: opts.org, dryRun: opts.dryRun, prune: opts.prune, log: (s) => console.log(s) });
+      const res = await runStackUp(c, dir ?? ".", { org: opts.org, env: opts.env, dryRun: opts.dryRun, prune: opts.prune, log: (s) => console.log(s) });
       if (res.dryRun) {
         console.log("  (dry run — nothing applied)");
         return;
       }
-      console.log(`  ✓ stack ${res.result!.stack} reconciled (spec v${res.result!.specVersion})`);
+      console.log(`  ✓ stack ${res.result!.stack}${opts.env ? ` [env: ${opts.env}]` : ""} reconciled (spec v${res.result!.specVersion})`);
     });
 
   const stack = program.command("stack").description("Manage stacks (declarative multi-resource groups)");
@@ -397,7 +409,8 @@ export function buildProgram(): Command {
     .command("status <name>")
     .description("Show a stack's spec + its resources' live status")
     .option("--org <slug>", "the stack's organisation (disambiguates a name across orgs)")
-    .action(async (name: string, opts: { org?: string }) => show(await (await client()).stackGet(name, opts.org)));
+    .option("--env <env>", "scope to a named environment (E3): shows that env's <stack>-<env>-<key> resources")
+    .action(async (name: string, opts: { org?: string; env?: string }) => show(await (await client()).stackGet(name, { org: opts.org, env: opts.env })));
   stack
     .command("rm <name>")
     .description("Delete a stack; --cascade also tears down its resources (else they are orphaned)")
@@ -453,6 +466,50 @@ export function buildProgram(): Command {
         if (/conflict/i.test(msg)) console.error(`  resolve each conflicted key with  --take-upstream <key>  or  --keep-local <key>, then re-run.`);
         process.exitCode = 1;
       }
+    });
+
+  // ---- environments (E3): named, durable instantiations of a stack with a per-env variable overlay ----
+  const parseSet = (pairs: string[]): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const kv of pairs) {
+      const i = kv.indexOf("=");
+      if (i <= 0) throw new Error(`--set expects key=value, got "${kv}"`);
+      out[kv.slice(0, i)] = kv.slice(i + 1);
+    }
+    return out;
+  };
+  const env = program.command("env").description("Manage a stack's environments (durable named instantiations: staging, prod, …)");
+  env
+    .command("create <env>")
+    .description("Create a named environment for a stack, with an optional variable overlay (repeatable --set key=value)")
+    .requiredOption("--stack <name>", "the stack this environment instantiates")
+    .option("--org <slug>", "the stack's organisation")
+    .option("--set <kv>", "a variable value (key=value); repeatable", collect, [])
+    .action(async (envName: string, opts: { stack: string; org?: string; set: string[] }) => {
+      const res = await (await client()).envCreate(opts.stack, envName, parseSet(opts.set), opts.org);
+      console.log(`  ✓ environment ${res.env} created for stack ${res.stack}`);
+      console.log(`  reconcile it:  drop up --env ${res.env}`);
+    });
+  env
+    .command("ls <stack>")
+    .description("List a stack's environments (the unnamed default env is always present)")
+    .option("--org <slug>", "the stack's organisation")
+    .action(async (stackName: string, opts: { org?: string }) => show(await (await client()).envList(stackName, opts.org)));
+  env
+    .command("rm <stack> <env>")
+    .description("Delete an environment; --cascade also tears down its resources (else they are orphaned)")
+    .option("--org <slug>", "the stack's organisation")
+    .option("--cascade", "also delete the environment's resources (destructive)")
+    .action(async (stackName: string, envName: string, opts: { org?: string; cascade?: boolean }) =>
+      show(await (await client()).envDelete(stackName, envName, { org: opts.org, cascade: opts.cascade })),
+    );
+  env
+    .command("promote <stack> <source> <target>")
+    .description("Re-run <target>'s up with <source>'s currently-applied spec (images pinned exact; the target keeps its own variables)")
+    .option("--org <slug>", "the stack's organisation")
+    .action(async (stackName: string, source: string, target: string, opts: { org?: string }) => {
+      const res = (await (await client()).envPromote(stackName, source, target, opts.org)) as { from: string; to: string; specVersion?: number };
+      console.log(`  ✓ promoted ${res.from} → ${res.to} for stack ${stackName}`);
     });
 
   // ---- repo detection (F1): propose a stack: section from local heuristics — no server call ----
@@ -1168,7 +1225,29 @@ export function buildProgram(): Command {
     .option("--tail <n>", "number of lines (default 100, max 1000)", (v) => parseInt(v, 10))
     .option("--release", "read the latest release (migration) Job's logs instead of the app pods")
     .option("-f, --follow", "stream new log lines as they arrive (Ctrl-C to stop)")
-    .action(async (name: string, opts: { tail?: number; release?: boolean; follow?: boolean }) => {
+    .option("--since <when>", "(G4) search retained history from this point (window like 2h/24h/7d, or an ISO timestamp)")
+    .option("--until <ts>", "(G4) search retained history up to this ISO timestamp (default: now)")
+    .option("--grep <pattern>", "(G4) only lines matching this pattern (grep-grade substring; add -E for regex)")
+    .option("-E, --regex", "(G4) treat --grep as a regular expression")
+    .option("-i, --ignore-case", "(G4) case-insensitive --grep match")
+    .action(async (name: string, opts: { tail?: number; release?: boolean; follow?: boolean; since?: string; until?: string; grep?: string; regex?: boolean; ignoreCase?: boolean }) => {
+      // (G4) Historical search path — distinct from the live `-f` follow and the one-shot tail. Triggered
+      // by --since or --grep; hits GET /v1/sites/:name/logs/search over the retained S3 objects.
+      if ((opts.since || opts.grep) && !opts.follow) {
+        const now = Date.now();
+        const from = resolveSince(opts.since ?? "24h", now);
+        const to = opts.until ? new Date(Date.parse(opts.until)).toISOString() : new Date(now).toISOString();
+        const res = (await (await client()).logsSearch(name, {
+          from,
+          to,
+          q: opts.grep,
+          regex: opts.regex,
+          ignoreCase: opts.ignoreCase,
+        })) as { lines: { ts: string; pod: string; line: string }[]; truncated: boolean; scanned: number };
+        for (const h of res.lines) process.stdout.write(`${h.line}\n`);
+        if (res.truncated) console.error(`… results truncated at ${res.lines.length} lines — narrow --since/--grep to see more`);
+        return;
+      }
       if (opts.follow) {
         if (opts.release) {
           console.error("--follow cannot be combined with --release (a release Job runs once and exits)");

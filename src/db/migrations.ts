@@ -572,6 +572,60 @@ const m0018_app_configs: Migration = {
   },
 };
 
+// (E3) Environments — durable, named parallel instantiations of a stack spec. Two changes, both
+// backward-compatible (zero migration for existing stacks): (1) `stack_resources` gains an `env` column
+// (default '' = the unnamed DEFAULT env every existing row already belongs to) and its PK widens to
+// (stack_id, env, resource_key) so each env keeps its own key→site_name map; the `site_name` UNIQUE index
+// is unchanged (a site still belongs to at most one env's resource). (2) a new `environments` table holds
+// each named env's variable overlay. Raw SQL for the PK swap (ADD COLUMN / DROP CONSTRAINT / ADD PRIMARY
+// KEY) — the most portable path across Postgres + PGlite. G4 owns 0020; this is 0019.
+const m0019_environments: Migration = {
+  async up(db: Kysely<any>) {
+    await sql`ALTER TABLE stack_resources ADD COLUMN env text NOT NULL DEFAULT ''`.execute(db);
+    await sql`ALTER TABLE stack_resources DROP CONSTRAINT stack_resources_pk`.execute(db);
+    await sql`ALTER TABLE stack_resources ADD CONSTRAINT stack_resources_pk PRIMARY KEY (stack_id, env, resource_key)`.execute(db);
+
+    await db.schema
+      .createTable("environments")
+      .addColumn("stack_id", "text", (c) => c.notNull().references("stacks.id").onDelete("cascade"))
+      .addColumn("name", "text", (c) => c.notNull()) // the env name (e.g. "staging"); never '' (that's the default env)
+      .addColumn("variables", "jsonb", (c) => c.notNull().defaultTo(sql`'{}'::jsonb`)) // { key: value } substitution overlay
+      .addColumn("created_by", "text", (c) => c.notNull().references("users.email"))
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addPrimaryKeyConstraint("environments_pk", ["stack_id", "name"])
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
+// (G4) Searchable log retention — the `log_objects` index. One row per retained S3 log object
+// (`logs/<site>/<hour>.ndjson.gz`), written by the collector on flush (upsert on the (site, hour) PK — a
+// flush rewrites an hour's object with its full accumulated set). `site_name` is intentionally NOT
+// FK-bound (like `traffic_minutes`): a deleted site's rows survive so the retention sweep still finds +
+// deletes the S3 bytes (delete-object-then-row, orphan-safe). `hour` is indexed for the time-range search
+// (narrow to objects in [from,to]) and the retention range delete. E3 owns 0019; this is 0020.
+const m0020_log_objects: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("log_objects")
+      .addColumn("site_name", "text", (c) => c.notNull())
+      .addColumn("hour", "timestamptz", (c) => c.notNull())
+      .addColumn("key", "text", (c) => c.notNull())
+      .addColumn("lines", "integer", (c) => c.notNull())
+      .addColumn("bytes", "integer", (c) => c.notNull())
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addPrimaryKeyConstraint("log_objects_pk", ["site_name", "hour"])
+      .execute();
+    // Time-range search + retention range delete both scan by hour.
+    await db.schema.createIndex("log_objects_hour_idx").on("log_objects").column("hour").execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -594,6 +648,8 @@ export class InlineMigrations implements MigrationProvider {
       "0016_app_previews": m0016_app_previews,
       "0017_events": m0017_events,
       "0018_app_configs": m0018_app_configs,
+      "0019_environments": m0019_environments,
+      "0020_log_objects": m0020_log_objects,
     };
   }
 }

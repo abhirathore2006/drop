@@ -452,6 +452,18 @@ async function req<T = unknown>(method: string, path: string, body?: unknown): P
   return json as T;
 }
 
+/** (G4) One matching line from the retained-log search + the response envelope. */
+export interface LogSearchHit {
+  ts: string;
+  pod: string;
+  line: string;
+}
+export interface LogSearchResult {
+  lines: LogSearchHit[];
+  truncated: boolean; // the cap was hit — narrow the range/grep to see more
+  scanned: number; // S3 objects actually read
+}
+
 export const api = {
   me: () => req<Me>("GET", "/v1/me"),
   list: () => req<{ sites: ListItem[] }>("GET", "/v1/sites"),
@@ -464,6 +476,14 @@ export const api = {
   // (G1) one-shot tail of the LATEST release Job's pod. follow+release is a 400 (a release runs once and
   // exits), so the M3 logs panel fetches release logs one-shot instead of streaming them.
   releaseLogs: (name: string) => req<{ logs: string }>("GET", `/v1/sites/${name}/logs?release=1&tail=500`),
+  // (G4) historical log search over the retained S3 objects (grep-grade). Time-range narrows to indexed
+  // objects; the text match runs server-side. Same `logs` capability gate as the live tail.
+  logsSearch: (name: string, params: { from: string; to: string; q?: string; limit?: number }) => {
+    const p = new URLSearchParams({ from: params.from, to: params.to });
+    if (params.q) p.set("q", params.q);
+    if (params.limit) p.set("limit", String(params.limit));
+    return req<LogSearchResult>("GET", `/v1/sites/${name}/logs/search?${p.toString()}`);
+  },
   // (drop ps) an app's process Deployments (web + workers) — populates the M3 logs process selector.
   processes: (name: string) => req<{ name: string; runtimeState: string; processes: ProcessInfo[] }>("GET", `/v1/apps/${name}/processes`),
   // (J3) mint a single-use exec ticket bound to `command` (default /bin/sh) for the browser terminal.

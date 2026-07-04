@@ -556,3 +556,11 @@ test("expandProcesses: a non-stateful app is unaffected (still defaults to {min:
   const app = sanitizeAppConfig({ image: "x:1" })!;
   expect(expandProcesses(app, "app")[0]!.scale).toEqual({ min: 0, max: 3 });
 });
+
+test("(G4) log_retention opt-out: only an explicit boolean is stored (round-trips via logRetention)", () => {
+  expect(sanitizeAppConfig({ image: "x:1" })!.logRetention).toBeUndefined(); // default on (nothing stored)
+  expect(sanitizeAppConfig({ image: "x:1", log_retention: false })!.logRetention).toBe(false); // opt-out
+  expect(sanitizeAppConfig({ image: "x:1", logRetention: false })!.logRetention).toBe(false); // round-trip form
+  expect(sanitizeAppConfig({ image: "x:1", log_retention: true })!.logRetention).toBe(true);
+  expect(sanitizeAppConfig({ image: "x:1", log_retention: "yes" })!.logRetention).toBeUndefined(); // junk dropped
+});

@@ -15,6 +15,10 @@ export interface DatabaseConfig {
   storage: string; // PVC size, a k8s quantity (e.g. "10Gi")
   hibernation: Hibernation; // "scheduled" opts into the idle-shutdown CronJob (cost intent)
   extensions?: string[]; // (I3) Postgres extensions to CREATE at bootstrap (allowlisted); omitted when none
+  // (G4) Searchable-log retention opt-IN. Databases are EXCLUDED by default (Postgres logs are verbose
+  // AND can echo query text / bound parameter values). Set `log_retention: true` to collect this DB's pod
+  // logs to S3. Omitted/false → not collected (still available live via `drop logs -f`).
+  logRetention?: boolean;
 }
 
 const ENGINE: DatabaseEngine = "postgres-18";
@@ -125,6 +129,11 @@ export function sanitizeDatabaseConfig(
   }
 
   if (raw.hibernation === "scheduled") cfg.hibernation = "scheduled";
+
+  // (G4) `log_retention` opt-IN (DBs are excluded by default). Only a boolean true is meaningful — store
+  // it so the log collector's shouldCollectLogs turns this DB on.
+  const logRetention = raw.log_retention ?? raw.logRetention;
+  if (typeof logRetention === "boolean") cfg.logRetention = logRetention;
 
   // engine: v1 pins to postgres-18 regardless of what's requested (future engines are
   // additive). We don't error on an unknown engine — we pin to the supported one.

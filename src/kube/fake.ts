@@ -285,7 +285,11 @@ export class FakeKube implements KubeClient {
   readonly scriptedLogStreams = new Map<string, { lines: string[]; keepOpen?: boolean }>();
   // Recorded whenever `opts.signal` fires — lets a test assert the "upstream" stream was torn down.
   readonly logStreamAborts: { namespace: string; name: string }[] = [];
-  async getWorkloadLogsStream(namespace: string, name: string, opts: { tailLines?: number; signal?: AbortSignal } = {}): Promise<Readable | null> {
+  // (G4) Every getWorkloadLogsStream call, so the log-collector reconcile test can assert WHICH workloads
+  // got tailed (db-excluded, concurrency cap) and that a restart resumes from `sinceTime`.
+  readonly logStreamCalls: { namespace: string; name: string; tailLines?: number; sinceTime?: string }[] = [];
+  async getWorkloadLogsStream(namespace: string, name: string, opts: { tailLines?: number; sinceTime?: string; signal?: AbortSignal } = {}): Promise<Readable | null> {
+    this.logStreamCalls.push({ namespace, name, tailLines: opts.tailLines, sinceTime: opts.sinceTime });
     const script = this.scriptedLogStreams.get(this.key(namespace, name));
     if (!script) return null;
     let i = 0;

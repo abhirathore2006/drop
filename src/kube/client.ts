@@ -545,8 +545,10 @@ export class KubeApiClient implements KubeClient {
    *  or null on any non-2xx/connection error (so the caller can retry, e.g. without a container
    *  filter). `signal` aborts the underlying request/connection at any point — before OR during
    *  the stream — so a client disconnect never leaks the upstream socket. */
-  private openLogStream(namespace: string, pod: string, tailLines: number, container: string | undefined, signal?: AbortSignal): Promise<Readable | null> {
-    const qs = new URLSearchParams({ follow: "true", tailLines: String(tailLines) });
+  private openLogStream(namespace: string, pod: string, tailLines: number, container: string | undefined, signal?: AbortSignal, sinceTime?: string): Promise<Readable | null> {
+    // (G4) `sinceTime` (RFC3339) resumes a tail from a point in time (the collector's restart-safe path);
+    // otherwise fall back to `tailLines`. They're mutually exclusive on the kube API — prefer sinceTime.
+    const qs = sinceTime ? new URLSearchParams({ follow: "true", sinceTime }) : new URLSearchParams({ follow: "true", tailLines: String(tailLines) });
     if (container) qs.set("container", container);
     const u = new URL(`${this.conn.server}/api/v1/namespaces/${namespace}/pods/${pod}/log?${qs}`);
     return new Promise((resolve) => {
@@ -577,7 +579,7 @@ export class KubeApiClient implements KubeClient {
     });
   }
 
-  async getWorkloadLogsStream(namespace: string, name: string, opts: { tailLines?: number; signal?: AbortSignal } = {}): Promise<Readable | null> {
+  async getWorkloadLogsStream(namespace: string, name: string, opts: { tailLines?: number; sinceTime?: string; signal?: AbortSignal } = {}): Promise<Readable | null> {
     const tail = opts.tailLines ?? 100;
     for (const sel of [`app.kubernetes.io/name=${name}`, `cnpg.io/cluster=${name},cnpg.io/instanceRole=primary`]) {
       const pr = await this.call("GET", `/api/v1/namespaces/${namespace}/pods?labelSelector=${encodeURIComponent(sel)}`);
@@ -589,9 +591,9 @@ export class KubeApiClient implements KubeClient {
       const target = pods.find((p) => (p.status?.containerStatuses ?? []).some((cs: any) => cs.ready)) ?? pods[0];
       const pod = target.metadata.name as string;
       // container=name may 404 for CNPG (container is "postgres"); retry without the filter.
-      const withContainer = await this.openLogStream(namespace, pod, tail, name, opts.signal);
+      const withContainer = await this.openLogStream(namespace, pod, tail, name, opts.signal, opts.sinceTime);
       if (withContainer) return withContainer;
-      return await this.openLogStream(namespace, pod, tail, undefined, opts.signal);
+      return await this.openLogStream(namespace, pod, tail, undefined, opts.signal, opts.sinceTime);
     }
     return null;
   }

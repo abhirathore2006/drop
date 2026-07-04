@@ -19,6 +19,10 @@ const LINE_H = 18; // px — must match `.logline` height in components.css for 
 const TAIL = 500; // initial backlog requested on connect
 const RECONNECT_MS = 2000; // backoff before re-opening a dropped follow stream
 
+// (G4) The quick-window picker for historical search — each maps to a lookback measured back from now.
+const RANGE_MS: Record<string, number> = { "1h": 3_600_000, "24h": 86_400_000, "7d": 604_800_000 };
+type HistState = "idle" | "loading" | "done" | "error";
+
 export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) {
   const isApp = type === "app";
   const [lines, setLines] = useState<LogLine[]>([]);
@@ -30,6 +34,17 @@ export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) 
   const [error, setError] = useState<string | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(360);
+
+  // (G4) History mode: search the retained S3 log objects (grep-grade) instead of the live tail. The live
+  // stream is left completely untouched — toggling to "history" just parks it and drives a separate,
+  // server-side search into `histLines`.
+  const [mode, setMode] = useState<"live" | "history">("live");
+  const [histRange, setHistRange] = useState<"1h" | "24h" | "7d">("24h");
+  const [histQuery, setHistQuery] = useState("");
+  const [histLines, setHistLines] = useState<LogLine[]>([]);
+  const [histState, setHistState] = useState<HistState>("idle");
+  const [histTruncated, setHistTruncated] = useState(false);
+  const [histError, setHistError] = useState<string | null>(null);
 
   const idRef = useRef(0);
   const carryRef = useRef("");
@@ -59,8 +74,11 @@ export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) 
     });
   }, []);
 
-  // The stream / one-shot lifecycle. Re-runs when the target (name / process / release) changes.
+  // The stream / one-shot lifecycle. Re-runs when the target (name / process / release / mode) changes.
   useEffect(() => {
+    // History mode owns the view via runHistory — never open the live stream (and the cleanup from the
+    // previous live run has already aborted any in-flight follow).
+    if (mode !== "live") return;
     let aborted = false;
     let controller: AbortController | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
@@ -147,7 +165,30 @@ export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) 
       if (retry) clearTimeout(retry);
       controller?.abort();
     };
-  }, [name, process, release, reset, push]);
+  }, [name, process, release, reset, push, mode]);
+
+  // (G4) Run a historical search over the retained objects. Grep runs SERVER-side, so the results list is
+  // rendered as-is (no client grep filter in history mode).
+  const runHistory = useCallback(async () => {
+    setHistState("loading");
+    setHistError(null);
+    const to = new Date().toISOString();
+    const from = new Date(Date.now() - RANGE_MS[histRange]!).toISOString();
+    try {
+      const r = await api.logsSearch(name, { from, to, q: histQuery || undefined, limit: 1000 });
+      setHistLines(r.lines.map((h, i) => ({ id: i, text: h.line })));
+      setHistTruncated(r.truncated);
+      setHistState("done");
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        rememberLocation();
+        sessionExpiry.set(true);
+        return;
+      }
+      setHistError((e as Error).message);
+      setHistState("error");
+    }
+  }, [name, histRange, histQuery]);
 
   // Auto-follow: when following, keep the viewport pinned to the newest line as it arrives.
   useLayoutEffect(() => {
@@ -172,15 +213,17 @@ export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) 
     else if (!follow && atBottom) setFollow(true);
   };
 
-  const filtered = grepLines(lines, query);
-  const total = filtered.length;
-  // When following, window onto the tail regardless of the last scroll position (new lines shift it).
-  const st = follow ? Math.max(0, total * LINE_H - viewportH) : scrollTop;
+  // Live mode filters the buffered tail client-side; history mode renders the server-side search results
+  // as-is (its grep already ran on the server). Same virtualization windowing drives both.
+  const displayLines = mode === "live" ? grepLines(lines, query) : histLines;
+  const total = displayLines.length;
+  // When live-following, window onto the tail regardless of the last scroll position (new lines shift it).
+  const st = mode === "live" && follow ? Math.max(0, total * LINE_H - viewportH) : scrollTop;
   const win = computeWindow(total, st, viewportH, LINE_H);
-  const visible = filtered.slice(win.start, win.end);
+  const visible = displayLines.slice(win.start, win.end);
 
   const download = () => {
-    const blob = new Blob([dumpLines(lines)], { type: "text/plain" });
+    const blob = new Blob([dumpLines(mode === "live" ? lines : histLines)], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -191,13 +234,20 @@ export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) 
 
   const actions = (
     <div className="stream-actions">
-      {isApp && (
+      {/* (G4) live tail vs. searchable history — the live stream is untouched; history parks it. */}
+      <Button size="sm" variant={mode === "live" ? "primary" : "default"} onClick={() => setMode("live")} title="follow the live log stream">
+        live
+      </Button>
+      <Button size="sm" variant={mode === "history" ? "primary" : "default"} onClick={() => setMode("history")} title="search the retained log history">
+        history
+      </Button>
+      {mode === "live" && isApp && (
         <label className="stream-toggle" title="tail the latest release Job's output (one-shot)">
           <input type="checkbox" checked={release} onChange={(e) => setRelease(e.target.checked)} />
           release
         </label>
       )}
-      {isApp && workerProcs.length > 1 && (
+      {mode === "live" && isApp && workerProcs.length > 1 && (
         <select className="stream-select" value={process} disabled={release} aria-label="process" onChange={(e) => setProcess(e.target.value)}>
           {workerProcs.map((p) => (
             <option key={p.process} value={p.process}>
@@ -206,10 +256,12 @@ export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) 
           ))}
         </select>
       )}
-      <Button size="sm" variant={follow ? "primary" : "default"} disabled={release} onClick={() => setFollow((f) => !f)} title={follow ? "auto-scrolling — click to pause" : "paused — click to follow the tail"}>
-        {follow ? "following" : "paused"}
-      </Button>
-      <Button size="sm" disabled={!lines.length} onClick={download} title="download the buffered lines">
+      {mode === "live" && (
+        <Button size="sm" variant={follow ? "primary" : "default"} disabled={release} onClick={() => setFollow((f) => !f)} title={follow ? "auto-scrolling — click to pause" : "paused — click to follow the tail"}>
+          {follow ? "following" : "paused"}
+        </Button>
+      )}
+      <Button size="sm" disabled={mode === "live" ? !lines.length : !histLines.length} onClick={download} title="download the buffered lines">
         download
       </Button>
     </div>
@@ -217,12 +269,50 @@ export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) 
 
   return (
     <div className="sec">
-      <StreamHeader title="logs" state={state} label={release ? "release job" : undefined} actions={actions} />
-      <input className="stream-grep" placeholder="filter (grep)…" value={query} onChange={(e) => setQuery(e.target.value)} spellCheck={false} aria-label="filter logs" />
-      {error && <div className="err" style={{ marginTop: 8 }}>{error}</div>}
+      <StreamHeader
+        title="logs"
+        state={mode === "live" ? state : histState === "loading" ? "connecting" : "closed"}
+        label={mode === "history" ? "history" : release ? "release job" : undefined}
+        actions={actions}
+      />
+      {mode === "live" ? (
+        <input className="stream-grep" placeholder="filter (grep)..." value={query} onChange={(e) => setQuery(e.target.value)} spellCheck={false} aria-label="filter logs" />
+      ) : (
+        <div className="stream-actions" style={{ marginBottom: 8 }}>
+          <select className="stream-select" value={histRange} aria-label="time range" onChange={(e) => setHistRange(e.target.value as "1h" | "24h" | "7d")}>
+            <option value="1h">last 1h</option>
+            <option value="24h">last 24h</option>
+            <option value="7d">last 7d</option>
+          </select>
+          <input
+            className="stream-grep"
+            style={{ flex: 1, marginTop: 0 }}
+            placeholder="search (substring)..."
+            value={histQuery}
+            onChange={(e) => setHistQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void runHistory()}
+            spellCheck={false}
+            aria-label="search history"
+          />
+          <Button size="sm" variant="primary" disabled={histState === "loading"} onClick={() => void runHistory()}>
+            {histState === "loading" ? "searching..." : "search"}
+          </Button>
+        </div>
+      )}
+      {(mode === "live" ? error : histError) && <div className="err" style={{ marginTop: 8 }}>{mode === "live" ? error : histError}</div>}
       <div className="logstream" ref={scrollRef} onScroll={onScroll} role="log" aria-label="logs">
         {total === 0 ? (
-          <div className="logline muted">{query ? "(no matching lines)" : "(no logs)"}</div>
+          <div className="logline muted">
+            {mode === "history"
+              ? histState === "idle"
+                ? "(search the retained history)"
+                : histState === "loading"
+                  ? "(searching...)"
+                  : "(no matching lines)"
+              : query
+                ? "(no matching lines)"
+                : "(no logs)"}
+          </div>
         ) : (
           <div style={{ paddingTop: win.padTop, paddingBottom: win.padBottom }}>
             {visible.map((l) => (
@@ -235,8 +325,9 @@ export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) 
       </div>
       <div className="sub" style={{ marginTop: 6 }}>
         {total.toLocaleString()} line{total === 1 ? "" : "s"}
-        {query && total !== lines.length ? ` of ${lines.length.toLocaleString()}` : ""}
-        {lines.length >= LOG_BUFFER_CAP ? ` · buffer capped at ${LOG_BUFFER_CAP.toLocaleString()}` : ""}
+        {mode === "live" && query && total !== lines.length ? ` of ${lines.length.toLocaleString()}` : ""}
+        {mode === "live" && lines.length >= LOG_BUFFER_CAP ? ` · buffer capped at ${LOG_BUFFER_CAP.toLocaleString()}` : ""}
+        {mode === "history" && histTruncated ? " · truncated (narrow the range or search)" : ""}
       </div>
     </div>
   );

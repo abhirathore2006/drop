@@ -56,6 +56,12 @@ export interface Config {
   metricsRetentionDays: number; // api: retention for traffic_minutes + uptime_checks; swept in housekeeping (default 30d)
   uptimeIntervalMs: number; // api: how often the synthetic uptime poller sweeps (default 60s)
   edgeInternalUrl?: string; // api: the edge origin the uptime poller GETs (Host-routed). Unset → HTTP probes skipped (DB TCP still runs)
+  // --- searchable log retention (G4) ---
+  logsCollect: boolean; // api: DROP_LOGS_COLLECT — master enable for the pod-log collector (default on; needs compute/kube)
+  logRetentionDays: number; // api: default retention for retained log objects, org-overridable via `log_retention_days` (default 7d)
+  logFlushIntervalMs: number; // api: how often the collector flushes buffered lines to S3 objects (default 10s)
+  logReconcileIntervalMs: number; // api: how often the collector starts/stops tails to match running workloads (default 15s)
+  logMaxConcurrentTails: number; // api: cap on concurrent pod-log follow streams — the fan-out bound (default 50)
   docsDir: string; // api: static docs site served at /docs (relative to cwd)
   cliDir: string; // api: dir holding the CLI bundles served at /cli (relative to cwd)
   // --- app secrets backend (chosen at deploy time) ---
@@ -207,6 +213,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       };
     })(),
     previewSweepIntervalMs: Number(env.DROP_PREVIEW_SWEEP_INTERVAL_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
+    // (G4) searchable log retention. The collector only runs when compute (kube) is on; DROP_LOGS_COLLECT=0
+    // turns it off even then. Retention default 7d is org-overridable via the `log_retention_days` quota key.
+    logsCollect: env.DROP_LOGS_COLLECT !== "0",
+    logRetentionDays: Number(env.DROP_LOG_RETENTION_DAYS ?? "7") || 7,
+    logFlushIntervalMs: Number(env.DROP_LOG_FLUSH_INTERVAL_MS ?? "10000") || 10000,
+    logReconcileIntervalMs: Number(env.DROP_LOG_RECONCILE_INTERVAL_MS ?? "15000") || 15000,
+    logMaxConcurrentTails: Number(env.DROP_LOG_MAX_CONCURRENT_TAILS ?? "50") || 50,
     // db:proxy (A3): direct-dial is the in-cluster posture (the DB Service DNS is reachable from the pod);
     // locally the API is outside the cluster, so it defaults OFF and the tunnel returns 501 (documented).
     authEngineImage: env.DROP_AUTH_ENGINE_IMAGE || GOTRUE_IMAGE,

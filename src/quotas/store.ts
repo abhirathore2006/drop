@@ -6,8 +6,8 @@ import { sql } from "kysely";
 import type { Db } from "../db/db.ts";
 import { MAX_DB_STORAGE, storageToBytes } from "../db-config.ts";
 
-export type QuotaKey = "max_workloads" | "max_db_storage" | "storage_budget_bytes";
-export const QUOTA_KEYS: readonly QuotaKey[] = ["max_workloads", "max_db_storage", "storage_budget_bytes"];
+export type QuotaKey = "max_workloads" | "max_db_storage" | "storage_budget_bytes" | "log_retention_days";
+export const QUOTA_KEYS: readonly QuotaKey[] = ["max_workloads", "max_db_storage", "storage_budget_bytes", "log_retention_days"];
 
 export interface QuotaOverride {
   key: string;
@@ -35,6 +35,9 @@ export function validateQuota(key: string, value: unknown): string | null {
   }
   if (key === "storage_budget_bytes") {
     return parseByteSize(value) != null ? null : "storage_budget_bytes must be a byte count or a k8s quantity like 10Gi";
+  }
+  if (key === "log_retention_days") {
+    return /^\d+$/.test(value) ? null : "log_retention_days must be a non-negative integer (days; 0 = disable log retention)";
   }
   return `unknown quota key "${key}" (allowed: ${QUOTA_KEYS.join(", ")})`;
 }
@@ -91,5 +94,14 @@ export class QuotaStore {
     const v = await this.get(orgId, "storage_budget_bytes");
     if (v == null) return null;
     return parseByteSize(v);
+  }
+
+  /** (G4) The org's searchable-log retention window in days. Override → the platform default (config,
+   *  7d). 0 disables retention (the sweep deletes everything on the next tick). */
+  async resolvedLogRetentionDays(orgId: string, cfgDefault: number): Promise<number> {
+    const v = await this.get(orgId, "log_retention_days");
+    if (v == null) return cfgDefault;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : cfgDefault;
   }
 }

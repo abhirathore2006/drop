@@ -63,8 +63,9 @@ export interface KubeClient {
    *  app (documented behavior; a future console live-tail may fan out to N pods). Returns null if no
    *  pod can be found. The stream is the raw chunked response body; destroying it (or aborting
    *  `opts.signal`) must tear down the upstream connection so a client disconnect never leaks a
-   *  socket. */
-  getWorkloadLogsStream(namespace: string, name: string, opts?: { tailLines?: number; signal?: AbortSignal }): Promise<Readable | null>;
+   *  socket. (G4) `sinceTime` (RFC3339) resumes from a point in time instead of `tailLines` — the log
+   *  collector passes the last-seen line's timestamp so a restarted tail doesn't re-ingest the backlog. */
+  getWorkloadLogsStream(namespace: string, name: string, opts?: { tailLines?: number; sinceTime?: string; signal?: AbortSignal }): Promise<Readable | null>;
   /** Run a release Job (priors already GC'd by deleteReleaseJobs) and wait for it to terminally
    *  succeed or fail/timeout, bounded by `timeoutMs`. Returns the outcome + the tail of the release
    *  pod's logs. Never THROWS on Job failure — the deploy path halts on `ok:false` and surfaces logs. */

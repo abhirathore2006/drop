@@ -439,4 +439,84 @@ export class MetaStore {
       .execute();
     return rows.map((r) => ({ name: r.name as string, namespace: r.ns as string, orgId: r.org_id as string }));
   }
+
+  // ---- (G4) searchable log retention: the `log_objects` index ----
+
+  /** Every RUNNING, DEPLOYED workload the log collector may tail (apps + databases with a namespace and a
+   *  current version). Surfaces the version config's `logRetention` opt-out/opt-in flag so the collector
+   *  applies shouldCollectLogs (DBs off by default, apps/sites on). Bounded to the pod-backed types. */
+  async listLogCollectionTargets(): Promise<{ name: string; type: WorkloadType; namespace: string; logRetention?: boolean }[]> {
+    const rows = await this.db
+      .selectFrom("sites")
+      .innerJoin("organisations", "organisations.id", "sites.org_id")
+      .leftJoin("versions", (j) => j.onRef("versions.site_name", "=", "sites.name").onRef("versions.id", "=", "sites.current_version"))
+      .select(["sites.name as name", "sites.type as type", "organisations.namespace as ns", "versions.config as vconfig"])
+      .where("sites.type", "in", ["app", "database"])
+      .where("sites.runtime_state", "=", "running")
+      .where("sites.current_version", "is not", null)
+      .execute();
+    return rows.map((r) => {
+      const cfg = parseVersionCfg((r as Record<string, unknown>).vconfig) as { logRetention?: boolean } | undefined;
+      return {
+        name: r.name as string,
+        type: (r.type as WorkloadType) ?? "app",
+        namespace: r.ns as string,
+        logRetention: typeof cfg?.logRetention === "boolean" ? cfg.logRetention : undefined,
+      };
+    });
+  }
+
+  /** Upsert the index row for a flushed log object. A flush REWRITES an hour's object with its full
+   *  accumulated set, so the row upserts on (site, hour) with the current line/byte counts. */
+  async insertLogObject(o: { siteName: string; hour: Date; key: string; lines: number; bytes: number }): Promise<void> {
+    await this.db
+      .insertInto("log_objects")
+      .values({ site_name: o.siteName, hour: o.hour, key: o.key, lines: o.lines, bytes: o.bytes, created_at: sql`now()` })
+      .onConflict((oc) => oc.columns(["site_name", "hour"]).doUpdateSet({ key: o.key, lines: o.lines, bytes: o.bytes }))
+      .execute();
+  }
+
+  /** (search) The site's log objects whose hour bucket overlaps [from,to], NEWEST FIRST. Broadened by one
+   *  hour on the `from` side so a bucket straddling the range's start is still scanned (its later records
+   *  may fall in range); the per-record ts filter in searchLogObjects does the exact trimming. */
+  async listLogObjectsInRange(site: string, from: Date, to: Date): Promise<{ hour: Date; key: string }[]> {
+    const fromHour = new Date(from.getTime() - 3_600_000);
+    const rows = await this.db
+      .selectFrom("log_objects")
+      .select(["hour", "key"])
+      .where("site_name", "=", site)
+      .where("hour", ">=", fromHour)
+      .where("hour", "<=", to)
+      .orderBy("hour", "desc")
+      .execute();
+    return rows.map((r) => ({ hour: r.hour instanceof Date ? r.hour : new Date(r.hour as unknown as string), key: r.key }));
+  }
+
+  /** (retention) Distinct sites that have log objects, each with its OWNING org id (null when the site was
+   *  deleted — its rows survive here, no FK — so the sweep falls back to the platform default window). */
+  async listLogObjectSites(): Promise<{ siteName: string; orgId: string | null }[]> {
+    const rows = await this.db
+      .selectFrom("log_objects")
+      .leftJoin("sites", "sites.name", "log_objects.site_name")
+      .select(["log_objects.site_name as site_name", "sites.org_id as org_id"])
+      .distinct()
+      .execute();
+    return rows.map((r) => ({ siteName: r.site_name as string, orgId: (r.org_id as string | null) ?? null }));
+  }
+
+  /** (retention) A site's log objects older than the cutoff — the set the sweep deletes (S3 then row). */
+  async listLogObjectsBefore(site: string, cutoff: Date): Promise<{ hour: Date; key: string }[]> {
+    const rows = await this.db
+      .selectFrom("log_objects")
+      .select(["hour", "key"])
+      .where("site_name", "=", site)
+      .where("hour", "<", cutoff)
+      .execute();
+    return rows.map((r) => ({ hour: r.hour instanceof Date ? r.hour : new Date(r.hour as unknown as string), key: r.key }));
+  }
+
+  /** (retention) Drop one index row after its S3 object is deleted. Idempotent (a no-op if already gone). */
+  async deleteLogObject(site: string, hour: Date): Promise<void> {
+    await this.db.deleteFrom("log_objects").where("site_name", "=", site).where("hour", "=", hour).execute();
+  }
 }

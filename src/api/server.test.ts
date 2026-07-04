@@ -11,12 +11,13 @@ import { FakeBucketStore } from "../buckets/fake.ts";
 import { QuotaStore } from "../quotas/store.ts";
 import { MetaStore } from "../metastore/store.ts";
 import { LockStore } from "../metastore/lock.ts";
-import { StackStore } from "../stacks/store.ts";
+import { StackStore, EnvironmentStore } from "../stacks/store.ts";
 import { UserStore } from "../users/store.ts";
 import { OrgStore } from "../orgs/store.ts";
 import { AuditStore } from "../audit/store.ts";
 import { ServiceTokenStore } from "../tokens/store.ts";
 import { makeTestDb } from "../db/testdb.ts";
+import { serializeNdjsonGz, logObjectKey, type LogRecord } from "../logs/format.ts";
 import { FakeVerifier, ChainVerifier } from "../auth/oidc.ts";
 import { TokenVerifier } from "../auth/token-verifier.ts";
 import { loadConfig } from "../config.ts";
@@ -1409,6 +1410,61 @@ test("logs endpoint is gated above viewer (viewer 403 — logs may leak secrets;
   // promote to EDITOR → logs allowed
   await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "editor" });
   expect((await call(app, "GET", "/v1/sites/billing/logs", "bob")).status).toBe(200);
+  await db.destroy();
+});
+
+// ---- G4: historical log search over the retained S3 objects ----
+
+// Seed a retained log object (gzipped NDJSON) + its index row so the search route has something to read.
+async function seedLogObject(meta: MetaStore, blob: FakeBlob, site: string, hour: string, records: LogRecord[]) {
+  const key = logObjectKey(site, new Date(hour));
+  const bytes = serializeNdjsonGz(records);
+  await blob.put(key, bytes, bytes.byteLength, "application/gzip");
+  await meta.insertLogObject({ siteName: site, hour: new Date(hour), key, lines: records.length, bytes: bytes.byteLength });
+}
+
+test("GET /v1/sites/:name/logs/search: time-range + substring match over indexed objects, capped/truncated", async () => {
+  const { app, meta, blob, db } = await mk();
+  await call(app, "POST", "/v1/apps/logsearch", "alice", { image: "x:1" });
+  const rec = (ts: string, line: string): LogRecord => ({ ts, site: "logsearch", pod: "logsearch", stream: "stdout", line });
+  await seedLogObject(meta, blob, "logsearch", "2026-07-04T09:00:00Z", [rec("2026-07-04T09:10:00Z", "GET /a 200"), rec("2026-07-04T09:20:00Z", "ERROR boom")]);
+  await seedLogObject(meta, blob, "logsearch", "2026-07-04T10:00:00Z", [rec("2026-07-04T10:05:00Z", "GET /b 200"), rec("2026-07-04T10:30:00Z", "ERROR kaboom")]);
+
+  // substring q=ERROR across the whole day → newest object first
+  const r = await call(app, "GET", "/v1/sites/logsearch/logs/search?from=2026-07-04T00:00:00Z&to=2026-07-04T23:00:00Z&q=ERROR", "alice");
+  expect(r.status).toBe(200);
+  const j = (await r.json()) as { lines: { line: string }[]; truncated: boolean; scanned: number };
+  expect(j.lines.map((l) => l.line)).toEqual(["ERROR kaboom", "ERROR boom"]);
+  expect(j.truncated).toBe(false);
+  expect(j.scanned).toBe(2);
+
+  // time range narrows to the hour-10 object only
+  const r2 = await call(app, "GET", "/v1/sites/logsearch/logs/search?from=2026-07-04T10:00:00Z&to=2026-07-04T11:00:00Z&q=", "alice");
+  expect(((await r2.json()) as { lines: { line: string }[] }).lines.map((l) => l.line)).toEqual(["GET /b 200", "ERROR kaboom"]);
+
+  // cap → truncated flag
+  const r3 = await call(app, "GET", "/v1/sites/logsearch/logs/search?from=2026-07-04T00:00:00Z&to=2026-07-04T23:00:00Z&q=&limit=1", "alice");
+  const j3 = (await r3.json()) as { lines: unknown[]; truncated: boolean };
+  expect(j3.lines).toHaveLength(1);
+  expect(j3.truncated).toBe(true);
+  await db.destroy();
+});
+
+test("GET /v1/sites/:name/logs/search is gated like live logs (viewer 403; editor 200) and 400s a bad regex / range", async () => {
+  const { app, meta, blob, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
+  await seedLogObject(meta, blob, "billing", "2026-07-04T10:00:00Z", [{ ts: "2026-07-04T10:05:00Z", site: "billing", pod: "billing", stream: "stdout", line: "hello" }]);
+  // viewer: metadata-only — retained logs can leak env-injected secrets, same gate as the live tail
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "viewer" });
+  expect((await call(app, "GET", "/v1/sites/billing/logs/search?q=hello", "bob")).status).toBe(403);
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "editor" });
+  expect((await call(app, "GET", "/v1/sites/billing/logs/search?q=hello", "bob")).status).toBe(200);
+  // a bad regex → 400 (not a 500)
+  expect((await call(app, "GET", "/v1/sites/billing/logs/search?q=(&regex=1", "alice")).status).toBe(400);
+  // from > to → 400
+  expect((await call(app, "GET", "/v1/sites/billing/logs/search?from=2026-07-04T11:00:00Z&to=2026-07-04T10:00:00Z", "alice")).status).toBe(400);
+  // unknown site → 404
+  expect((await call(app, "GET", "/v1/sites/nope/logs/search?q=x", "alice")).status).toBe(404);
   await db.destroy();
 });
 

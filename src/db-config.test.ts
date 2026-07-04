@@ -152,3 +152,10 @@ test("sanitizeDatabaseConfig: keeps only allowlisted extensions (deduped, order-
   const twice = sanitizeDatabaseConfig(JSON.parse(JSON.stringify(c)))!;
   expect(twice.extensions).toEqual(["pgvector", "pg_trgm"]);
 });
+
+test("(G4) log_retention opt-in: databases are off by default; only an explicit boolean is stored", () => {
+  expect(sanitizeDatabaseConfig({})!.logRetention).toBeUndefined(); // default off (nothing stored)
+  expect(sanitizeDatabaseConfig({ log_retention: true })!.logRetention).toBe(true); // opt-in
+  expect(sanitizeDatabaseConfig({ logRetention: true })!.logRetention).toBe(true); // round-trip form
+  expect(sanitizeDatabaseConfig({ log_retention: "true" })!.logRetention).toBeUndefined(); // junk dropped
+});

@@ -287,6 +287,19 @@ export class Client {
     const qs = q.toString();
     return this.req("GET", `/v1/sites/${name}/logs${qs ? `?${qs}` : ""}`);
   }
+  /** (G4) Search the retained log history: time-range narrows to indexed S3 objects, the text match runs
+   *  server-side (grep-grade substring/regex). `from`/`to` are ISO/epoch; `q` is the pattern. */
+  logsSearch(name: string, opts: { from?: string; to?: string; q?: string; limit?: number; regex?: boolean; ignoreCase?: boolean } = {}) {
+    const p = new URLSearchParams();
+    if (opts.from) p.set("from", opts.from);
+    if (opts.to) p.set("to", opts.to);
+    if (opts.q) p.set("q", opts.q);
+    if (opts.limit) p.set("limit", String(opts.limit));
+    if (opts.regex) p.set("regex", "1");
+    if (opts.ignoreCase) p.set("i", "1");
+    const qs = p.toString();
+    return this.req("GET", `/v1/sites/${name}/logs/search${qs ? `?${qs}` : ""}`);
+  }
   /** Stream logs live (G1, `drop logs -f`): the server keeps the connection open and writes new
    *  lines as they arrive. Returns the raw fetch Response — unlike `req()`, the body is
    *  `text/plain`, not JSON — so the caller can pump `.body` and abort it (e.g. on Ctrl-C). */
@@ -326,15 +339,16 @@ export class Client {
       body: JSON.stringify(target),
     });
   }
-  // stacks (B2): declarative multi-resource up + list/status/delete
+  // stacks (B2): declarative multi-resource up + list/status/delete. (E3) `env` targets an environment.
   stackUp(
     name: string,
     spec: StackSpec,
-    opts: { org?: string; dryRun?: boolean; prune?: boolean; resolved?: Record<string, { image: string }>; specVersion?: number } = {},
+    opts: { org?: string; dryRun?: boolean; prune?: boolean; resolved?: Record<string, { image: string }>; specVersion?: number; env?: string } = {},
   ) {
     const q = new URLSearchParams();
     if (opts.org) q.set("org", opts.org);
     if (opts.dryRun) q.set("dry_run", "1");
+    if (opts.env) q.set("env", opts.env);
     const qs = q.toString();
     return this.req("POST", `/v1/stacks/${name}/up${qs ? `?${qs}` : ""}`, {
       contentType: "application/json",
@@ -344,8 +358,35 @@ export class Client {
   stackList(org?: string) {
     return this.req("GET", `/v1/stacks${org ? `?org=${encodeURIComponent(org)}` : ""}`);
   }
-  stackGet(name: string, org?: string) {
-    return this.req("GET", `/v1/stacks/${name}${org ? `?org=${encodeURIComponent(org)}` : ""}`);
+  stackGet(name: string, opts: { org?: string; env?: string } = {}) {
+    const q = new URLSearchParams();
+    if (opts.org) q.set("org", opts.org);
+    if (opts.env) q.set("env", opts.env);
+    const qs = q.toString();
+    return this.req("GET", `/v1/stacks/${name}${qs ? `?${qs}` : ""}`);
+  }
+  // environments (E3): named durable instantiations with a per-env variable overlay
+  envList(name: string, org?: string) {
+    return this.req("GET", `/v1/stacks/${encodeURIComponent(name)}/environments${org ? `?org=${encodeURIComponent(org)}` : ""}`);
+  }
+  envCreate(name: string, env: string, variables: Record<string, string>, org?: string) {
+    return this.req("POST", `/v1/stacks/${encodeURIComponent(name)}/environments${org ? `?org=${encodeURIComponent(org)}` : ""}`, {
+      contentType: "application/json",
+      body: JSON.stringify({ env, variables }),
+    });
+  }
+  envDelete(name: string, env: string, opts: { org?: string; cascade?: boolean } = {}) {
+    const q = new URLSearchParams();
+    if (opts.org) q.set("org", opts.org);
+    if (opts.cascade) q.set("cascade", "1");
+    const qs = q.toString();
+    return this.req("DELETE", `/v1/stacks/${encodeURIComponent(name)}/environments/${encodeURIComponent(env)}${qs ? `?${qs}` : ""}`);
+  }
+  envPromote(name: string, source: string, to: string, org?: string) {
+    return this.req("POST", `/v1/stacks/${encodeURIComponent(name)}/environments/${encodeURIComponent(source)}/promote${org ? `?org=${encodeURIComponent(org)}` : ""}`, {
+      contentType: "application/json",
+      body: JSON.stringify({ to }),
+    });
   }
   stackDelete(name: string, opts: { org?: string; cascade?: boolean } = {}) {
     const q = new URLSearchParams();
