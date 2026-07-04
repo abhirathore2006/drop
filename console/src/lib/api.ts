@@ -376,7 +376,7 @@ export interface TemplateResource {
   image?: string;
   dir?: string;
   env?: Record<string, string>;
-  uses?: { database?: string; bucket?: string; cache?: string; auth?: string }[];
+  uses?: { database?: string; bucket?: string; cache?: string; auth?: string; app?: string }[];
   env_from?: { resource: string; as: string; output: string }[];
   storage?: string;
 }
@@ -545,8 +545,14 @@ export function templatePreviewGraph(spec: TemplateSpec): StackGraph {
   for (const [key, res] of Object.entries(spec.resources)) {
     if (res.type === "app")
       for (const u of res.uses ?? []) {
-        const target = u.database ?? u.bucket ?? u.cache ?? u.auth;
-        if (target && keys.has(target)) edges.push({ from: target, to: key, kind: "uses", label: u.database ? "PG*" : u.bucket ? "S3_*" : u.cache ? "REDIS_URL" : "AUTH_*" });
+        const target = u.database ?? u.bucket ?? u.cache ?? u.auth ?? u.app;
+        if (target && keys.has(target))
+          edges.push({
+            from: target,
+            to: key,
+            kind: "uses",
+            label: u.database ? "PG*" : u.bucket ? "S3_*" : u.cache ? "REDIS_URL" : u.auth ? "AUTH_*" : `${u.app!.toUpperCase()}_URL`,
+          });
       }
     if (res.type === "site") for (const e of res.env_from ?? []) if (keys.has(e.resource)) edges.push({ from: e.resource, to: key, kind: "env_from", label: "URL at publish" });
   }

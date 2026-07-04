@@ -4,9 +4,14 @@
 //
 // LAZY CHUNK: xterm, the fit addon, and xterm's stylesheet are pulled in via dynamic import() INSIDE the
 // connect path, so they never enter the main bundle and only load when a shell is actually opened. The
-// stylesheet is imported (Vite extracts it to a hashed .css file loaded via <link>), NOT injected inline
-// — that keeps the strict `style-src 'self'` CSP intact. xterm's runtime element styles are set through
-// the CSSOM (element.style.*), which CSP does not govern.
+// base stylesheet is imported (Vite extracts it to a hashed .css file loaded via <link>), covered by
+// `style-src 'self'`.
+//
+// CSP NONCE: xterm's DOM renderer ALSO injects two runtime <style> elements (cell dimensions + ANSI
+// theme) via createElement — governed by `style-src`, and blocked under a bare 'self'. Rather than
+// weaken the CSP to 'unsafe-inline', the shell serves a per-response style nonce (in the CSP header +
+// the <meta name="csp-style-nonce"> tag); `withStyleNonce` stamps that nonce onto every <style>
+// created during term.open(), so the browser admits them. script-src stays strict 'self'.
 //
 // SECRETS ACK: a shell can `env` the container, so an app's write-only injected secrets become readable.
 // The one-time-per-app confirm below states that up front; the ack is persisted in localStorage so it
@@ -18,6 +23,30 @@ import { StreamHeader, type StreamState } from "../../components/StreamHeader.ts
 import { ApiError, api, execSocketUrl, type Detail } from "../../lib/api.ts";
 import { decodeServerFrame, encodeResizeFrame, encodeStdin, toBytes } from "../../lib/exec-stream.ts";
 import { rememberLocation, sessionExpiry } from "../../lib/query.ts";
+
+/** The per-response CSP style nonce the API stamped into the shell's <meta> (empty under vite dev,
+ *  which sets no strict CSP). */
+const styleNonce = (): string => document.querySelector<HTMLMetaElement>('meta[name="csp-style-nonce"]')?.content ?? "";
+
+/** Run `fn` (xterm's term.open) with document.createElement patched to stamp the CSP nonce onto any
+ *  <style> element xterm injects, so `style-src 'nonce-…'` admits them. Restored immediately after —
+ *  the nonce persists on those elements, so xterm's later textContent updates stay allowed. No-op when
+ *  there's no nonce (dev). */
+function withStyleNonce<T>(fn: () => T): T {
+  const nonce = styleNonce();
+  if (!nonce) return fn();
+  const orig = document.createElement.bind(document);
+  document.createElement = ((tag: string, opts?: ElementCreationOptions) => {
+    const el = orig(tag, opts);
+    if (String(tag).toLowerCase() === "style") (el as HTMLElement).setAttribute("nonce", nonce);
+    return el;
+  }) as typeof document.createElement;
+  try {
+    return fn();
+  } finally {
+    document.createElement = orig;
+  }
+}
 
 const ackKey = (name: string) => `drop.exec.ack.${name}`;
 const isAcked = (name: string): boolean => {
@@ -99,7 +128,8 @@ export function TerminalPanel({ d }: { d: Detail }) {
       term = new Terminal({ cursorBlink: true, fontFamily: "ui-monospace, SFMono-Regular, monospace", fontSize: 12.5, scrollback: 5000, convertEol: false });
       const fit = new FitAddon();
       term.loadAddon(fit);
-      term.open(containerRef.current);
+      // Stamp the CSP style nonce onto xterm's injected <style> elements created during open().
+      withStyleNonce(() => term!.open(containerRef.current!));
       try {
         fit.fit();
       } catch {

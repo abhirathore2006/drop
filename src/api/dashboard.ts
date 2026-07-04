@@ -4,6 +4,7 @@
 // plus content-hashed assets/* — it calls /v1/* with the session cookie.
 import { readFile } from "node:fs/promises";
 import { readFileSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
 export interface ConsoleCfg {
@@ -11,17 +12,25 @@ export interface ConsoleCfg {
   baseDomain: string;
 }
 
-// Strict same-origin CSP is possible because the Vite build emits NO inline scripts or
-// styles (external hashed files only) — mandatory groundwork for the exec terminal / SQL
-// surfaces later. Applied to every shell response, including the not-built fallback.
-const SHELL_HEADERS: Record<string, string> = {
+const NONCE_PLACEHOLDER = "__CSP_STYLE_NONCE__"; // stamped into console/index.html's meta at build
+
+// Strict same-origin CSP. script-src stays 'self' with NO 'unsafe-inline' — the load-bearing XSS
+// defense (the Vite build emits only external hashed scripts). style-src is 'self' PLUS a
+// per-response nonce: 'self' still covers the external hashed stylesheets, and the nonce admits
+// xterm's runtime-injected <style> elements (M3 terminal) WITHOUT ever allowing 'unsafe-inline'.
+// The nonce also matches the <meta name="csp-style-nonce"> the shell carries, so the terminal can
+// stamp it onto those style elements at mount. Everything else (img/connect/font/default) is 'self',
+// so even a hypothetical injected style has no host to exfiltrate to.
+const cspFor = (nonce: string): string =>
+  `default-src 'self'; script-src 'self'; style-src 'self' 'nonce-${nonce}'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`;
+
+const shellHeaders = (nonce: string): Record<string, string> => ({
   "content-type": "text/html; charset=utf-8",
-  "content-security-policy":
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "content-security-policy": cspFor(nonce),
   "x-content-type-options": "nosniff",
   "referrer-policy": "strict-origin-when-cross-origin",
   "cache-control": "no-cache", // the shell must revalidate; its hashed assets are immutable
-};
+});
 
 // Self-contained "not built yet" page (dev / fresh clone). Deliberately style-free: it must
 // not violate the style-src 'self' CSP above, and / must never 500 just because the console
@@ -47,18 +56,22 @@ const NOT_BUILT_HTML = `<!doctype html>
 // replaces dist/ui/index.html is picked up without restarting the API.
 let shellCache: { mtimeMs: number; size: number; html: string } | null = null;
 
-/** The SPA shell served at / and every client-side route (deep links + refresh load it). */
+/** The SPA shell served at / and every client-side route (deep links + refresh load it).
+ *  A fresh style nonce per response is stamped into both the CSP header and the shell's
+ *  meta tag (so they always match — a stale cached HTML never carries a live nonce). */
 export function consoleShell(cfg: ConsoleCfg): Response {
   const path = join(cfg.cliDir, "ui", "index.html");
+  const nonce = randomBytes(16).toString("base64url");
   try {
     const st = statSync(path);
     if (!shellCache || shellCache.mtimeMs !== st.mtimeMs || shellCache.size !== st.size) {
       shellCache = { mtimeMs: st.mtimeMs, size: st.size, html: readFileSync(path, "utf8") };
     }
-    return new Response(shellCache.html, { headers: SHELL_HEADERS });
+    const html = shellCache.html.replaceAll(NONCE_PLACEHOLDER, nonce);
+    return new Response(html, { headers: shellHeaders(nonce) });
   } catch {
     shellCache = null;
-    return new Response(NOT_BUILT_HTML, { headers: SHELL_HEADERS });
+    return new Response(NOT_BUILT_HTML, { headers: shellHeaders(nonce) });
   }
 }
 

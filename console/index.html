@@ -3,6 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The API stamps a per-response CSP style nonce here (matched in the style-src header) so
+         xterm's runtime-injected <style> elements are allowed without weakening the CSP to
+         'unsafe-inline'. Empty in dev (vite dev sets no strict CSP). -->
+    <meta name="csp-style-nonce" content="__CSP_STYLE_NONCE__" />
     <title>drop · console</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpolygon points='4,2 13,8 4,14' fill='%2384cc16'/%3E%3C/svg%3E" />
   </head>
