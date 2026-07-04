@@ -28,7 +28,7 @@ async function tgz(files: Record<string, string>): Promise<Buffer> {
   return await buffer(p.pipe(createGzip()));
 }
 
-async function mk(opts: { admins?: string[]; env?: Record<string, string>; authEngine?: any; authAdmin?: any } = {}) {
+async function mk(opts: { admins?: string[]; env?: Record<string, string>; authEngine?: any; authAdmin?: any; queryExecutor?: any } = {}) {
   const db = await makeTestDb();
   const users = new UserStore(db);
   if (opts.admins) await users.seedAdmins(opts.admins);
@@ -58,7 +58,7 @@ async function mk(opts: { admins?: string[]; env?: Record<string, string>; authE
   const locks = new LockStore(db);
   const bucket = new FakeBucketStore();
   const quotas = new QuotaStore(db);
-  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens, authEngine: opts.authEngine, authAdmin: opts.authAdmin }), meta, blob, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens, db, users };
+  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens, authEngine: opts.authEngine, authAdmin: opts.authAdmin, queryExecutor: opts.queryExecutor }), meta, blob, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens, db, users };
 }
 
 const pub = (app: any, tok: string, name: string, body: Buffer) =>
@@ -609,6 +609,31 @@ test("delete: app deletion tears down the k8s workload (no orphan)", async () =>
   await db.destroy();
 });
 
+test("delete: a stateful app requires ?force=1 (409) — data-loss gate on its volume", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/apps/notes", "alice", { image: "x:1", stateful: { volume: "2Gi", mount: "/data" } });
+  const ns = kube.applies[0]!.namespace;
+
+  const refused = await call(app, "DELETE", "/v1/sites/notes", "alice");
+  expect(refused.status).toBe(409);
+  expect((await refused.json()).error).toMatch(/stateful.*volume|force=1/i);
+  expect(kube.deletes).toEqual([]); // refused BEFORE any teardown
+
+  const forced = await call(app, "DELETE", "/v1/sites/notes?force=1", "alice");
+  expect(forced.status).toBe(200);
+  expect(kube.deletes).toContainEqual({ namespace: ns, name: "notes", dropVolume: true }); // PVC removal requested
+  await db.destroy();
+});
+
+test("delete: a NON-stateful app never sets dropVolume, even with ?force=1", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
+  const ns = kube.applies[0]!.namespace;
+  expect((await call(app, "DELETE", "/v1/sites/billing?force=1", "alice")).status).toBe(200);
+  expect(kube.deletes).toContainEqual({ namespace: ns, name: "billing" }); // no dropVolume key at all
+  await db.destroy();
+});
+
 test("transfer: app workload is removed from the OLD owner's namespace", async () => {
   const { app, kube, db } = await mk();
   await call(app, "POST", "/v1/apps/billing", "alice", { image: "x:1" });
@@ -1004,6 +1029,118 @@ test("db tunnel-ticket (A3): connect-tier issuance — owner + editor issue, a v
   expect((await call(app, "POST", "/v1/databases/nope/tunnel-ticket", "alice", {})).status).toBe(404);
   await pub(app, "alice", "asite", await tgz({ "index.html": "x" }));
   expect((await call(app, "POST", "/v1/databases/asite/tunnel-ticket", "alice", {})).status).toBe(409);
+  await db.destroy();
+});
+
+// ---- (I4) SQL console: read-only query API ------------------------------------------------------
+
+// A scripted fake executor injected into Deps: records every request the route hands it (so we can
+// assert the caps + timeout the route requests) and returns a scripted result or throws a scripted
+// error. Read-only enforcement itself (BEGIN READ ONLY + statement_timeout at the engine) lives in the
+// REAL executor (src/api/sql-query.ts) and is integration-tested MANUALLY against a real Postgres — the
+// repo's test infra is PGlite, so here the executor is faked and we assert the route's contract with it.
+function fakeExecutor(script: { result?: any; error?: string }) {
+  const calls: any[] = [];
+  const fn = async (req: any) => {
+    calls.push(req);
+    if (script.error) throw new Error(script.error);
+    return script.result;
+  };
+  (fn as any).calls = calls;
+  return fn as any;
+}
+const okResult = { columns: [{ name: "id" }, { name: "name" }], rows: [[1, "a"], [2, "b"]], rowCount: 2, truncated: false, elapsedMs: 3 };
+
+test("db query (I4): owner runs a read-only query; the route requests the caps + 5s timeout; audited with the statement", async () => {
+  const exec = fakeExecutor({ result: okResult });
+  const { app, audit, db } = await mk({ env: { DROP_TUNNEL_DIRECT: "1" }, queryExecutor: exec });
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  const r = await call(app, "POST", "/v1/databases/billing/query", "alice", { sql: "select id, name from t" });
+  expect(r.status).toBe(200);
+  const j = await r.json();
+  expect(j.columns).toEqual([{ name: "id" }, { name: "name" }]);
+  expect(j.rows).toEqual([[1, "a"], [2, "b"]]);
+  expect(j.rowCount).toBe(2);
+  expect(j.truncated).toBe(false);
+  expect(typeof j.elapsedMs).toBe("number");
+  // the route DELEGATES enforcement — it must request the read-only caps + 5s timeout from the executor
+  expect(exec.calls).toHaveLength(1);
+  expect(exec.calls[0].sql).toBe("select id, name from t");
+  expect(exec.calls[0].database).toBe("billing");
+  expect(exec.calls[0].rowCap).toBe(500);
+  expect(exec.calls[0].statementTimeoutMs).toBe(5000);
+  expect(exec.calls[0].byteCap).toBeGreaterThan(0);
+  // audited: db.query with the exact statement text (i.e. queries are logged)
+  const { entries } = await audit.list({ action: "db.query", target: "billing" });
+  expect(entries).toHaveLength(1);
+  expect(entries[0]!.actor).toBe("alice@example.com");
+  expect(entries[0]!.detail?.sql).toBe("select id, name from t");
+  expect(entries[0]!.detail?.ok).toBe(true);
+  await db.destroy();
+});
+
+test("db query: the executor's row-cap truncation flag passes through", async () => {
+  const exec = fakeExecutor({ result: { ...okResult, rowCount: 500, truncated: true } });
+  const { app, db } = await mk({ env: { DROP_TUNNEL_DIRECT: "1" }, queryExecutor: exec });
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  const r = await call(app, "POST", "/v1/databases/billing/query", "alice", { sql: "select * from big" });
+  expect(r.status).toBe(200);
+  expect((await r.json()).truncated).toBe(true);
+  await db.destroy();
+});
+
+test("db query: a SQL/engine error is a 400 with the sanitized message; the failed attempt is still audited", async () => {
+  const exec = fakeExecutor({ error: 'relation "nope" does not exist' });
+  const { app, audit, db } = await mk({ env: { DROP_TUNNEL_DIRECT: "1" }, queryExecutor: exec });
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  const r = await call(app, "POST", "/v1/databases/billing/query", "alice", { sql: "select * from nope" });
+  expect(r.status).toBe(400);
+  expect((await r.json()).error).toBe('relation "nope" does not exist'); // no stack — just the pg message
+  const { entries } = await audit.list({ action: "db.query", target: "billing" });
+  expect(entries).toHaveLength(1);
+  expect(entries[0]!.detail?.ok).toBe(false);
+  await db.destroy();
+});
+
+test("db query: editor allowed, viewer 403; non-database 409; unknown 404; empty sql 400", async () => {
+  const exec = fakeExecutor({ result: okResult });
+  const { app, db } = await mk({ env: { DROP_TUNNEL_DIRECT: "1" }, queryExecutor: exec });
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  // an editor may query (query is the ship/dev tier)
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "editor" });
+  expect((await call(app, "POST", "/v1/databases/billing/query", "bob", { sql: "select 1" })).status).toBe(200);
+  // a viewer may NOT — metadata-only, and a query returns ALL row data
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "viewer" });
+  expect((await call(app, "POST", "/v1/databases/billing/query", "bob", { sql: "select 1" })).status).toBe(403);
+  // empty sql → 400
+  expect((await call(app, "POST", "/v1/databases/billing/query", "alice", { sql: "   " })).status).toBe(400);
+  // a site (non-database) → 409; unknown → 404
+  await pub(app, "alice", "asite", await tgz({ "index.html": "x" }));
+  expect((await call(app, "POST", "/v1/databases/asite/query", "alice", { sql: "select 1" })).status).toBe(409);
+  expect((await call(app, "POST", "/v1/databases/nope/query", "alice", { sql: "select 1" })).status).toBe(404);
+  await db.destroy();
+});
+
+test("db query: an out-of-cluster API 501s honestly (DROP_TUNNEL_DIRECT unset) and never dials the executor", async () => {
+  const exec = fakeExecutor({ result: okResult });
+  // tunnelDirect unset (default) → the API has no route to the DB Service → 501 before the executor runs
+  const { app, db } = await mk({ queryExecutor: exec });
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  const r = await call(app, "POST", "/v1/databases/billing/query", "alice", { sql: "select 1" });
+  expect(r.status).toBe(501);
+  expect((await r.json()).error).toContain("in-cluster");
+  expect(exec.calls).toHaveLength(0); // never dialed
+  await db.destroy();
+});
+
+test("db query: the detail capabilities include `query` for the owner, not for a viewer (M2 console gating)", async () => {
+  const { app, db } = await mk({ env: { DROP_TUNNEL_DIRECT: "1" } });
+  await call(app, "POST", "/v1/databases/billing", "alice", {});
+  const asOwner = await (await call(app, "GET", "/v1/sites/billing", "alice")).json();
+  expect(asOwner.capabilities).toContain("query");
+  await call(app, "POST", "/v1/sites/billing/collaborators", "alice", { email: "bob@example.com", role: "viewer" });
+  const asViewer = await (await call(app, "GET", "/v1/sites/billing", "bob")).json();
+  expect(asViewer.capabilities).not.toContain("query");
   await db.destroy();
 });
 

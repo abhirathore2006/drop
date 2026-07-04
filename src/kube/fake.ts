@@ -79,7 +79,7 @@ export class FakeKube implements KubeClient {
   private apps = new Map<string, AppManifests>();
   readonly tenantApplies: { namespace: string; manifests: TenantManifests }[] = [];
   readonly applies: { namespace: string; name: string; manifests: AppManifests }[] = [];
-  readonly deletes: { namespace: string; name: string }[] = [];
+  readonly deletes: { namespace: string; name: string; dropVolume?: boolean }[] = [];
   readonly dbApplies: { namespace: string; name: string; manifests: DatabaseManifests }[] = [];
   readonly dbDeletes: { namespace: string; name: string }[] = [];
 
@@ -102,18 +102,25 @@ export class FakeKube implements KubeClient {
     this.applies.push({ namespace, name, manifests });
   }
 
-  async deleteApp(namespace: string, name: string): Promise<void> {
+  async deleteApp(namespace: string, name: string, opts: { dropVolume?: boolean } = {}): Promise<void> {
     this.apps.delete(this.key(namespace, name));
-    this.deletes.push({ namespace, name });
+    // (I5) Only recorded when true, so existing `toEqual({namespace,name})` assertions (predating
+    // stateful volumes) keep passing unchanged — same "no key when false" shape as `applyCache`'s doubles.
+    this.deletes.push({ namespace, name, ...(opts.dropVolume ? { dropVolume: true } : {}) });
   }
 
   async getApp(namespace: string, name: string): Promise<AppManifests | null> {
     return this.apps.get(this.key(namespace, name)) ?? null;
   }
 
+  private dbAppCreds = new Map<string, { username: string; password: string }>();
   async applyDatabase(namespace: string, name: string, manifests: DatabaseManifests): Promise<void> {
     this.dbApplies.push({ namespace, name, manifests });
     this.dbs.add(this.key(namespace, name));
+    // Remember the app creds Secret (present only at create) so readDatabaseAppSecret can return it —
+    // the read-only SQL console connector (I4) reads it back, mirroring readCachePassword's double.
+    const sd = (manifests.appSecret as { stringData?: { username?: string; password?: string } } | undefined)?.stringData;
+    if (sd?.password) this.dbAppCreds.set(this.key(namespace, name), { username: sd.username ?? "app", password: sd.password });
   }
 
   async deleteDatabase(namespace: string, name: string): Promise<void> {
@@ -128,7 +135,11 @@ export class FakeKube implements KubeClient {
     if (!this.dbs.has(this.key(namespace, name))) throw new Error(`no such database: ${name}`);
     if (this.passwordGate) await this.passwordGate;
     this.passwordSets.push({ namespace, name, password: newPassword }); // the role IS rotated
+    this.dbAppCreds.set(this.key(namespace, name), { username: "app", password: newPassword });
     if (this.passwordSyncFail) throw new PasswordSyncError(`${name}: rotated but creds Secret not synced`);
+  }
+  async readDatabaseAppSecret(namespace: string, name: string): Promise<{ username: string; password: string } | null> {
+    return this.dbAppCreds.get(this.key(namespace, name)) ?? null;
   }
 
   // Live-status doubles. Tests can preset specific values via statusOverride; otherwise an

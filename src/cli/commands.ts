@@ -43,6 +43,18 @@ async function client(): Promise<Client> {
 
 const show = (v: unknown) => console.log(JSON.stringify(v, null, 2));
 
+/** (I4) Print a SQL result set (columns + positional rows) as a monospace-aligned table. Nulls render
+ *  empty; objects (json/array cells) are compacted to JSON. Purely presentational — `--json` bypasses it. */
+function printQueryTable(cols: string[], rows: unknown[][]): void {
+  const cell = (v: unknown): string => (v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+  const widths = cols.map((c, i) => Math.max(c.length, ...rows.map((r) => cell(r[i]).length), 0));
+  const line = (vals: string[]) => "  " + vals.map((v, i) => v.padEnd(widths[i]!)).join("  ");
+  console.log(line(cols));
+  console.log("  " + widths.map((w) => "-".repeat(w)).join("  "));
+  for (const r of rows) console.log(line(cols.map((_, i) => cell(r[i]))));
+  if (!rows.length) console.log("  (no rows)");
+}
+
 /** Parse a human token-expiry duration (`90d`, `12w`, `6mo`, `1y`, or a bare day count) → whole days. */
 function parseExpiryDays(s: string): number {
   const m = /^(\d+)\s*(d|w|mo|m|y)?$/i.exec(s.trim());
@@ -593,6 +605,34 @@ export function buildProgram(): Command {
       });
     });
 
+  // (I4) SQL console — a READ-ONLY query. Read-only is session-enforced server-side (a write errors at
+  // the engine, not parsed away), audited, and bounded (5s timeout, 500 rows). For writes, use the tunnel
+  // (`drop db proxy`) + a real client — there is deliberately no `--unsafe-write` flag v1. In-cluster only:
+  // an out-of-cluster API 501s (issue queries from an in-cluster API, or use the proxy locally).
+  db
+    .command("query <name> <sql>")
+    .description("Run a READ-ONLY SQL query against a managed database (audited; 5s timeout, 500-row cap). Writes are refused — use `drop db proxy` for those.")
+    .option("--json", "print the raw result as JSON (for scripts) instead of a table")
+    .action(async (name: string, sql: string, opts: { json?: boolean }) => {
+      const err = validateName(name);
+      if (err) throw new Error(err);
+      const res = (await (await client()).dbQuery(name, sql)) as {
+        columns: { name: string }[];
+        rows: unknown[][];
+        rowCount: number;
+        truncated: boolean;
+        elapsedMs: number;
+      };
+      if (opts.json) {
+        show(res);
+        return;
+      }
+      printQueryTable(res.columns.map((col) => col.name), res.rows);
+      console.log(
+        `  (${res.rowCount} row${res.rowCount === 1 ? "" : "s"}${res.truncated ? ", truncated at 500" : ""} · ${res.elapsedMs}ms · read-only, audited)`,
+      );
+    });
+
   // (I3) connection pooling (CNPG Pooler / PgBouncer)
   const pooler = db.command("pooler").description("Manage the database's connection pooler (PgBouncer)");
   pooler
@@ -923,12 +963,23 @@ export function buildProgram(): Command {
     .command("ps <app>")
     .description("Show an app's processes (web + workers): ready/replicas, restarts, state")
     .action(async (appName: string) => {
-      const res = (await (await client()).processes(appName)) as {
-        processes: { name: string; process: string; web: boolean; ready: number; replicas: number; restarts: number; reason: string }[];
-      };
+      const c = await client();
+      // (I5) `info` (GET /v1/sites/:name) already carries every version's stored config verbatim
+      // (versions[].config) — the current version's `stateful` block rides along for free, no new API
+      // surface needed. Best-effort: a failed/permission-denied info lookup just omits the badge.
+      const [res, info] = await Promise.all([
+        c.processes(appName) as Promise<{
+          processes: { name: string; process: string; web: boolean; ready: number; replicas: number; restarts: number; reason: string }[];
+        }>,
+        c.info(appName).catch(() => null) as Promise<{ current?: string | null; versions?: { id: string; config?: { stateful?: { volume: string; mount: string } } }[] } | null>,
+      ]);
+      const stateful = info?.versions?.find((v) => v.id === info.current)?.config?.stateful;
       if (!res.processes.length) {
         console.log("  no processes running (app not deployed, or compute is off)");
         return;
+      }
+      if (stateful) {
+        console.log(`  stateful — always-on, single replica; volume ${stateful.volume} at ${stateful.mount} (no snapshots v1; delete needs --force)`);
       }
       console.log("  PROCESS   READY   RESTARTS   STATE");
       for (const p of res.processes) {
@@ -1021,7 +1072,11 @@ export function buildProgram(): Command {
     .description("List your workloads (sites, apps, databases)")
     .option("--org <slug>", "show only resources in this organisation")
     .action(async (opts: { org?: string }) => show(await (await client()).list(opts.org)));
-  program.command("rm <name>").description("Unpublish a site").action(async (name: string) => show(await (await client()).remove(name)));
+  program
+    .command("rm <name>")
+    .description("Unpublish a site / delete an app (a stateful app's volume needs --force — see `drop ps`)")
+    .option("--force", "confirm data loss: delete a stateful app's volume (or a non-empty bucket's contents)")
+    .action(async (name: string, opts: { force?: boolean }) => show(await (await client()).remove(name, opts.force)));
   program.command("share <name> <email>").description("Add a collaborator").action(async (name: string, email: string) => show(await (await client()).share(name, email)));
   program.command("unshare <name> <email>").description("Remove a collaborator").action(async (name: string, email: string) => show(await (await client()).unshare(name, email)));
   program

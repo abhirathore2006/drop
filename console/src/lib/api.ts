@@ -14,6 +14,7 @@ export type Capability =
   | "deploy"
   | "db:create"
   | "connect"
+  | "query" // (I4) run a read-only SQL query — editor+ (above viewer); gates the DB SQL-console panel
   | "rollback"
   | "configure"
   | "expose"
@@ -169,6 +170,18 @@ export interface PoolerInfo {
   enabled: boolean;
   mode?: string; // "transaction" | "session"
   host?: string;
+}
+/** (I4) A read-only SQL-console result. `rows` are positional (aligned to `columns`). `truncated` is
+ *  true when the 500-row / ~1MB cap clipped the result. */
+export interface SqlColumn {
+  name: string;
+}
+export interface SqlQueryResult {
+  columns: SqlColumn[];
+  rows: unknown[][];
+  rowCount: number;
+  truncated: boolean;
+  elapsedMs: number;
 }
 export interface Version {
   id: string;
@@ -407,6 +420,8 @@ export const api = {
   // (I3) connection pooling — enable emits a CNPG Pooler; disable deletes it.
   setDbPooler: (name: string, enable: boolean, mode?: "transaction" | "session") =>
     req<{ name: string; pooler: PoolerInfo }>("POST", `/v1/databases/${name}/pooler`, { enable, ...(mode ? { mode } : {}) }),
+  // (I4) SQL console — a READ-ONLY query (session-enforced read-only, audited, 5s timeout, 500-row cap).
+  dbQuery: (name: string, sql: string) => req<SqlQueryResult>("POST", `/v1/databases/${name}/query`, { sql }),
   rotateBucket: (name: string) =>
     req<{ name: string; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretAccessKey: string }>("POST", `/v1/buckets/${name}/rotate`, {}),
   // (K1) managed auth resource — user-admin proxy + key rotation. Never returns key material.

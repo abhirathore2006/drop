@@ -138,6 +138,11 @@ export class Client {
   dbExtAdd(name: string, extensions: string[]) {
     return this.req("POST", `/v1/databases/${name}/extensions`, { contentType: "application/json", body: JSON.stringify({ add: extensions }) });
   }
+  // (I4) SQL console: a READ-ONLY query (session-enforced read-only, 5s timeout, 500-row cap; audited).
+  // Writes are refused at the engine — use `drop db proxy` + a real client for those.
+  dbQuery(name: string, sql: string) {
+    return this.req("POST", `/v1/databases/${name}/query`, { contentType: "application/json", body: JSON.stringify({ sql }) });
+  }
   // (I2) managed cache (Valkey) — create returns REDIS_URL (password embedded) ONCE.
   cacheCreate(name: string, cache: CacheConfig | Record<string, never>, org?: string) {
     return this.req("POST", `/v1/caches/${name}${this.orgQ(org)}`, { contentType: "application/json", body: JSON.stringify(cache) });
@@ -257,8 +262,10 @@ export class Client {
   list(org?: string) {
     return this.req("GET", `/v1/sites${org ? `?org=${encodeURIComponent(org)}` : ""}`);
   }
-  remove(name: string) {
-    return this.req("DELETE", `/v1/sites/${name}`);
+  // (I5) `force` confirms data loss: a stateful app's volume (or a non-empty bucket's contents, I1) —
+  // same `?force=1` convention as `bucketRemove`.
+  remove(name: string, force?: boolean) {
+    return this.req("DELETE", `/v1/sites/${name}${force ? "?force=1" : ""}`);
   }
   share(name: string, email: string) {
     return this.req("POST", `/v1/sites/${name}/collaborators`, {

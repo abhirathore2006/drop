@@ -212,6 +212,11 @@ export class KubeApiClient implements KubeClient {
     // never leaves a stale Secret behind; then re-create only if the app still has env.
     await this.call("DELETE", this.secretPath(namespace, `${name}-env`));
     if (m.secret) await this.apply(this.secretPath(namespace, this.objName(m.secret)), m.secret as Record<string, unknown>);
+    // (I5) The stateful PVC FIRST — the Deployment's volume (persistentVolumeClaim.claimName) resolves
+    // at pod start, same ordering rule as applyCache's PVC. Never pruned/replaced here on removal (a
+    // toggled-off `stateful` leaves the PVC in place — deleting a volume is an explicit, audited
+    // `--force` action at app DELETE, not an implicit side effect of a redeploy).
+    if (m.pvc) await this.apply(this.pvcPath(namespace, this.objName(m.pvc)), m.pvc as Record<string, unknown>);
     // Web process objects (absent for a worker-only app).
     if (m.deployment) await this.apply(this.deploymentPath(namespace, name), m.deployment as Record<string, unknown>);
     if (m.service) await this.apply(this.servicePath(namespace, name), m.service as Record<string, unknown>);
@@ -306,7 +311,7 @@ export class KubeApiClient implements KubeClient {
     }
   }
 
-  async deleteApp(namespace: string, name: string): Promise<void> {
+  async deleteApp(namespace: string, name: string, opts: { dropVolume?: boolean } = {}): Promise<void> {
     await this.call("DELETE", this.hsoPath(namespace, name));
     await this.call("DELETE", this.netpolPath(namespace, `${name}-allow-interceptor`));
     await this.call("DELETE", this.servicePath(namespace, name));
@@ -316,6 +321,11 @@ export class KubeApiClient implements KubeClient {
     await this.pruneQueueScaling(namespace, name, new Set()); // (L1b) and their ScaledObjects/TriggerAuthentications
     await this.deleteReleaseJobs(namespace, name); // and any release Jobs left for log retrieval
     await this.deleteCronJob(namespace, name); // (H2) and the CronJob (+ its spawned Jobs), if this was a cron app
+    // (I5) The stateful PVC (`<name>-data`) is NEVER torn down implicitly — only when the caller passes
+    // `dropVolume: true`, which server.ts's DELETE handler sets ONLY after an explicit `?force=1` on a
+    // stateful app (data loss, audited). DELETE is 404-safe, so this is harmless to call for an app that
+    // was never stateful (dropVolume is simply never true for one).
+    if (opts.dropVolume) await this.call("DELETE", this.pvcPath(namespace, `${name}-data`));
   }
 
   async applyDatabase(namespace: string, name: string, m: DatabaseManifests): Promise<void> {
@@ -812,6 +822,20 @@ export class KubeApiClient implements KubeClient {
     } finally {
       await cleanup();
     }
+  }
+
+  /** (I4) Read the `<name>-app` creds Secret (`{username, password}`) for the read-only SQL console
+   *  connector. Same decode shape as readCachePassword; the value is used ONLY server-side (never
+   *  returned to a client). null when the Secret/keys aren't present yet. */
+  async readDatabaseAppSecret(namespace: string, name: string): Promise<{ username: string; password: string } | null> {
+    const r = await this.call("GET", this.secretPath(namespace, `${name}-app`));
+    if (r.status === 404) return null;
+    if (r.status >= 300) throw new Error(`readDatabaseAppSecret ${name} -> ${r.status}`);
+    const data = (JSON.parse(r.body).data ?? {}) as Record<string, string>;
+    const dec = (b64: string | undefined) => (b64 ? Buffer.from(b64, "base64").toString("utf8") : null);
+    const username = dec(data.username) ?? "app"; // the bootstrap role is always `app`
+    const password = dec(data.password);
+    return password ? { username, password } : null;
   }
 
   // --- app lifecycle: restart / stop (true-offline) / start ---

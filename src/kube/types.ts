@@ -20,8 +20,11 @@ export interface KubeClient {
   patchEdgeTcpPorts(namespace: string, service: string, ports: { name: string; port: number }[]): Promise<void>;
   /** Create-or-update the app's Deployment + Service + HTTPScaledObject + Secret + ingress policy (idempotent). */
   applyApp(namespace: string, name: string, manifests: AppManifests): Promise<void>;
-  /** Remove the app's objects. Safe if absent. */
-  deleteApp(namespace: string, name: string): Promise<void>;
+  /** Remove the app's objects. Safe if absent. (I5) `opts.dropVolume` ALSO removes the stateful app's
+   *  PVC (`<name>-data`) — data loss, so callers must gate this on an explicit `?force=1`/`--force` for
+   *  a stateful app (server.ts's DELETE handler does; a non-stateful app never sets it). Omitted/false
+   *  → the PVC (if any) is left in place, orphaned but recoverable. */
+  deleteApp(namespace: string, name: string, opts?: { dropVolume?: boolean }): Promise<void>;
   /** Return the currently-applied manifests for an app, or null if none. */
   getApp(namespace: string, name: string): Promise<AppManifests | null>;
   /** Create-or-update a managed database: CNPG ObjectStore + Cluster + ScheduledBackup + NetworkPolicy (+ creds Secret). */
@@ -31,6 +34,12 @@ export interface KubeClient {
   /** Rotate the managed DB's `app` password (ALTER ROLE via an in-namespace Job, then update
    *  the `<name>-app` creds Secret). Throws if the rotation Job does not succeed. */
   setDatabasePassword(namespace: string, name: string, newPassword: string): Promise<void>;
+  /** (I4) Read back the managed DB's `app` role credentials (`{username, password}`) from the platform-
+   *  owned `<name>-app` Secret, for the API-side read-only SQL console connector. Server-side ONLY — the
+   *  value is used to open a read-only connection and is NEVER returned to a client. null if the Secret /
+   *  keys are absent (e.g. the cluster hasn't reconciled the DB yet). Same secret-read shape as
+   *  readCachePassword / readAuthJwtSecret. */
+  readDatabaseAppSecret(namespace: string, name: string): Promise<{ username: string; password: string } | null>;
   /** Live app status from the Deployment + pods (replicas, ready, restarts, crash reason), or null if absent. */
   getAppStatus(namespace: string, name: string): Promise<AppStatus | null>;
   /** Live CNPG database status (phase + ready/desired instances), or null if absent. */

@@ -81,6 +81,7 @@ router  → upstream  <span class="tok-c"># ClientHello + splice  → TLS now co
 
 <h2 id="dbproxy"><code>db:proxy</code> (authenticated tunnel)</h2>
 <p>When you need <strong>real per-user authorization and an audit trail</strong> on a database connection — the thing L4 structurally cannot provide — reach for <code>db:proxy</code>. <code>drop db proxy &lt;db&gt;</code> opens a local TCP listener; each connection rides an <strong>authenticated WebSocket</strong> to the control plane, which authorizes <em>you</em> (a per-user <code>connect</code> grant), audits the open, and splices to the database's <code>&lt;db&gt;-rw</code> Service in-cluster. Think of L4 as convenient, protocol-native reach, and <code>db:proxy</code> as the guarded door — the two are complements, not competitors.</p>
+<div class="note tip"><span class="lbl">Just reading a table? Use the SQL console</span><p>For a quick read-only look — no local tunnel, no client — the <a href="configuration.html#sqlconsole">SQL console</a> (<code>drop db query &lt;db&gt; "select …"</code>, or the box on the database detail page) runs a single <strong>read-only, audited, capped</strong> query API-side. Reach for the tunnel here when you need to <strong>write</strong>, run a migration, or drive an interactive <code>psql</code> session — the console deliberately refuses writes.</p></div>
 
 <pre><code><span class="tok-c"># open a tunnel; each connection is authorized + audited</span>
 drop db proxy mydb                      <span class="tok-c"># prints: listening on 127.0.0.1:&lt;ephemeral-port&gt;</span>

@@ -52,6 +52,7 @@ import type { SecretStore } from "../secrets/types.ts";
 import type { ImageStore } from "../images/types.ts";
 import { fingerprint, validateSecretKey } from "../secrets/secrets.ts";
 import { registerAuthRoutes } from "./auth-routes.ts";
+import { makeSqlQueryExecutor, type SqlQueryExecutor } from "./sql-query.ts";
 import { consoleShell, consoleAsset } from "./dashboard.ts";
 import { normalizeStatus } from "./status.ts";
 import { MetricsStore } from "../metrics/store.ts";
@@ -85,6 +86,10 @@ export interface Deps {
   // inject a fake (routes through the FakeEngine's records); prod defaults to an in-cluster fetch. Absent
   // + no default reachability → the proxy 501s (compute off / local API can't reach the pod network).
   authAdmin?: (req: { baseUrl: string; method: string; path: string; token: string; body?: unknown }) => Promise<{ status: number; json: unknown }>;
+  // (I4) The SQL-console executor port. Tests inject a scripted fake (no real Postgres — the repo uses
+  // PGlite); the default is the real pg connector, which reads the `<db>-app` creds and dials
+  // `<db>-rw.<ns>.svc` — reachable ONLY in-cluster (the query route 501s out-of-cluster before it runs).
+  queryExecutor?: SqlQueryExecutor;
   now?: () => Date;
 }
 
@@ -107,6 +112,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const previews = d.previews ?? new PreviewStore(d.db); // (E1) preview registry
   const tickets = d.tickets ?? new TunnelTicketStore(d.db, now, d.cfg.tunnelTicketTtlMs); // (A3) db:proxy tunnel tickets
   const metrics = d.metrics ?? new MetricsStore(d.db); // (G2/G2b) edge traffic + uptime rollups
+  // (I4) SQL-console executor. Default: the real pg connector reading the `<db>-app` creds via the kube
+  // client (the same secret-read mechanism as the app binding). It is only ever CALLED in-cluster — the
+  // query route 501s when out-of-cluster (or when compute is off, via resolveDb) BEFORE invoking it — so
+  // the `d.kube!` deref is safe. Tests inject `queryExecutor` (a scripted fake) instead.
+  const runQuery: SqlQueryExecutor = d.queryExecutor ?? makeSqlQueryExecutor({ readAppCreds: (ns, name) => d.kube!.readDatabaseAppSecret(ns, name) });
   const authEngine = d.authEngine ?? new GoTrueEngine(d.cfg.authEngineImage); // (K1) managed-auth engine (pinned image)
   // (K1) In-cluster transport to an auth engine's admin API. Default: fetch the engine's ClusterIP
   // Service DNS (`<name>.<ns>.svc.cluster.local:<port>`). Reachable only from an in-cluster API; a
@@ -1523,6 +1533,41 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     });
   });
 
+  // ---- SQL console: read-only query API (I4) ----
+  // A read-only SQL surface for the DB detail page + `drop db query`. Gated at `query` (owner/editor, org
+  // owner/admin/member — NOT viewer: a query reads ALL row data, stricter than metadata-only `read`). The
+  // executor enforces read-only at the SESSION level (BEGIN READ ONLY + default_transaction_read_only),
+  // NOT by parsing — a write inside a READ ONLY tx errors at the engine, so there is no SQL-grammar
+  // allowlist to bypass. Bounded: 5s statement_timeout, 500-row cap, ~1MB serialized-byte cap. EVERY
+  // query is AUDITED (`db.query`, with the statement text) — i.e. queries are logged (see the docs). No
+  // `--unsafe-write` escalation v1: use `drop db proxy` + a real client for writes. In-cluster ONLY: the
+  // executor dials `<db>-rw.<ns>.svc`, reachable only when DROP_TUNNEL_DIRECT (the same reachability signal
+  // db:proxy uses) — a local/out-of-cluster API returns an honest 501 instead of hanging.
+  const QUERY_ROW_CAP = 500;
+  const QUERY_BYTE_CAP = 1_000_000; // ~1MB serialized
+  const QUERY_TIMEOUT_MS = 5_000;
+  app.post("/v1/databases/:name/query", async (c) => {
+    const r = await resolveDb(c, "query"); // compute-off → 501; unknown → 404; non-database → 409; not-permitted → 403
+    if ("err" in r) return r.err;
+    // In-cluster only. Out-of-cluster the API has no route to `<db>-rw.<ns>.svc`, so 501 honestly (the
+    // CLI/console point the user at `drop db proxy` + a local psql) rather than dialing into a black hole.
+    if (!d.cfg.tunnelDirect) return c.json({ error: "SQL console requires an in-cluster API (use `drop db proxy` + psql locally)" }, 501);
+    const body = (await c.req.json().catch(() => ({}))) as { sql?: unknown };
+    if (typeof body.sql !== "string" || body.sql.trim() === "") return c.json({ error: "sql is required (a non-empty SQL string)" }, 400);
+    const sql = body.sql;
+    let result;
+    try {
+      result = await runQuery({ namespace: r.site.namespace, database: r.site.name, sql, rowCap: QUERY_ROW_CAP, byteCap: QUERY_BYTE_CAP, statementTimeoutMs: QUERY_TIMEOUT_MS });
+    } catch (e) {
+      // Audit the ATTEMPT too — the statement text is the security-relevant record, success or not.
+      await audit({ actor: r.email, action: "db.query", target: r.site.name, targetType: "database", orgId: r.site.orgId, detail: { sql, ok: false } });
+      // A SQL/engine (or connect) failure surfaces the sanitized message (no stack) as a 400.
+      return c.json({ error: (e as Error).message }, 400);
+    }
+    await audit({ actor: r.email, action: "db.query", target: r.site.name, targetType: "database", orgId: r.site.orgId, detail: { sql, ok: true, rowCount: result.rowCount, truncated: result.truncated } });
+    return c.json({ columns: result.columns, rows: result.rows, rowCount: result.rowCount, truncated: result.truncated, elapsedMs: result.elapsedMs });
+  });
+
   // ---- `drop exec` shell tickets (J3) ----
   // Mint a short-lived, single-use ticket for an interactive shell into a running app pod. Gated at
   // `exec` (owner/editor, org owner/admin/member — NOT viewer). STRICTER FRAMING than logs: a shell can
@@ -2377,7 +2422,16 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // orphan in the tenant namespace. Apps: Deployment/Service/Secret/NetworkPolicy/HSO.
     // Databases: the CNPG Cluster (cascades to pods) + ObjectStore/ScheduledBackup/policy.
     if (site.type === "app" && d.kube) {
-      await d.kube.deleteApp(site.namespace, name);
+      // (I5) A stateful app's PVC is real tenant data — refuse a plain delete without an explicit
+      // `?force=1` (409), same posture as the non-empty-bucket gate below. `dropVolume` is threaded to
+      // deleteApp ONLY once force is confirmed, so the volume itself is left in place (recoverable) on
+      // a first, unforced attempt.
+      const appCfg = await currentAppConfig(site);
+      const force = c.req.query("force") === "1" || c.req.query("force") === "true";
+      if (appCfg?.stateful && !force) {
+        return c.json({ error: `"${name}" is stateful — it has a volume at ${appCfg.stateful.mount}; pass ?force=1 to delete it and its data` }, 409);
+      }
+      await d.kube.deleteApp(site.namespace, name, { dropVolume: !!appCfg?.stateful && force });
       // Remove the app's secret material (the <app>-secret Secret + any SM secrets/ExternalSecret).
       // Log (don't swallow) a teardown failure — otherwise SM secrets orphan with no record.
       await d.secrets

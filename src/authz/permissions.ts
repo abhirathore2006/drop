@@ -3,7 +3,7 @@ import type { OrgRole, SiteRole } from "../db/schema.ts";
 // The permission verbs. Kept as a runtime array (not just a type) so the scope grammar (J1) can
 // validate a token's scopes against the SAME source of truth `can()` enforces. `Action` derives
 // from it, so the two can never drift.
-export const ACTIONS = ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "rollback", "configure", "expose", "share", "transfer", "delete"] as const;
+export const ACTIONS = ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "query", "rollback", "configure", "expose", "share", "transfer", "delete"] as const;
 export type Action = (typeof ACTIONS)[number];
 
 export interface Actor {
@@ -91,9 +91,16 @@ export function scopeAllows(scopes: string[], verb: Action, resource: string): b
 //   secret a process happens to print; `exec` hands the caller the whole environment on demand. It is
 //   gated at editor+ (never viewer) for that reason, every session is audited WITH the command
 //   (`app.exec`), and service tokens get it via the scope grammar (`exec:<app>`).
+// query = run a READ-ONLY SQL query against a managed database over the API's SQL console (I4). Gated
+//   at editor+ (owner/editor, org owner/admin/member) — deliberately ABOVE `read` and STRICTER than it:
+//   `read` is metadata-only (name/status/versions), but a query returns ALL row data from every table,
+//   so a metadata-only viewer must never hold it. Same ship/dev tier as `connect`/`exec` (opening a SQL
+//   session is a routine developer action, not an owner-only configure). Read-only is SESSION-enforced
+//   by the executor (BEGIN READ ONLY), not parsed — the verb only gates WHO may run a statement. Every
+//   query is audited WITH the statement (`db.query`); service tokens get it via the grammar (`query:<db>`).
 const SITE_MAP: Record<SiteRole, Action[]> = {
-  owner: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "rollback", "configure", "expose", "share", "transfer", "delete"],
-  editor: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "rollback", "expose"],
+  owner: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "query", "rollback", "configure", "expose", "share", "transfer", "delete"],
+  editor: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "query", "rollback", "expose"],
   viewer: ["read"],
 };
 
@@ -101,9 +108,9 @@ const SITE_MAP: Record<SiteRole, Action[]> = {
 // day-to-day (ship + configure/secrets + expose + connect, but not share/transfer/delete a resource);
 // viewer reads (and, deliberately, may NOT open a db:proxy tunnel — connect is above viewer).
 const ORG_MAP: Record<OrgRole, Action[]> = {
-  owner: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "rollback", "configure", "expose", "share", "transfer", "delete"],
-  admin: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "rollback", "configure", "expose", "share", "transfer", "delete"],
-  member: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "rollback", "configure", "expose"],
+  owner: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "query", "rollback", "configure", "expose", "share", "transfer", "delete"],
+  admin: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "query", "rollback", "configure", "expose", "share", "transfer", "delete"],
+  member: ["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "query", "rollback", "configure", "expose"],
   viewer: ["read"],
 };
 

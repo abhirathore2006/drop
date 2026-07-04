@@ -64,6 +64,36 @@ test("exec is a first-class token scope (exec:<app> parses + grants like other v
   expect(can(tok, "exec")).toBe(true);
 });
 
+test("query is the deploy/ship tier, ABOVE viewer: owner + editor + org member yes, viewer no (I4 SQL console)", () => {
+  expect(can(owner, "query")).toBe(true);
+  expect(can(editor, "query")).toBe(true); // an editor runs a read-only query — a routine dev action
+  expect(can(viewer, "query")).toBe(false); // STRICTER than read: a query returns ALL row data, not metadata
+  expect(can(stranger, "query")).toBe(false);
+  const orgMember: Actor = { email: "m@x.com", platformRole: "member", siteRole: null, orgRole: "member" };
+  expect(can(orgMember, "query")).toBe(true);
+  const orgViewer: Actor = { email: "ov@x.com", platformRole: "member", siteRole: null, orgRole: "viewer" };
+  expect(can(orgViewer, "query")).toBe(false);
+});
+
+test("query is a first-class token scope (query:<db> parses + grants like other verbs) (I4)", () => {
+  expect(parseScope("query:billing")).toEqual({ verb: "query", resource: "billing" });
+  expect(parseScope("query")).toEqual({ verb: "query", resource: "*" });
+  expect(scopeAllows(["query:billing"], "query", "billing")).toBe(true);
+  expect(scopeAllows(["query:billing"], "query", "other")).toBe(false); // scoped to billing only
+  expect(scopeAllows(["query"], "query", "anydb")).toBe(true); // bare verb → all databases
+  expect(scopeAllows(["read:billing"], "query", "billing")).toBe(false); // read doesn't imply query
+  const tok: Actor = { email: "token:ci@acme", platformRole: "member", siteRole: null, orgRole: null, token: { scopes: ["query:billing"], orgId: "org1", resourceName: "billing", resourceOrgId: "org1" } };
+  expect(can(tok, "query")).toBe(true);
+});
+
+test("capabilitiesFor: query is present for owner/editor, absent for viewer (I4 console gating)", () => {
+  expect(capabilitiesFor(owner)).toContain("query");
+  expect(capabilitiesFor(editor)).toContain("query");
+  expect(capabilitiesFor(viewer)).not.toContain("query");
+  const orgViewer: Actor = { email: "ov@x.com", platformRole: "member", siteRole: null, orgRole: "viewer" };
+  expect(capabilitiesFor(orgViewer)).not.toContain("query");
+});
+
 test("viewer can only read", () => {
   expect(can(viewer, "read")).toBe(true);
   for (const a of ["publish", "rollback", "configure", "share", "transfer", "delete"] as const)
@@ -86,7 +116,7 @@ test("capabilitiesFor: owner + admin get the FULL verb set; it stays in ACTIONS 
 });
 
 test("capabilitiesFor: editor is the ship tier (no configure/share/transfer/delete)", () => {
-  expect(capabilitiesFor(editor)).toEqual(["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "rollback", "expose"]);
+  expect(capabilitiesFor(editor)).toEqual(["read", "logs", "publish", "deploy", "db:create", "connect", "exec", "query", "rollback", "expose"]);
 });
 
 test("capabilitiesFor: viewer is read-only; a non-member gets nothing", () => {

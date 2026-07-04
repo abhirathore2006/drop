@@ -20,6 +20,18 @@ test("FakeKube records applies, serves getApp, and deletes", async () => {
   expect(k.deletes).toEqual([{ namespace: "drop-acme", name: "billing" }]);
 });
 
+test("FakeKube: deleteApp records dropVolume ONLY when explicitly passed (I5)", async () => {
+  const k = new FakeKube();
+  await k.deleteApp("drop-acme", "plain"); // no opts — a never-stateful app's normal delete
+  await k.deleteApp("drop-acme", "notes", { dropVolume: false }); // an explicit false is the same as absent
+  await k.deleteApp("drop-acme", "notes", { dropVolume: true }); // --force on a stateful app
+  expect(k.deletes).toEqual([
+    { namespace: "drop-acme", name: "plain" },
+    { namespace: "drop-acme", name: "notes" },
+    { namespace: "drop-acme", name: "notes", dropVolume: true },
+  ]);
+});
+
 test("FakeKube records applyTenant", async () => {
   const { FakeKube } = await import("./fake.ts");
   const { tenantManifests } = await import("./manifests.ts");

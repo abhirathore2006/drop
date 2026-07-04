@@ -145,6 +145,12 @@ export function buildMcp(): McpServer {
   // (A3) db:proxy — deliberately NO MCP tool. The tunnel is an interactive, long-lived raw-TCP session
   // for a human at a `psql` prompt (`drop db proxy <db>`); an agent opening a raw database socket is out
   // of scope v1 (an agent that needs data should go through a purpose-built query tool, not a byte pipe).
+  // (I4) SQL console (`drop db query <db> "select …"`, POST /v1/databases/:name/query) — deliberately NO
+  // MCP tool v1 either. Even read-only, it lets the caller pull ARBITRARY tenant row data, and an agent
+  // free-querying a tenant's tables is a distinct trust decision that needs its own review — the platform
+  // authz gates humans/tokens, but an agent's query intent is opaque. Revisit alongside K2 claims (once an
+  // agent can carry a scoped, claim-checked identity, a read-only query tool can be reconsidered). Until
+  // then it stays CLI/console-only, where a human (or an explicit `query`-scoped service token) drives it.
   // (J3) `drop exec` — deliberately NO MCP tool, SAME posture as db:proxy. It is an interactive raw-byte
   // terminal session (`drop exec <app>`), not a natural request/response surface; and because a shell can
   // `env` an app's write-only secrets, a shell into a running container should be an explicit human
