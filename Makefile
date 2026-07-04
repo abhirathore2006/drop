@@ -259,6 +259,12 @@ start: floci postgres
 	@$(NODE) build.mjs >/dev/null && echo "✓ built bundles"
 	@$(LOADENV) $(ENV) $(COMPUTE_ENV) DROP_HTTP_PORT=$(API_PORT)  nohup $(NODE) dist/api.js  > $(RUN)/api.log  2>&1 & echo $$! > $(RUN)/api.pid
 	@$(LOADENV) $(ENV) $(EDGE_COMPUTE_ENV) DROP_HTTP_PORT=$(EDGE_PORT) DROP_EDGE_DISK_CACHE=$(RUN)/edge-cache nohup $(NODE) dist/edge.js > $(RUN)/edge.log 2>&1 & echo $$! > $(RUN)/edge.pid
+ifeq ($(TCP_PORTS),1)
+	@# L4 plane ON: the edge-tcp router binds the shared PG port (nginx forwards host 5432 → here) +
+	@# the dynamic range directly. $(ENV) carries DROP_DATABASE_URL + DROP_BASE_DOMAIN, so it routes
+	@# from the metastore (tcp_endpoints) automatically — `drop expose` takes effect with no restart.
+	@$(LOADENV) $(ENV) DROP_TCP_SHARED_PORTS=$(EDGE_TCP_PORT):postgres DROP_TCP_DYNAMIC_RANGE=$(TCP_DYNAMIC_FROM)-$(TCP_DYNAMIC_TO) nohup $(NODE) dist/edge-tcp.js > $(RUN)/edge-tcp.log 2>&1 & echo $$! > $(RUN)/edge-tcp.pid
+endif
 	@if [ -n "$(COMPUTE_ENV)" ]; then \
 	  pkill -f 'port-forward.*interceptor' 2>/dev/null || true; \
 	  KUBECONFIG=$(KUBECONFIG_LOCAL) nohup kubectl -n keda port-forward svc/keda-add-ons-http-interceptor-proxy $(INTERCEPTOR_PORT):8080 > $(RUN)/pf-interceptor.log 2>&1 & echo $$! > $(RUN)/pf.pid; \
@@ -266,6 +272,9 @@ start: floci postgres
 	@for i in $$(seq 1 30); do curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && break; sleep 1; done
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && echo "✓ api    http://localhost:$(API_PORT)" || { echo "✗ api failed — see $(RUN)/api.log"; tail -5 $(RUN)/api.log; exit 1; }
 	@echo "✓ edge   http://localhost:$(EDGE_PORT)  (routes by  Host: <name>.$(BASE_DOMAIN))"
+ifeq ($(TCP_PORTS),1)
+	@echo "✓ edge-tcp :$(EDGE_TCP_PORT) (shared) + :$(TCP_DYNAMIC_FROM)-$(TCP_DYNAMIC_TO) (dynamic) — routing from metastore"
+endif
 	@if [ -n "$(COMPUTE_ENV)" ]; then echo "✓ compute mode — API wired to k3s; interceptor → :$(INTERCEPTOR_PORT)  (drop deploy works)"; \
 	 else echo "· static-only — run 'make up' (or 'make cluster-up') for container apps / databases"; fi
 	@$(MAKE) --no-print-directory CE=$(CE) tls
@@ -274,9 +283,11 @@ start: floci postgres
 stop:
 	@-if [ -f $(RUN)/api.pid ];  then kill `cat $(RUN)/api.pid`  2>/dev/null; rm -f $(RUN)/api.pid;  fi
 	@-if [ -f $(RUN)/edge.pid ]; then kill `cat $(RUN)/edge.pid` 2>/dev/null; rm -f $(RUN)/edge.pid; fi
+	@-if [ -f $(RUN)/edge-tcp.pid ]; then kill `cat $(RUN)/edge-tcp.pid` 2>/dev/null; rm -f $(RUN)/edge-tcp.pid; fi
 	@-if [ -f $(RUN)/pf.pid ];   then kill `cat $(RUN)/pf.pid`   2>/dev/null; rm -f $(RUN)/pf.pid;   fi
 	@-pkill -f 'dist/api.js'  2>/dev/null || true
 	@-pkill -f 'dist/edge.js' 2>/dev/null || true
+	@-pkill -f 'dist/edge-tcp.js' 2>/dev/null || true
 	@-pkill -f 'port-forward.*interceptor' 2>/dev/null || true
 	@-$(CE) stop drop-nginx drop-floci drop-postgres >/dev/null 2>&1 || true
 	@echo "✓ stopped api + edge + nginx + floci + postgres  ('make stop-all' also stops the podman VM)"
@@ -307,6 +318,9 @@ status:
 	@if [ "$(CE)" = "podman" ]; then echo "engine: podman (rootful=$$(podman machine inspect --format '{{.Rootful}}' 2>/dev/null || echo '?'), $$(podman machine inspect --format '{{.State}}' 2>/dev/null || echo 'no machine'))"; else echo "engine: $(CE)"; fi
 	@curl -sf http://localhost:$(API_PORT)/healthz >/dev/null 2>&1 && echo "api:   up    (:$(API_PORT))" || echo "api:   down"
 	@curl -s -o /dev/null http://localhost:$(EDGE_PORT)/ 2>/dev/null && echo "edge:  up    (:$(EDGE_PORT))" || echo "edge:  down"
+ifeq ($(TCP_PORTS),1)
+	@(pgrep -f 'dist/edge-tcp.js' >/dev/null 2>&1 && echo "edge-tcp: up  (:$(EDGE_TCP_PORT) shared + :$(TCP_DYNAMIC_FROM)-$(TCP_DYNAMIC_TO) dynamic)") || echo "edge-tcp: down"
+endif
 	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-nginx$$' && echo "https: up    (:$(HTTPS_PORT), nginx → api/edge)") || echo "https: down"
 	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-floci$$' && echo "floci: up    (:$(FLOCI_PORT))") || echo "floci: down"
 	@($(CE) ps --format '{{.Names}}' 2>/dev/null | grep -q '^drop-postgres$$' && echo "pg:    up    (:$(PG_PORT))") || echo "pg:    down"

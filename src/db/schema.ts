@@ -153,6 +153,20 @@ export interface OrgQuotasTable {
   updated_at: Generated<Ts>;
 }
 
+/** A workload's TCP exposure (A2b). One row per exposed workload (site_name PK). `mode` is 'sni'
+ *  (routed by the TLS SNI hostname on a shared port — no port consumed) or 'port' (a dedicated port
+ *  from the dynamic pool; `port` is set + UNIQUE for these, NULL for sni rows). `protocol` is a hint
+ *  for the connect string / router preamble ('postgres' | 'redis' | 'tcp'). The edge-tcp router reads
+ *  this read-only (MetastoreRouteSource); the API is the sole writer via the expose routes. */
+export interface TcpEndpointsTable {
+  site_name: string;
+  port: number | null; // set + unique for mode='port'; null for mode='sni'
+  mode: "sni" | "port";
+  protocol: string; // 'postgres' | 'redis' | 'tcp'
+  created_by: string;
+  created_at: Generated<Ts>;
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -167,4 +181,5 @@ export interface Database {
   stacks: StacksTable;
   stack_resources: StackResourcesTable;
   org_quotas: OrgQuotasTable;
+  tcp_endpoints: TcpEndpointsTable;
 }

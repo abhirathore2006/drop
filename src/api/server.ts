@@ -29,7 +29,8 @@ import { QuotaStore, validateQuota, QUOTA_KEYS } from "../quotas/store.ts";
 import { sanitizeStackConfig, validateStackEdges, resolveResourceName, type StackSpec, type StackResource } from "../stack-config.ts";
 import { planStack, StackCycleError, type LivePresence, type PlanStep } from "../stacks/plan.ts";
 import { StackStore } from "../stacks/store.ts";
-import { appManifests, releaseJobManifest, tenantManifests } from "../kube/manifests.ts";
+import { appManifests, releaseJobManifest, tenantManifests, type ExposedWorkload } from "../kube/manifests.ts";
+import { TcpEndpointStore, PortPoolExhaustedError, type TcpEndpoint } from "../edge-tcp/store.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
 import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus } from "../kube/types.ts";
 import { LockStore, LockHeldError } from "../metastore/lock.ts";
@@ -57,6 +58,7 @@ export interface Deps {
   quotas?: QuotaStore; // (item 10) per-org quota overrides; defaults over `db`
   locks?: LockStore; // lease-based advisory locks (serialize deploy/release per app); defaults over `db`
   stacks?: StackStore; // stack metadata + resource mapping (B2); defaults over `db`
+  tcp?: TcpEndpointStore; // (A2b) TCP exposure registry (tcp_endpoints); defaults over `db`
   now?: () => Date;
 }
 
@@ -73,6 +75,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const stacks = d.stacks ?? new StackStore(d.db); // stack metadata + resource mapping
   const buckets = d.bucket ?? makeBucketStore(d.cfg); // (I1) tenant object storage (floci-prefix locally)
   const quotas = d.quotas ?? new QuotaStore(d.db); // (item 10) per-org quota overrides
+  const tcp = d.tcp ?? new TcpEndpointStore(d.db); // (A2b) TCP exposure registry
 
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
   const app = new Hono<AuthEnv>();
@@ -268,6 +271,71 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     if (!orgId) return null;
     const o = await d.orgs.getOrg(orgId);
     return o ? { slug: o.slug, name: o.name, kind: o.kind } : null;
+  };
+
+  // ---- TCP exposure (A2b) helpers -------------------------------------------------------------
+  // An app's stored AppConfig = its current version's config (apps keep config on the version row,
+  // not sites.config). undefined when the app was never deployed.
+  const currentAppConfig = async (site: Site): Promise<AppConfig | undefined> => {
+    if (!site.currentVersion) return undefined;
+    const cur = (await d.meta.listVersions(site.name)).find((v) => v.id === site.currentVersion);
+    return cur?.config as AppConfig | undefined;
+  };
+  // The sni-mode connect PORT for a protocol: postgres rides the shared PG port; other TLS-SNI
+  // protocols ride the first tls-sni shared port. Falls back to 5432 (the default shared port).
+  const sharedPortForProtocol = (protocol: string): number => {
+    const sp = d.cfg.tcpSharedPorts;
+    if (protocol === "postgres") return sp.find((s) => s.protocol === "postgres")?.port ?? 5432;
+    return sp.find((s) => s.protocol === "tls-sni")?.port ?? sp.find((s) => s.protocol === "postgres")?.port ?? 5432;
+  };
+  // The connect string for an expose row + an optional sslmode note. SNI mode connects to the wildcard
+  // host on the shared port (the SNI hostname IS the routing key); port mode connects to the raw LB
+  // host on the allocated port.
+  const connectFor = (name: string, ep: TcpEndpoint): { connect: string; sslmode?: string } => {
+    if (ep.mode === "sni") {
+      const connect = `${name}.${d.cfg.baseDomain}:${sharedPortForProtocol(ep.protocol)}`;
+      return { connect, ...(ep.protocol === "postgres" ? { sslmode: "connect with sslmode=require (prefer verify-full with the cluster CA)" } : {}) };
+    }
+    return { connect: `${d.cfg.tcpLbHost}:${ep.port}` };
+  };
+  // The container port edge-tcp is allowed to reach on an app pod (for the tenant allow policy): the
+  // app's first declared service port, defaulting to the platform default container port.
+  const appContainerPort = async (name: string): Promise<number> => {
+    const site = await d.meta.getSitePlain(name);
+    const cfg = site ? await currentAppConfig(site) : undefined;
+    return cfg?.services?.[0]?.internalPort ?? 8080;
+  };
+  // Every exposed workload in a namespace → the tenant allow-from-edge-tcp policy inputs.
+  const exposedWorkloadsFor = async (ns: string): Promise<ExposedWorkload[]> => {
+    const rows = await tcp.listForNamespace(ns);
+    const out: ExposedWorkload[] = [];
+    for (const r of rows) {
+      if (r.type === "database") out.push({ name: r.siteName, kind: "database", port: 5432 });
+      else if (r.type === "app") out.push({ name: r.siteName, kind: "app", port: await appContainerPort(r.siteName) });
+    }
+    return out;
+  };
+  // Apply the tenant isolation objects WITH the current exposed-workload allow policies. Called from
+  // deploy / db-create (so a redeploy keeps the allow rule) and expose / unexpose (so it's added/pruned).
+  const applyTenantWithExposed = async (kube: KubeClient, ns: string): Promise<void> => {
+    const workloads = await exposedWorkloadsFor(ns);
+    await kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs, edgeTcp: { namespace: d.cfg.edgeTcpNamespace, workloads } }));
+  };
+  // Patch the edge-tcp Service's port list to the shared ports + every live dynamic port (cluster-wide).
+  // Best-effort: returns a note (never throws) when the L4 plane isn't deployed yet — the registry
+  // row still stands and the local edge-tcp routes from the DB regardless.
+  const patchEdgeTcpService = async (kube: KubeClient): Promise<{ patched: boolean; note?: string }> => {
+    const active = await tcp.allActivePorts();
+    const ports = [
+      ...d.cfg.tcpSharedPorts.map((s) => ({ name: `${s.protocol === "postgres" ? "pg" : "sni"}-${s.port}`, port: s.port })),
+      ...active.map((p) => ({ name: `dyn-${p}`, port: p })),
+    ];
+    try {
+      await kube.patchEdgeTcpPorts(d.cfg.edgeTcpNamespace, d.cfg.edgeTcpService, ports);
+      return { patched: true };
+    } catch (e) {
+      return { patched: false, note: (e as Error).message };
+    }
   };
 
   app.get("/v1/me", async (c) => {
@@ -478,9 +546,19 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     const appCfg = sanitizeAppConfig(body);
     if (!appCfg) return c.json({ error: "app config requires an image" }, 400);
+    // (A2b) A `services[].protocol: tcp` app is rejected by assertHttpOnly UNLESS it has an expose
+    // row (the documented order is: expose first, then deploy the tcp service). A TCP-exposed app must
+    // also run with scale.min >= 1 (a TCP SYN can't wake a scaled-to-zero pod). Pure-HTTP is unchanged.
+    const exposeRow = await tcp.get(name);
     try {
-      assertHttpOnly(appCfg); // v1: one HTTP service (443-only)
       assertProcesses(appCfg); // at most one web process
+      if (exposeRow) {
+        if ((appCfg.scale?.min ?? 0) < 1) {
+          throw new Error("a TCP-exposed app must run with scale.min >= 1 (a TCP SYN can't wake a scaled-to-zero pod) — set scale.min: 1");
+        }
+      } else {
+        assertHttpOnly(appCfg); // v1: one HTTP service (443-only)
+      }
     } catch (e) {
       return c.json({ error: (e as Error).message }, 400);
     }
@@ -530,12 +608,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const ns = site.namespace; // per-owner tenant namespace (isolation)
     const kube = d.kube;
     const theSite = site;
-    await kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs })); // namespace + NetworkPolicy + quota + LimitRange
+    await applyTenantWithExposed(kube, ns); // namespace + NetworkPolicy + quota + LimitRange (+ A2b edge-tcp allow policies)
     const sandbox = !appCfg.trusted;
     const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
     // versionId (H1): stamps `drop.dev/version` on the pod template so THIS deploy always rolls
-    // pods, even when the image tag is unchanged from the previous version.
-    const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId });
+    // pods, even when the image tag is unchanged from the previous version. tcpExposed (A2b) lets the
+    // manifest layer accept a `protocol: tcp` service for an exposed app.
+    const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId, tcpExposed: !!exposeRow });
     // A stopped deploy (--no-start / already-stopped) rolls out nothing yet, so it also SKIPS the
     // release phase — the point of --no-start is to configure secrets first, and the release command
     // (which needs those secrets/the DB) would otherwise fail against an unconfigured app.
@@ -804,7 +883,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
     const verId = newVersionId(now());
     const ns = site.namespace;
-    await d.kube.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs }));
+    await applyTenantWithExposed(d.kube, ns); // (+ A2b: keep any edge-tcp allow policies for exposed workloads in this ns)
     // CNPG runs IN-CLUSTER, so its object-store endpoint differs from the API's host-side
     // s3Endpoint: locally Floci is reachable on the pod network via DROP_DB_BACKUP_S3_ENDPOINT,
     // not the host's localhost:4566. When that endpoint is a non-443 store, also open a scoped
@@ -1101,6 +1180,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const ns = site.namespace;
     const kube = d.kube;
     const theSite = site;
+    const rollbackExposed = !!(await tcp.get(name)); // (A2b) preserve the tcp-service allowance on rollback
     try {
       await locks.withLock(`deploy:${name}`, DEPLOY_LOCK_TTL_MS, async () => {
         const sandbox = !appCfg.trusted;
@@ -1108,7 +1188,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         // Same context construction as deploy (sandbox/imagePullSecret/host); versionId stamps the
         // pod-template annotation so a rollback to a version with the SAME image tag as what's
         // currently running still rolls the pods.
-        const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: target });
+        const manifests = appManifests(appCfg, { name, namespace: ns, host: `${name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: target, tcpExposed: rollbackExposed });
         // Rollback re-applies a KNOWN-good, previously-deployed version — the release phase is
         // intentionally SKIPPED here (unlike a fresh deploy): re-running a migration command against
         // a database that has already moved past it (or moved differently since) would be wrong, not
@@ -1204,6 +1284,15 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       }
       out.bucket = b;
     }
+    // (A2b) TCP exposure state — surfaced on apps + databases so the console/CLI can show the connect
+    // string. Registry-only (no cluster read): present iff the workload has an expose row.
+    if (site.type === "app" || site.type === "database") {
+      const ep = await tcp.get(name);
+      if (ep) {
+        const { connect, sslmode } = connectFor(name, ep);
+        out.tcp = { mode: ep.mode, port: ep.port, protocol: ep.protocol, connect, ...(sslmode ? { sslmode } : {}) };
+      }
+    }
     // Normalized status contract (M0): ONE server-side mapping from the raw signals to the
     // console/CLI enum — the client trusts this field and only falls back to mirroring it
     // when talking to an older API (console/src/lib/status.ts).
@@ -1296,6 +1385,107 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await d.meta.setVisibility(name, vis, hash);
     await audit({ actor: email, action: "site.visibility.set", target: name, targetType: site.type, orgId: site.orgId, detail: { visibility: vis } });
     return c.json({ name, visibility: vis });
+  });
+
+  // ---- TCP (L4) exposure (A2b): opt-in, default off, audited ----
+  // Expose a workload over the L4 plane. `mode:sni` routes by the TLS SNI hostname on a shared port
+  // (no port consumed); `mode:port` allocates the lowest free dynamic port (409 on exhaustion). Apps
+  // must run scale.min>=1 (a TCP SYN can't wake a scaled-to-zero pod); databases are always-on. On
+  // success the API adds the tenant "allow from edge-tcp" NetworkPolicy + (port mode) publishes the
+  // port on the edge-tcp Service. Compute off → the registry row is still recorded (the local edge-tcp
+  // routes from the DB); provisioning is deferred.
+  app.post("/v1/sites/:name/expose", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (!can(await actorFor(email, site), "expose")) return c.json({ error: "not permitted" }, 403);
+    if (site.type !== "app" && site.type !== "database") {
+      return c.json({ error: `TCP exposure applies to apps and databases only, not a ${site.type}` }, 409);
+    }
+    const body = (await c.req.json().catch(() => ({}))) as { mode?: string; protocol?: string };
+    const mode = body.mode === "port" ? "port" : body.mode === "sni" ? "sni" : null;
+    if (!mode) return c.json({ error: 'mode must be "sni" or "port"' }, 400);
+    // Protocol default: databases → postgres; apps → tcp. Accepted set: postgres|redis|tcp.
+    const protoRaw = (body.protocol ?? (site.type === "database" ? "postgres" : "tcp")).toLowerCase();
+    if (protoRaw !== "postgres" && protoRaw !== "redis" && protoRaw !== "tcp") {
+      return c.json({ error: "protocol must be postgres|redis|tcp" }, 400);
+    }
+    // No-scale-to-zero for TCP (apps only; databases are always-on). Enforced when the app has a stored
+    // config; a not-yet-deployed app defers to deploy (which enforces scale.min>=1 for exposed apps).
+    if (site.type === "app") {
+      const cfg = await currentAppConfig(site);
+      if (cfg && (cfg.scale?.min ?? 0) < 1) {
+        return c.json({ error: "a TCP-exposed app must run with scale.min >= 1 (a TCP SYN can't wake a scaled-to-zero pod) — redeploy with scale.min: 1, then expose" }, 400);
+      }
+    }
+    let ep: TcpEndpoint;
+    try {
+      ep = mode === "port"
+        ? await tcp.exposePort(name, protoRaw, email, d.cfg.tcpPortFrom, d.cfg.tcpPortTo)
+        : await tcp.exposeSni(name, protoRaw, email);
+    } catch (e) {
+      if (e instanceof PortPoolExhaustedError) return c.json({ error: e.message }, 409);
+      throw e;
+    }
+    let note: string | undefined;
+    if (d.kube) {
+      await applyTenantWithExposed(d.kube, site.namespace); // adds the allow-from-edge-tcp policy for this workload
+      if (mode === "port") {
+        const r = await patchEdgeTcpService(d.kube);
+        if (!r.patched) note = `port allocated; edge-tcp Service not patched yet (${r.note})`;
+      }
+    } else {
+      note = "provisioning deferred (compute off) — the registry row is recorded and the local edge-tcp routes from the DB";
+    }
+    await audit({ actor: email, action: "tcp.expose", target: name, targetType: site.type, orgId: site.orgId, detail: { mode, protocol: protoRaw, port: ep.port } });
+    const { connect, sslmode } = connectFor(name, ep);
+    return c.json({ name, tcp: { mode: ep.mode, protocol: ep.protocol, port: ep.port, connect, ...(sslmode ? { sslmode } : {}) }, ...(note ? { note } : {}) });
+  });
+
+  // Unexpose: drop the registry row, prune the tenant allow policy, release any dynamic port. Idempotent.
+  app.delete("/v1/sites/:name/expose", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such site" }, 404);
+    if (!can(await actorFor(email, site), "expose")) return c.json({ error: "not permitted" }, 403);
+    const existing = await tcp.get(name);
+    if (!existing) return c.json({ name, tcp: null }); // not exposed — idempotent
+    await tcp.unexpose(name);
+    let note: string | undefined;
+    if (d.kube) {
+      await applyTenantWithExposed(d.kube, site.namespace); // prunes this workload's allow-from-edge-tcp policy
+      if (existing.mode === "port") {
+        const r = await patchEdgeTcpService(d.kube);
+        if (!r.patched) note = `port released; edge-tcp Service not patched yet (${r.note})`;
+      }
+    } else {
+      note = "compute off — registry row removed";
+    }
+    await audit({ actor: email, action: "tcp.unexpose", target: name, targetType: site.type, orgId: site.orgId, detail: { mode: existing.mode, port: existing.port } });
+    return c.json({ name, tcp: null, ...(note ? { note } : {}) });
+  });
+
+  // List your TCP-exposed workloads + their connect strings (org-scoped with ?org=<slug>). Powers
+  // `drop expose ls`. Scoped to what the caller can see (their org resources / per-resource grants).
+  app.get("/v1/expose", async (c) => {
+    const email = c.get("identity").email;
+    const orgSlug = c.req.query("org");
+    let names: string[];
+    if (orgSlug) {
+      const org = await d.orgs.getOrgBySlug(orgSlug);
+      if (!org) return c.json({ error: `no such org: ${orgSlug}` }, 404);
+      if (!(await d.orgs.roleOf(org.id, email)) && !(await isPlatformAdmin(email))) return c.json({ error: `not a member of org ${orgSlug}` }, 403);
+      names = (await d.meta.listSitesPage({ orgId: org.id, limit: 1000 })).names;
+    } else {
+      names = await d.meta.listUserSites(email);
+    }
+    const exposed = (await tcp.listBySiteNames(names)).map((r) => {
+      const { connect, sslmode } = connectFor(r.siteName, r);
+      return { name: r.siteName, type: r.type, mode: r.mode, protocol: r.protocol, port: r.port, connect, ...(sslmode ? { sslmode } : {}) };
+    });
+    return c.json({ exposed });
   });
 
   // ---- delete ----
@@ -1626,7 +1816,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return site;
   };
 
-  const ensureTenant = (ns: string) => d.kube!.applyTenant(ns, tenantManifests(ns, { blockedEgressCidrs: d.cfg.blockedEgressCidrs }));
+  const ensureTenant = (ns: string) => applyTenantWithExposed(d.kube!, ns);
 
   // Create/update a database resource. Composes the SAME building blocks as POST /v1/databases/:name
   // (manifests + apply). Intentional duplication: the route's handler is entangled with request/auth
@@ -1685,7 +1875,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const sandbox = !appCfg.trusted;
     const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
     const verId = newVersionId(now()); // minted up front so it can stamp the pod-template annotation (H1)
-    const manifests = appManifests(appCfg, { name: site.name, namespace: ns, host: `${site.name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId });
+    // (A2b) A stack resource may already be TCP-exposed (via `drop expose`); preserve the tcp-service
+    // allowance. Stack-DRIVEN expose (the spec's `expose:` key, parsed+stored today) lands in a later slice.
+    const stackExposed = !!(await tcp.get(site.name));
+    const manifests = appManifests(appCfg, { name: site.name, namespace: ns, host: `${site.name}.${d.cfg.baseDomain}`, sandbox, imagePullSecret, versionId: verId, tcpExposed: stackExposed });
     await d.kube!.applyApp(ns, site.name, manifests);
     const secretKeys = (await d.meta.listSecretKeys(site.name)).map((k) => k.key);
     await d.secrets.ensureBinding({ owner: site.owner, app: site.name, namespace: ns }, secretKeys);

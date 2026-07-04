@@ -87,6 +87,35 @@ ingress:
     enabled: true
     secretName: "" # wildcard cert Secret (nginx). For ALB, use ACM via annotations.
 
+# Load-balancer topology (Plan-v5 A2 "LB topology — two shapes, recommended migration path").
+#   dual  — RECOMMENDED step-1 default: keep the existing ALB for HTTPS, add a SEPARATE internal NLB
+#           for the L4/TCP plane (edge-tcp). Zero churn to the HTTP plane; L4 ships independently.
+#   nlb   — step-2 consolidation end-state: the TCP plane's NLB is provisioned; moving :443 onto an
+#           NLB TLS listener is a manual follow-up, not automated here.
+#   alb   — HTTP-only, NO L4 plane (the edge-tcp Service falls back to ClusterIP).
+lb:
+  mode: dual # alb | nlb | dual
+
+# L4 / TCP plane (A2) — the in-cluster edge-tcp router that gives raw-TCP workloads (psql, Redis,
+# MQTT, …) a path via TLS-SNI on a shared port or a dedicated port from the dynamic pool. OFF by
+# default (opt-in). `drop expose` / the expose API turn it on per workload; the API patches this
+# Service's published-port list as dynamic ports are allocated/released.
+tcp:
+  enabled: false
+  replicaCount: 2
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { memory: 128Mi }
+  # Well-known shared ports (SNI / PG-preamble routing) — one listener fronts MANY SNI-routable
+  # workloads. protocol: postgres (libpq SSLRequest preamble) | tls-sni (peek the ClientHello directly).
+  sharedPorts:
+    - { port: 5432, protocol: postgres }
+  # The dynamic per-workload port pool the API allocates from (lowest-free wins) for `--port` exposure.
+  portRange: "7000-7099"
+  # Persistent dynamic-port listeners to always publish on the Service — usually empty: the API grows
+  # the list on expose. Pin ports here only if you don't want the API to own them across `helm upgrade`.
+  dynamicPorts: []
+
 nameOverride: ""
 fullnameOverride: ""
 podAnnotations: {}

@@ -26,7 +26,7 @@ async function tgz(files: Record<string, string>): Promise<Buffer> {
   return await buffer(p.pipe(createGzip()));
 }
 
-async function mk(opts: { admins?: string[] } = {}) {
+async function mk(opts: { admins?: string[]; env?: Record<string, string> } = {}) {
   const db = await makeTestDb();
   const users = new UserStore(db);
   if (opts.admins) await users.seedAdmins(opts.admins);
@@ -40,6 +40,7 @@ async function mk(opts: { admins?: string[] } = {}) {
     DROP_DATABASE_URL: "postgres://x/y",
     DROP_BASE_DOMAIN: "drop.example.com",
     DROP_S3_ENDPOINT: "http://localhost:4566",
+    ...opts.env,
   });
   const verifier = new FakeVerifier({
     alice: { sub: "alice@example.com", email: "alice@example.com" },
@@ -1845,5 +1846,154 @@ test("admin quota routes are admin-only; PUT validates keys", async () => {
   const q = await (await call(app, "GET", "/v1/admin/orgs/team/quotas", "alice")).json();
   expect(q.effective.max_db_storage).toBe("1Gi");
   expect(q.effective.storage_budget_bytes).toBeNull();
+  await db.destroy();
+});
+
+// ============================ TCP (L4) exposure (A2b) ======================================
+
+test("expose sni on a database: 200 + connect string + audit + detail surface", async () => {
+  const { app, kube, audit, db } = await mk();
+  await call(app, "POST", "/v1/databases/pg", "alice", {}); // claim + apply the DB
+  const res = await call(app, "POST", "/v1/sites/pg/expose", "alice", { mode: "sni" });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.tcp).toMatchObject({ mode: "sni", protocol: "postgres", port: null, connect: "pg.drop.example.com:5432" });
+  expect(body.tcp.sslmode).toMatch(/sslmode=require/);
+  // tenant re-applied WITH the edge-tcp allow policy for this DB (cnpg selector)
+  const lastTenant = kube.tenantApplies[kube.tenantApplies.length - 1]!.manifests as any;
+  expect(lastTenant.edgeTcpPolicies).toHaveLength(1);
+  expect(lastTenant.edgeTcpPolicies[0].spec.podSelector.matchLabels["cnpg.io/cluster"]).toBe("pg");
+  // audit
+  const trail = await audit.list({ action: "tcp.expose" });
+  expect(trail.entries[0]).toMatchObject({ target: "pg", targetType: "database" });
+  // detail surface
+  const detail = await (await call(app, "GET", "/v1/sites/pg", "alice")).json();
+  expect(detail.tcp).toMatchObject({ mode: "sni", protocol: "postgres", connect: "pg.drop.example.com:5432" });
+  await db.destroy();
+});
+
+test("expose port on an app (scale.min>=1): allocates a port, patches the edge-tcp Service, lb-host connect", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/apps/cache", "alice", { image: "redis:1", scale: { min: 1, max: 1 } });
+  const res = await call(app, "POST", "/v1/sites/cache/expose", "alice", { mode: "port", protocol: "redis" });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.tcp).toMatchObject({ mode: "port", protocol: "redis", port: 7000, connect: "drop.example.com:7000" }); // port mode = raw LB host (no SNI prefix)
+  // the edge-tcp Service was patched to include the shared port + the newly-allocated dynamic port
+  const patch = kube.edgeTcpPortPatches[kube.edgeTcpPortPatches.length - 1]!;
+  expect(patch.ports.map((p) => p.port).sort((a, b) => a - b)).toEqual([5432, 7000]);
+  await db.destroy();
+});
+
+test("expose: a scale.min=0 app is refused (no scale-to-zero for TCP) → 400", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/web", "alice", { image: "x:1", scale: { min: 0, max: 3 } });
+  const res = await call(app, "POST", "/v1/sites/web/expose", "alice", { mode: "sni" });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error).toMatch(/scale\.min >= 1/);
+  await db.destroy();
+});
+
+test("expose port: pool exhaustion → 409", async () => {
+  const { app, db } = await mk({ env: { DROP_TCP_PORT_RANGE: "7000-7000" } }); // a one-port pool
+  await call(app, "POST", "/v1/apps/a", "alice", { image: "x:1", scale: { min: 1, max: 1 } });
+  await call(app, "POST", "/v1/apps/b", "alice", { image: "x:1", scale: { min: 1, max: 1 } });
+  expect((await call(app, "POST", "/v1/sites/a/expose", "alice", { mode: "port" })).status).toBe(200);
+  const res = await call(app, "POST", "/v1/sites/b/expose", "alice", { mode: "port" });
+  expect(res.status).toBe(409);
+  expect((await res.json()).error).toMatch(/exhausted/);
+  await db.destroy();
+});
+
+test("unexpose: clears the row, re-applies tenant manifests WITHOUT the allow policy, audits", async () => {
+  const { app, kube, audit, db } = await mk();
+  await call(app, "POST", "/v1/apps/cache", "alice", { image: "redis:1", scale: { min: 1, max: 1 } });
+  await call(app, "POST", "/v1/sites/cache/expose", "alice", { mode: "port", protocol: "redis" });
+  const res = await call(app, "DELETE", "/v1/sites/cache/expose", "alice");
+  expect(res.status).toBe(200);
+  expect((await res.json()).tcp).toBeNull();
+  // tenant re-applied with NO edge-tcp policies (the allow rule is pruned)
+  const lastTenant = kube.tenantApplies[kube.tenantApplies.length - 1]!.manifests as any;
+  expect(lastTenant.edgeTcpPolicies).toEqual([]);
+  // the edge-tcp Service was patched back to just the shared port
+  const patch = kube.edgeTcpPortPatches[kube.edgeTcpPortPatches.length - 1]!;
+  expect(patch.ports.map((p) => p.port)).toEqual([5432]);
+  // the detail no longer surfaces tcp
+  const detail = await (await call(app, "GET", "/v1/sites/cache", "alice")).json();
+  expect(detail.tcp).toBeUndefined();
+  expect((await audit.list({ action: "tcp.unexpose" })).entries[0]).toMatchObject({ target: "cache" });
+  await db.destroy();
+});
+
+test("expose: not allowed on a static site (409)", async () => {
+  const { app, db } = await mk();
+  await pub(app, "alice", "mysite", await tgz({ "index.html": "x" }));
+  const res = await call(app, "POST", "/v1/sites/mysite/expose", "alice", { mode: "sni" });
+  expect(res.status).toBe(409);
+  await db.destroy();
+});
+
+test("expose: non-deployer is 403; unknown workload 404", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/cache", "alice", { image: "x:1", scale: { min: 1, max: 1 } });
+  expect((await call(app, "POST", "/v1/sites/cache/expose", "bob", { mode: "sni" })).status).toBe(403);
+  expect((await call(app, "POST", "/v1/sites/ghost/expose", "alice", { mode: "sni" })).status).toBe(404);
+  await db.destroy();
+});
+
+test("deploy: a protocol:tcp service is 400 WITHOUT an expose row, allowed WITH one (expose-first ordering)", async () => {
+  const { app, db } = await mk();
+  // first a plain HTTP deploy (scale.min>=1) claims the app
+  await call(app, "POST", "/v1/apps/broker", "alice", { image: "mqtt:1", scale: { min: 1, max: 1 } });
+  // redeploy declaring a tcp service, no expose row yet → assertHttpOnly 400
+  const tcpCfg = { image: "mqtt:2", scale: { min: 1, max: 1 }, services: [{ internal_port: 1883, protocol: "tcp" }] };
+  expect((await call(app, "POST", "/v1/apps/broker", "alice", tcpCfg)).status).toBe(400);
+  // expose, then the tcp-service deploy is accepted
+  expect((await call(app, "POST", "/v1/sites/broker/expose", "alice", { mode: "sni" })).status).toBe(200);
+  const ok = await call(app, "POST", "/v1/apps/broker", "alice", tcpCfg);
+  expect(ok.status).toBe(200);
+  await db.destroy();
+});
+
+test("deploy: a TCP-exposed app deployed with scale.min=0 → 400 (enforced at deploy too)", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/apps/broker", "alice", { image: "mqtt:1", scale: { min: 1, max: 1 } });
+  await call(app, "POST", "/v1/sites/broker/expose", "alice", { mode: "sni" });
+  const res = await call(app, "POST", "/v1/apps/broker", "alice", { image: "mqtt:2", scale: { min: 0, max: 3 }, services: [{ internal_port: 1883, protocol: "tcp" }] });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error).toMatch(/scale\.min >= 1/);
+  await db.destroy();
+});
+
+test("expose ls: lists the caller's exposures with connect strings", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/databases/pg", "alice", {});
+  await call(app, "POST", "/v1/apps/cache", "alice", { image: "redis:1", scale: { min: 1, max: 1 } });
+  await call(app, "POST", "/v1/sites/pg/expose", "alice", { mode: "sni" });
+  await call(app, "POST", "/v1/sites/cache/expose", "alice", { mode: "port", protocol: "redis" });
+  const res = await (await call(app, "GET", "/v1/expose", "alice")).json();
+  const byName = Object.fromEntries(res.exposed.map((e: any) => [e.name, e]));
+  expect(byName.pg).toMatchObject({ mode: "sni", connect: "pg.drop.example.com:5432" });
+  expect(byName.cache).toMatchObject({ mode: "port", connect: "drop.example.com:7000" });
+  await db.destroy();
+});
+
+test("expose with compute off: records the registry row + returns a provisioning-deferred note", async () => {
+  const db = await makeTestDb();
+  const users = new UserStore(db);
+  const cfg = loadConfig({ DROP_S3_BUCKET: "b", DROP_DATABASE_URL: "postgres://x/y", DROP_BASE_DOMAIN: "drop.example.com", DROP_S3_ENDPOINT: "http://localhost:4566" });
+  const verifier = new FakeVerifier({ alice: { sub: "alice@example.com", email: "alice@example.com" } });
+  // No kube → compute off. Claim a DB row directly (the compute-off deploy path isn't needed here).
+  const meta = new MetaStore(db);
+  const orgs = new OrgStore(db);
+  await users.upsertOnLogin("alice@example.com", null);
+  const org = await orgs.ensurePersonalOrg("alice@example.com");
+  await meta.claimSite("pg", "alice@example.com", "database", { id: org.id, namespace: org.namespace });
+  const app = createApp({ cfg, meta, blob: new FakeBlob(), db, users, verifier, secrets: new FakeSecretStore(), images: new FakeImageStore(), orgs, audit: new AuditStore(db) }); // no kube
+  const res = await call(app, "POST", "/v1/sites/pg/expose", "alice", { mode: "sni" });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.tcp.connect).toBe("pg.drop.example.com:5432");
+  expect(body.note).toMatch(/compute off/);
   await db.destroy();
 });

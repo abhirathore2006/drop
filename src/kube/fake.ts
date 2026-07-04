@@ -30,6 +30,12 @@ export class FakeKube implements KubeClient {
     this.tenantApplies.push({ namespace, manifests });
   }
 
+  // (A2b) edge-tcp Service port-list patches — tests assert what listeners the NLB would be told to run.
+  readonly edgeTcpPortPatches: { namespace: string; service: string; ports: { name: string; port: number }[] }[] = [];
+  async patchEdgeTcpPorts(namespace: string, service: string, ports: { name: string; port: number }[]): Promise<void> {
+    this.edgeTcpPortPatches.push({ namespace, service, ports });
+  }
+
   async applyApp(namespace: string, name: string, manifests: AppManifests): Promise<void> {
     this.apps.set(this.key(namespace, name), manifests);
     this.applies.push({ namespace, name, manifests });

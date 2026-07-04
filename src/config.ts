@@ -50,6 +50,13 @@ export interface Config {
   imageRegistry?: string; // registry host/repo prefix for the "registry" backend, e.g. <acct>.dkr.ecr.<region>.amazonaws.com/drop-apps
   imageRegistryPullSecret?: string; // name of a pre-provisioned imagePullSecret in the tenant ns (registry backend)
   imageMaxBytes: number; // reject an image-push upload larger than this (default 2 GiB) — DoS bound
+  // --- L4 / TCP expose (A2b) ---
+  tcpPortFrom: number; // DROP_TCP_PORT_RANGE low bound — the dynamic per-workload port pool (default 7000)
+  tcpPortTo: number; // DROP_TCP_PORT_RANGE high bound (default 7099); allocation is lowest-free in [from,to], exhaustion → 409
+  tcpLbHost: string; // DROP_TCP_LB_HOST — host in a port-mode connect string (<lb-host>:<port>); defaults to baseDomain
+  tcpSharedPorts: TcpSharedPort[]; // DROP_TCP_SHARED_PORTS — used to derive the sni-mode connect port per protocol (default 5432:postgres)
+  edgeTcpNamespace: string; // DROP_EDGE_TCP_NAMESPACE — where the edge-tcp Service lives (patched on port expose) + the NetworkPolicy source ns (default drop-system)
+  edgeTcpService: string; // DROP_EDGE_TCP_SERVICE — the edge-tcp Service name whose port list the API patches on port expose (default drop-edge-tcp)
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -118,6 +125,21 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     imageRegistry: env.DROP_IMAGE_REGISTRY || undefined,
     imageRegistryPullSecret: env.DROP_IMAGE_REGISTRY_PULL_SECRET || undefined,
     imageMaxBytes: Number(env.DROP_IMAGE_MAX_BYTES) || 2 * 1024 * 1024 * 1024,
+    ...(() => {
+      // L4/TCP expose (A2b). The dynamic-port pool the expose API allocates from (lowest-free wins),
+      // the LB host used in port-mode connect strings, the shared-port map used to derive an sni-mode
+      // connect port per protocol, and where the edge-tcp Service lives (patched on a port expose).
+      const range = parsePortRange(env.DROP_TCP_PORT_RANGE ?? "7000-7099", 7000, 7099);
+      const base = env.DROP_BASE_DOMAIN ?? "drop.example.com";
+      return {
+        tcpPortFrom: range.from,
+        tcpPortTo: range.to,
+        tcpLbHost: env.DROP_TCP_LB_HOST || base,
+        tcpSharedPorts: parseSharedPorts(env.DROP_TCP_SHARED_PORTS ?? "5432:postgres"),
+        edgeTcpNamespace: env.DROP_EDGE_TCP_NAMESPACE ?? "drop-system",
+        edgeTcpService: env.DROP_EDGE_TCP_SERVICE ?? "drop-edge-tcp",
+      };
+    })(),
   };
 }
 
@@ -177,6 +199,22 @@ function parseDynamicRange(spec: string): number[] {
   const out: number[] = [];
   for (let p = from; p <= to; p++) out.push(p);
   return out;
+}
+
+/** Parse a `"7000-7099"` (or single `"7000"`) port range → `{from,to}`, clamped to a sane 1024-wide
+ *  window; junk / inverted / oversized falls back to the provided defaults. Used for the A2b dynamic
+ *  expose pool the API allocates ports from. */
+export function parsePortRange(spec: string, defFrom: number, defTo: number): { from: number; to: number } {
+  const s = (spec ?? "").trim();
+  if (!s) return { from: defFrom, to: defTo };
+  const m = /^(\d+)(?:-(\d+))?$/.exec(s);
+  if (!m) return { from: defFrom, to: defTo };
+  const from = Number(m[1]);
+  const to = m[2] !== undefined ? Number(m[2]) : from;
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to > 65535 || to < from || to - from > 1024) {
+    return { from: defFrom, to: defTo };
+  }
+  return { from, to };
 }
 
 export function loadTcpConfig(env: Record<string, string | undefined> = process.env): TcpConfig {

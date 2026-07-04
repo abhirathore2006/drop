@@ -84,7 +84,36 @@ router  → upstream  <span class="tok-c"># ClientHello + splice  → TLS now co
 <h2 id="local">Local parity</h2>
 <p>Locally, nginx grows a <code>stream {}</code> block (<code>listen 5432; ssl_preread on;</code>) that forwards the shared port and the dynamic range to <code>edge-tcp</code> exactly as the production NLB will. It ships <strong>off by default</strong> — port <code>5432</code> is already taken by Postgres on most dev machines — and is enabled with <code>make tls TCP_PORTS=1</code>.</p>
 
-<div class="note warn"><span class="lbl">Coming next — the expose API (A2b)</span><p>This slice ships the <strong>router core</strong>. The surface that turns it on for a resource — the <code>tcp_endpoints</code> registry, <code>POST /v1/sites/:name/expose</code>, <code>drop expose</code> / <code>drop unexpose</code>, the MCP tools, the console exposure panel, the Service/NLB patching and the tenant NetworkPolicy allow-rule — arrives in the <strong>next slice (A2b)</strong>. Until then the router routes from an injected route table; there is no self-service expose command yet.</p></div>
+<h2 id="expose">Exposing a workload</h2>
+<p>TCP exposure is <strong>opt-in, default off, and audited</strong>. Turning it on for an app or a database records one row in the <code>tcp_endpoints</code> registry, adds a single tenant <strong>NetworkPolicy</strong> that lets <em>only</em> <code>edge-tcp</code> reach <em>only</em> that workload's pods, and — for a dedicated port — publishes the port on the <code>edge-tcp</code> Service so the NLB grows a listener for it. The <code>tcp.expose</code> / <code>tcp.unexpose</code> events land in the audit trail.</p>
+
+<pre><code><span class="tok-c"># a database over TLS-SNI on the shared Postgres port (no port consumed)</span>
+drop db expose pg                       <span class="tok-c"># sugar for: drop expose pg --sni --protocol postgres</span>
+<span class="tok-c"># an app on a dedicated port (non-SNI protocols: plain Redis, MQTT, …)</span>
+drop expose cache --port --protocol redis
+<span class="tok-c"># turn it off again</span>
+drop unexpose cache</code></pre>
+
+<p>Under the hood the CLI/MCP call <code>POST /v1/sites/:name/expose</code> with <code>{mode: "sni"|"port", protocol?: "postgres"|"redis"|"tcp"}</code> (authorized by the ship/manage tier — a site owner/editor or org owner/admin/member); <code>DELETE /v1/sites/:name/expose</code> unexposes. A <code>--port</code> exposure allocates the <strong>lowest free</strong> port from the range (default <code>7000–7099</code>); an exhausted pool returns <code>409</code> — which is the nudge to prefer <code>--sni</code>.</p>
+
+<div class="note warn"><span class="lbl">Expose first, then deploy the TCP service</span><p>An app whose <code>drop.yaml</code> declares <code>services: [{ protocol: tcp }]</code> is refused at deploy <em>unless</em> it already has an expose row — so the order is <strong>expose, then deploy</strong>. And because a TCP <code>SYN</code> can't wake a scaled-to-zero pod, a TCP-exposed app must run with <code>scale.min ≥ 1</code> (enforced both at expose and at deploy). Managed databases are always-on and unaffected.</p></div>
+
+<h3 id="connect">Connect strings</h3>
+<p>Expose returns the connect string, and it also shows on the resource's detail page and in <code>drop expose ls</code>:</p>
+<table class="tbl">
+<thead><tr><th>Mode</th><th>Connect string</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><strong>SNI</strong> (postgres)</td><td><code>&lt;name&gt;.&lt;baseDomain&gt;:5432</code></td><td>Connect with at least <code>sslmode=require</code> (prefer <code>verify-full</code> with the cluster CA) — the SNI hostname <em>is</em> the routing key.</td></tr>
+<tr><td><strong>Port</strong></td><td><code>&lt;lb-host&gt;:&lt;port&gt;</code></td><td>The raw LB host (<code>DROP_TCP_LB_HOST</code>, defaults to the base domain) on the allocated port — no SNI needed.</td></tr>
+</tbody>
+</table>
+
+<pre><code><span class="tok-c">$ drop expose ls</span>
+NAME    TYPE      MODE  PROTOCOL  PORT  CONNECT
+pg      database  sni   postgres  —     pg.drop.example.com:5432   (sslmode=require)
+cache   app       port  redis     7000  drop.example.com:7000</code></pre>
+
+<p>The console mirrors this: an <strong>exposure</strong> panel on the app and database detail pages shows the current mode/protocol, a copyable connect string, and expose / unexpose controls. MCP exposes the same via the <code>expose</code> and <code>unexpose</code> tools.</p>
 
 <div class="next">
   <a href="roles-visibility.html"><div class="d">← Back</div><div class="t">Roles &amp; Visibility</div></a>

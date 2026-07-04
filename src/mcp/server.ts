@@ -255,6 +255,31 @@ export function buildMcp(): McpServer {
     async ({ app }) => run(() => getClient().then((c) => c.startApp(app))),
   );
 
+  // ---- TCP (L4) exposure (A2b) ----
+  server.registerTool(
+    "expose",
+    {
+      description:
+        "Expose an app or database over the L4 (TCP) plane. mode 'sni' routes by the TLS SNI hostname on a shared port (no dedicated port consumed — the default); mode 'port' allocates a dedicated port from the dynamic pool. Apps must run with scale.min>=1. Returns the connect string. Databases default to protocol 'postgres', apps to 'tcp'.",
+      inputSchema: {
+        name: z.string(),
+        mode: z.enum(["sni", "port"]).optional().describe("sni (shared port, default) | port (dedicated port)"),
+        protocol: z.enum(["tcp", "postgres", "redis"]).optional(),
+      },
+    },
+    async ({ name, mode, protocol }) => run(() => getClient().then((c) => c.expose(name, { mode: mode ?? "sni", protocol }))),
+  );
+  server.registerTool(
+    "unexpose",
+    { description: "Remove a workload's TCP exposure.", inputSchema: { name: z.string() } },
+    async ({ name }) => run(() => getClient().then((c) => c.unexpose(name))),
+  );
+  server.registerTool(
+    "expose_list",
+    { description: "List your TCP-exposed workloads + their connect strings (org-scoped with `org`).", inputSchema: { org: z.string().optional() } },
+    async ({ org }) => run(() => getClient().then((c) => c.exposeList(org))),
+  );
+
   // ---- stacks (B2): declarative multi-resource. Agent-safe shape: plan (dry-run) before apply. ----
   server.registerTool(
     "stack_plan",

@@ -157,6 +157,36 @@ export class KubeApiClient implements KubeClient {
     await this.apply(this.netpolPath(namespace, this.objName(t.networkPolicy)), t.networkPolicy as Record<string, unknown>);
     await this.apply(this.quotaPath(namespace, this.objName(t.resourceQuota)), t.resourceQuota as Record<string, unknown>);
     await this.apply(this.limitRangePath(namespace, this.objName(t.limitRange)), t.limitRange as Record<string, unknown>);
+    // (A2b) Apply the per-workload "allow from edge-tcp" policies, then prune any left from a workload
+    // that has since been unexposed (SSA can't prune a policy that's no longer in this manifest set).
+    const keep = new Set<string>();
+    for (const p of t.edgeTcpPolicies ?? []) {
+      const n = this.objName(p);
+      keep.add(n);
+      await this.apply(this.netpolPath(namespace, n), p as Record<string, unknown>);
+    }
+    await this.pruneEdgeTcpPolicies(namespace, keep);
+  }
+
+  /** Delete tenant edge-tcp allow policies (label drop.dev/allow=edge-tcp) not in `keep`. */
+  private async pruneEdgeTcpPolicies(namespace: string, keep: Set<string>): Promise<void> {
+    const sel = encodeURIComponent("app.kubernetes.io/managed-by=drop,drop.dev/allow=edge-tcp");
+    const r = await this.call("GET", `/apis/networking.k8s.io/v1/namespaces/${namespace}/networkpolicies?labelSelector=${sel}`);
+    if (r.status >= 300) return;
+    for (const p of (JSON.parse(r.body).items ?? []) as any[]) {
+      const pn = p.metadata?.name as string | undefined;
+      if (pn && !keep.has(pn)) await this.call("DELETE", this.netpolPath(namespace, pn));
+    }
+  }
+
+  /** (A2b) Set the edge-tcp Service's published ports (MERGE-patch spec.ports, so the port list is
+   *  replaced wholesale with the caller's shared + active-dynamic set — the LB controller reconciles
+   *  NLB listeners from it). 404 (Service not created yet) is surfaced so the caller can note it. */
+  async patchEdgeTcpPorts(namespace: string, service: string, ports: { name: string; port: number }[]): Promise<void> {
+    const body = JSON.stringify({ spec: { ports: ports.map((p) => ({ name: p.name, port: p.port, targetPort: p.port, protocol: "TCP" })) } });
+    const r = await this.call("PATCH", this.servicePath(namespace, service), { body, contentType: "application/merge-patch+json" });
+    if (r.status === 404) throw new Error(`edge-tcp Service ${namespace}/${service} not found — is the L4 plane deployed?`);
+    if (r.status >= 300) throw new Error(`patchEdgeTcpPorts ${service} -> ${r.status}: ${r.body.slice(0, 200)}`);
   }
 
   async applyApp(namespace: string, name: string, m: AppManifests): Promise<void> {

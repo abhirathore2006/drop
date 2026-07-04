@@ -1,6 +1,6 @@
 import type { OrgRole, SiteRole } from "../db/schema.ts";
 
-export type Action = "read" | "logs" | "publish" | "deploy" | "db:create" | "rollback" | "configure" | "share" | "transfer" | "delete";
+export type Action = "read" | "logs" | "publish" | "deploy" | "db:create" | "rollback" | "configure" | "expose" | "share" | "transfer" | "delete";
 
 export interface Actor {
   email: string;
@@ -14,18 +14,22 @@ export interface Actor {
 //   viewer is deliberately metadata-only (it never sees the credentials Secret).
 // publish = ship a static-site version; deploy = ship a container-app revision.
 // db:create = provision/update a managed database. configure = set visibility / password / secrets.
+// expose = turn TCP (L4) exposure on/off for a workload (A2b). Mapped to the SAME tier as deploy —
+//   the ship/manage tier (site owner+editor, org owner/admin/member) — because exposure is a
+//   deploy-adjacent operation an editor drives, and it's already fenced (opt-in, default off, audited,
+//   protocol-native auth + a NetworkPolicy that only allows edge-tcp → the specifically-exposed pod).
 const SITE_MAP: Record<SiteRole, Action[]> = {
-  owner: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "share", "transfer", "delete"],
-  editor: ["read", "logs", "publish", "deploy", "db:create", "rollback"],
+  owner: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose", "share", "transfer", "delete"],
+  editor: ["read", "logs", "publish", "deploy", "db:create", "rollback", "expose"],
   viewer: ["read"],
 };
 
 // Org roles apply org-WIDE (every resource in the org). owner/admin manage everything; member is the
-// day-to-day (ship + configure/secrets, but not share/transfer/delete a resource); viewer reads.
+// day-to-day (ship + configure/secrets + expose, but not share/transfer/delete a resource); viewer reads.
 const ORG_MAP: Record<OrgRole, Action[]> = {
-  owner: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "share", "transfer", "delete"],
-  admin: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "share", "transfer", "delete"],
-  member: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure"],
+  owner: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose", "share", "transfer", "delete"],
+  admin: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose", "share", "transfer", "delete"],
+  member: ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose"],
   viewer: ["read"],
 };
 

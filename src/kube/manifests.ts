@@ -16,6 +16,11 @@ export interface ManifestContext {
   // matches what's currently running) would otherwise silently no-op. A version id is always
   // unique, so stamping it here guarantees the template differs and kube rolls the pods.
   versionId?: string;
+  // (A2b) The app has a TCP expose row, so its `services[].protocol: tcp` is intentional — skip the
+  // v1 assertHttpOnly guard (which otherwise 400s a non-HTTP service). The rest of the shape is
+  // unchanged: the Service still fronts the container port and the HTTPScaledObject keeps scale.min
+  // (≥1 for a TCP app) replicas alive; edge-tcp routes to the Service out of band.
+  tcpExposed?: boolean;
 }
 export interface WorkerManifests {
   name: string; // Deployment name: `<app>-<process>`
@@ -44,10 +49,28 @@ export interface TenantManifests {
   networkPolicy: Record<string, unknown>;
   resourceQuota: Record<string, unknown>;
   limitRange: Record<string, unknown>;
+  // (A2b) One "allow from edge-tcp" NetworkPolicy per EXPOSED workload — EMPTY unless the tenant has
+  // TCP-exposed workloads. Kept as separate per-workload policies (not folded into the default-deny)
+  // precisely so the allow is scoped to ONLY the exposed pod: a single default-deny policy selects all
+  // pods (podSelector {}), so an ingress rule on it would open edge-tcp → every pod in the namespace.
+  // applyTenant applies these + prunes any left from a since-unexposed workload (label drop.dev/allow).
+  edgeTcpPolicies: Record<string, unknown>[];
+}
+
+/** An exposed workload passed into tenantManifests to build its "allow from edge-tcp" rule. `kind`
+ *  picks the destination pod selector (app → app.kubernetes.io/name; database → cnpg.io/cluster);
+ *  `port` is the container port edge-tcp is permitted to reach on that pod. */
+export interface ExposedWorkload {
+  name: string;
+  kind: "app" | "database";
+  port: number;
 }
 
 const SERVICE_PORT = 80;
 const KEDA_NAMESPACE = "keda"; // where the KEDA HTTP add-on interceptor runs
+// (A2b) The component label the edge-tcp router pods carry — the source selector every tenant
+// "allow from edge-tcp" NetworkPolicy matches on (see edgeTcpAllowPolicy + edgeTcpManifests).
+const EDGE_TCP_COMPONENT = "edge-tcp";
 
 // Where a bound database's CNPG cluster CA (`ca.crt` from the `<db>-ca` Secret) is mounted,
 // read-only, one dir per database: `<base>/<db>/ca.crt`. PGSSLROOTCERT points the primary
@@ -75,7 +98,10 @@ const LIMITRANGE_DEFAULT_REQUEST = { cpu: "100m", memory: "128Mi" };
  *  default LimitRange. `opts.blockedEgressCidrs` MUST cover the live cluster's
  *  pod+service CIDRs (sourced from config) — they're what keeps cross-tenant and
  *  platform-DB traffic off the 443 allowlist on clusters whose CIDRs aren't in 10/8. */
-export function tenantManifests(namespace: string, opts: { blockedEgressCidrs?: string[] } = {}): TenantManifests {
+export function tenantManifests(
+  namespace: string,
+  opts: { blockedEgressCidrs?: string[]; edgeTcp?: { namespace: string; workloads: ExposedWorkload[] } } = {},
+): TenantManifests {
   const blocked = opts.blockedEgressCidrs && opts.blockedEgressCidrs.length > 0 ? opts.blockedEgressCidrs : DEFAULT_BLOCKED_EGRESS_CIDRS;
   const labels = {
     "app.kubernetes.io/managed-by": "drop",
@@ -116,6 +142,43 @@ export function tenantManifests(namespace: string, opts: { blockedEgressCidrs?: 
       kind: "LimitRange",
       metadata: { name: "drop-defaults", namespace },
       spec: { limits: [{ type: "Container", default: LIMITRANGE_DEFAULT, defaultRequest: LIMITRANGE_DEFAULT_REQUEST }] },
+    },
+    // (A2b) allow-from-edge-tcp, one per exposed workload — empty unless the tenant exposes TCP.
+    edgeTcpPolicies: (opts.edgeTcp?.workloads ?? []).map((w) => edgeTcpAllowPolicy(namespace, opts.edgeTcp!.namespace, w)),
+  };
+}
+
+// (A2b) The per-workload "allow from edge-tcp" NetworkPolicy: it re-opens ingress from the edge-tcp
+// pods (matched by their component label in the platform namespace) to ONLY this workload's pods
+// (app.kubernetes.io/name for an app, cnpg.io/cluster for a CNPG database) on ONLY its container port.
+// The default-deny (tenantManifests) still blocks everything else; this is the single explicit hole
+// the plan's security note describes. Labelled drop.dev/allow=edge-tcp so applyTenant can prune it
+// when the workload is later unexposed.
+function edgeTcpAllowPolicy(namespace: string, edgeTcpNamespace: string, w: ExposedWorkload): Record<string, unknown> {
+  const podSelector =
+    w.kind === "database" ? { matchLabels: { "cnpg.io/cluster": w.name } } : { matchLabels: { "app.kubernetes.io/name": w.name } };
+  return {
+    apiVersion: "networking.k8s.io/v1",
+    kind: "NetworkPolicy",
+    metadata: {
+      name: `${w.name}-allow-edge-tcp`,
+      namespace,
+      labels: { "app.kubernetes.io/managed-by": "drop", "drop.dev/allow": "edge-tcp", "drop.dev/workload": w.name },
+    },
+    spec: {
+      podSelector,
+      policyTypes: ["Ingress"],
+      ingress: [
+        {
+          from: [
+            {
+              namespaceSelector: { matchLabels: { "kubernetes.io/metadata.name": edgeTcpNamespace } },
+              podSelector: { matchLabels: { "app.kubernetes.io/component": EDGE_TCP_COMPONENT } },
+            },
+          ],
+          ports: [{ protocol: "TCP", port: w.port }],
+        },
+      ],
     },
   };
 }
@@ -290,7 +353,7 @@ function cronAppManifests(app: AppConfig, ctx: ManifestContext, binding: AppBind
 }
 
 export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests {
-  assertHttpOnly(app); // v1 guard: exactly one HTTP service
+  if (!ctx.tcpExposed) assertHttpOnly(app); // v1 guard: exactly one HTTP service (retired for TCP-exposed apps, A2b)
   assertProcesses(app); // at most one web process; schedule's exclusivity with processes/services/healthcheck (H2)
   const binding = appBinding(app, ctx.name);
   const hasEnv = !!app.env && Object.keys(app.env).length > 0;
@@ -395,6 +458,92 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
     out.secret = { apiVersion: "v1", kind: "Secret", metadata: { name: `${ctx.name}-env`, namespace: ctx.namespace, labels }, stringData: app.env };
   }
   return out;
+}
+
+// ============================ (A2b) edge-tcp router objects =================================
+// The L4 router runs as its own small Deployment + Service in the PLATFORM namespace (alongside
+// api/edge), NOT in a tenant namespace — it needs cluster Service DNS + its own NetworkPolicy
+// identity to reach every tenant's exposed workloads. This is the canonical object shape; the Helm
+// chart mirrors it (with a Secret-backed DROP_DATABASE_URL + the NLB annotations in prod values) and
+// the API patches ONLY the Service's port list as ports are allocated/released.
+
+export type EdgeTcpSharedProtocol = "postgres" | "tls-sni";
+
+export interface EdgeTcpContext {
+  name: string; // object name, e.g. "drop-edge-tcp"
+  namespace: string; // the platform namespace (where api/edge run)
+  image: string;
+  sharedPorts: { port: number; protocol: EdgeTcpSharedProtocol }[]; // well-known SNI/PG ports (always on the Service)
+  portRange: { from: number; to: number }; // the FULL dynamic pool the router binds at boot (so any allocated port is already listening)
+  activeDynamicPorts?: number[]; // dynamic ports with a LIVE expose → get a Service/NLB listener (quota-frugal: unused ports get none)
+  serviceType?: "LoadBalancer" | "ClusterIP"; // LoadBalancer (NLB) in prod, ClusterIP locally
+  annotations?: Record<string, string>; // Service annotations (the NLB `internal` / `nlb-target-type: ip` set in prod)
+  replicas?: number;
+  resources?: AppResources;
+  env?: Record<string, unknown>[]; // extra container env (e.g. DROP_DATABASE_URL from a Secret ref)
+  command?: string[]; // default ["node", "dist/edge-tcp.js"]
+}
+
+export interface EdgeTcpManifests {
+  deployment: Record<string, unknown>;
+  service: Record<string, unknown>;
+}
+
+/** A stable, DNS-safe port name from a port number + role prefix (k8s Service port names are ≤15 chars). */
+function tcpPortName(prefix: string, port: number): string {
+  return `${prefix}-${port}`;
+}
+
+/** The edge-tcp Deployment + Service. The Deployment binds the WHOLE dynamic range (so a freshly
+ *  allocated port is already listened on — no router restart on expose); the Service publishes only
+ *  the shared ports + the currently-active dynamic ports (so the NLB burns a listener only per live
+ *  port). Pure: the API/Helm decide the image, service type + annotations, and DB env. */
+export function edgeTcpManifests(ctx: EdgeTcpContext): EdgeTcpManifests {
+  const labels = {
+    "app.kubernetes.io/name": ctx.name,
+    "app.kubernetes.io/managed-by": "drop",
+    "app.kubernetes.io/component": EDGE_TCP_COMPONENT,
+  };
+  const active = [...new Set(ctx.activeDynamicPorts ?? [])].sort((a, b) => a - b);
+  const servicePorts = [
+    ...ctx.sharedPorts.map((s) => ({ name: tcpPortName(s.protocol === "postgres" ? "pg" : "sni", s.port), port: s.port, targetPort: s.port, protocol: "TCP" })),
+    ...active.map((p) => ({ name: tcpPortName("dyn", p), port: p, targetPort: p, protocol: "TCP" })),
+  ];
+  const containerPorts = servicePorts.map((p) => ({ containerPort: p.port, protocol: "TCP" }));
+  const sharedSpec = ctx.sharedPorts.map((s) => `${s.port}:${s.protocol}`).join(",");
+  const limits = resourceLimits(ctx.resources);
+  const container = {
+    name: EDGE_TCP_COMPONENT,
+    image: ctx.image,
+    imagePullPolicy: imagePullPolicy(ctx.image),
+    command: ctx.command ?? ["node", "dist/edge-tcp.js"],
+    ports: containerPorts,
+    env: [
+      { name: "DROP_TCP_SHARED_PORTS", value: sharedSpec },
+      { name: "DROP_TCP_DYNAMIC_RANGE", value: `${ctx.portRange.from}-${ctx.portRange.to}` },
+      ...(ctx.env ?? []),
+    ],
+    ...(limits ? { resources: { limits, requests: limits } } : {}),
+    securityContext: { allowPrivilegeEscalation: false, seccompProfile: { type: "RuntimeDefault" } },
+  };
+  return {
+    deployment: {
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: { name: ctx.name, namespace: ctx.namespace, labels },
+      spec: {
+        replicas: ctx.replicas ?? 1,
+        selector: { matchLabels: labels },
+        template: { metadata: { labels }, spec: { containers: [container] } },
+      },
+    },
+    service: {
+      apiVersion: "v1",
+      kind: "Service",
+      metadata: { name: ctx.name, namespace: ctx.namespace, labels, ...(ctx.annotations ? { annotations: ctx.annotations } : {}) },
+      spec: { type: ctx.serviceType ?? "ClusterIP", selector: labels, ports: servicePorts },
+    },
+  };
 }
 
 export interface ReleaseJobContext extends ManifestContext {

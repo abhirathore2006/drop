@@ -7,12 +7,14 @@ import { Pill } from "../../components/badges.tsx";
 import { api, type Detail } from "../../lib/api.ts";
 import { deriveStatus } from "../../lib/status.ts";
 import { LogsPanel } from "./LogsPanel.tsx";
+import { ExposurePanel } from "./ExposurePanel.tsx";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
 export function AppPanels({ d, isOwner, canDeploy }: { d: Detail; isOwner: boolean; canDeploy: boolean }) {
   return (
     <>
       {d.app && <AppInfoPanel d={d} canDeploy={canDeploy} />}
+      <ExposurePanel d={d} canExpose={canDeploy} />
       <SecretsPanel name={d.name} canManage={isOwner} />
       <LogsPanel name={d.name} />
     </>

@@ -36,7 +36,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 14 | L1b Queue-scaled workers | todo | | |
 | 15 | A3 `db:proxy` tunnel | todo | | |
 | 16 | F1 `drop detect` + stack MCP | todo | | |
-| 17 | M1 Console IA: sidebar/⌘K/onboarding | todo | | |
+| 17 | M1 Console IA: sidebar/⌘K/onboarding | done | 38530d2 | pulled ahead of order (console-only); ?org= context; templates/tokens/webhooks stubs pending D1/J1/G3 |
 | 18 | J2 Generic OIDC login | todo | | |
 | 19 | G2 Edge metrics · G2b uptime checks | todo | | |
 | 20 | M2 Permission-aware UI + capabilities | todo | | |

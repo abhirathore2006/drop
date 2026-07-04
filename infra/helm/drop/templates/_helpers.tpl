@@ -44,3 +44,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "drop.publicUrl" -}}
 {{- default (printf "https://%s" .Values.apiHost) .Values.config.publicUrl -}}
 {{- end -}}
+
+{{- /* A2b: the DROP_TCP_SHARED_PORTS spec ("5432:postgres,6380:tls-sni") built from tcp.sharedPorts. */ -}}
+{{- define "drop.tcpSharedPorts" -}}
+{{- $parts := list -}}
+{{- range .Values.tcp.sharedPorts -}}
+{{- $parts = append $parts (printf "%v:%s" .port .protocol) -}}
+{{- end -}}
+{{- join "," $parts -}}
+{{- end -}}

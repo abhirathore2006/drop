@@ -11,3 +11,11 @@ data:
   DROP_S3_REGION: {{ .Values.config.s3Region | quote }}
   DROP_ALLOWED_DOMAINS: {{ .Values.config.allowedDomains | quote }}
   DROP_ADMINS: {{ .Values.config.admins | quote }}
+  # A2b — L4/TCP expose: where the edge-tcp Service lives (the API patches its port list on expose) +
+  # the dynamic port pool, the LB host used in port-mode connect strings, and the shared-port map the
+  # API uses to derive the sni-mode connect port per protocol. Harmless when tcp.enabled is false.
+  DROP_EDGE_TCP_NAMESPACE: {{ .Release.Namespace | quote }}
+  DROP_EDGE_TCP_SERVICE: {{ printf "%s-edge-tcp" (include "drop.fullname" .) | quote }}
+  DROP_TCP_PORT_RANGE: {{ .Values.tcp.portRange | quote }}
+  DROP_TCP_SHARED_PORTS: {{ include "drop.tcpSharedPorts" . | quote }}
+  DROP_TCP_LB_HOST: {{ .Values.baseDomain | quote }}

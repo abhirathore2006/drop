@@ -295,6 +295,19 @@ export function buildProgram(): Command {
       await (await client()).dbWake(name);
       console.log(`  ✓ ${name} waking`);
     });
+  db
+    .command("expose <name>")
+    .description("Expose a managed database for direct psql (sugar for `drop expose <name> --sni --protocol postgres`)")
+    .action(async (name: string) => {
+      const res = (await (await client()).expose(name, { mode: "sni", protocol: "postgres" })) as {
+        tcp: { mode: string; protocol: string; connect: string; sslmode?: string };
+        note?: string;
+      };
+      console.log(`  ✓ ${name} exposed for direct psql (${res.tcp.mode}/${res.tcp.protocol})`);
+      console.log(`     connect: ${res.tcp.connect}`);
+      if (res.tcp.sslmode) console.log(`     ${res.tcp.sslmode}`);
+      if (res.note) console.log(`     note: ${res.note}`);
+    });
 
   // ---- buckets (tenant object storage, I1) ----
   const bucket = program.command("bucket").description("Manage object-storage buckets (create / ls / rotate / rm)");
@@ -386,6 +399,50 @@ export function buildProgram(): Command {
     .command("start <app>")
     .description("Bring a stopped app back online")
     .action(async (appName: string) => show(await (await client()).startApp(appName)));
+
+  // ---- TCP (L4) exposure (A2b) ----
+  const printExpose = (name: string, res: { tcp: { mode: string; protocol: string; connect: string; sslmode?: string }; note?: string }) => {
+    console.log(`  ✓ ${name} exposed (${res.tcp.mode}/${res.tcp.protocol})`);
+    console.log(`     connect: ${res.tcp.connect}`);
+    if (res.tcp.sslmode) console.log(`     ${res.tcp.sslmode}`);
+    if (res.note) console.log(`     note: ${res.note}`);
+  };
+  const expose = program.command("expose").description("Expose a workload over the L4 (TCP) plane, or list your exposures");
+  expose
+    .command("ls")
+    .description("List your TCP-exposed workloads + their connect strings")
+    .option("--org <slug>", "show only exposures in this organisation")
+    .action(async (opts: { org?: string }) => {
+      const res = (await (await client()).exposeList(opts.org)) as {
+        exposed: { name: string; type: string; mode: string; protocol: string; port: number | null; connect: string }[];
+      };
+      if (!res.exposed.length) {
+        console.log("  no TCP-exposed workloads");
+        return;
+      }
+      console.log("  NAME             TYPE       MODE   PROTOCOL   CONNECT");
+      for (const e of res.exposed) {
+        console.log(`  ${e.name.padEnd(16)} ${e.type.padEnd(10)} ${e.mode.padEnd(6)} ${e.protocol.padEnd(10)} ${e.connect}`);
+      }
+    });
+  expose
+    .command("set <name>", { isDefault: true })
+    .description("Expose a workload: drop expose <name> [--sni|--port] [--protocol tcp|postgres|redis]")
+    .option("--sni", "route by TLS SNI on a shared port — no dedicated port consumed (the default)")
+    .option("--port", "allocate a dedicated port from the dynamic pool")
+    .option("--protocol <p>", "tcp | postgres | redis (default: postgres for databases, tcp for apps)")
+    .action(async (name: string, opts: { sni?: boolean; port?: boolean; protocol?: string }) => {
+      if (opts.sni && opts.port) throw new Error("choose one of --sni or --port");
+      const mode = opts.port ? "port" : "sni"; // default sni — scarce-port-frugal
+      printExpose(name, await (await client()).expose(name, { mode, protocol: opts.protocol }));
+    });
+  program
+    .command("unexpose <name>")
+    .description("Remove a workload's TCP exposure")
+    .action(async (name: string) => {
+      await (await client()).unexpose(name);
+      console.log(`  ✓ ${name} unexposed`);
+    });
 
   program
     .command("ps <app>")

@@ -7,8 +7,14 @@ import type { DatabaseManifests } from "./cnpg.ts";
 // the API uses BlobStore/FakeBlob for S3. A real impl (k8s API / server-side
 // apply) lands when a cluster is available.
 export interface KubeClient {
-  /** Create-or-update the per-tenant Namespace + NetworkPolicy + ResourceQuota + LimitRange (idempotent). */
+  /** Create-or-update the per-tenant Namespace + NetworkPolicy + ResourceQuota + LimitRange, plus the
+   *  (A2b) per-workload "allow from edge-tcp" NetworkPolicies — pruning any left from a now-unexposed
+   *  workload. Idempotent. */
   applyTenant(namespace: string, manifests: TenantManifests): Promise<void>;
+  /** (A2b) Set the edge-tcp Service's published port list in the platform namespace — the AWS LB
+   *  controller reconciles NLB listeners from it. Called on expose/unexpose so a dynamic port gets a
+   *  listener only while it's live. The shared (SNI/PG) ports are always included by the caller. */
+  patchEdgeTcpPorts(namespace: string, service: string, ports: { name: string; port: number }[]): Promise<void>;
   /** Create-or-update the app's Deployment + Service + HTTPScaledObject + Secret + ingress policy (idempotent). */
   applyApp(namespace: string, name: string, manifests: AppManifests): Promise<void>;
   /** Remove the app's objects. Safe if absent. */

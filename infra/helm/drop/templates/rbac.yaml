@@ -14,6 +14,8 @@ rules:
     resources: ["namespaces", "resourcequotas", "limitranges"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # App + database building blocks (Service, the *-env / *-secret / DB creds Secrets, ConfigMaps).
+  # (A2b) This cluster-scoped `services` verb set ALSO covers the API patching the edge-tcp Service's
+  # port list in the RELEASE namespace on `drop expose --port` — no extra rule needed.
   - apiGroups: [""]
     resources: ["services", "secrets", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

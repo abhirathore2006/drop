@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { appManifests, releaseJobManifest, tenantManifests } from "./manifests.ts";
+import { appManifests, releaseJobManifest, tenantManifests, edgeTcpManifests } from "./manifests.ts";
 import type { AppConfig } from "../app-config.ts";
 import { sanitizeAppConfig } from "../app-config.ts";
 
@@ -89,6 +89,55 @@ test("tenantManifests: PSA-labeled namespace + default-deny NetworkPolicy + quot
   expect(https.to[0].ipBlock.except).toContain("10.0.0.0/8"); // default when no CIDRs configured (local k3s)
   expect((m.resourceQuota as any).spec.hard["count/pods"]).toBeDefined();
   expect((m.limitRange as any).spec.limits[0].default.cpu).toBeDefined();
+});
+
+test("tenantManifests: the edge-tcp allow rule appears ONLY for exposed workloads (A2b)", () => {
+  // No exposed workloads → empty (default-deny stands, no allow hole).
+  expect(tenantManifests("drop-t-x").edgeTcpPolicies).toEqual([]);
+  expect(tenantManifests("drop-t-x", { blockedEgressCidrs: [] }).edgeTcpPolicies).toEqual([]);
+
+  const m = tenantManifests("drop-t-x", {
+    edgeTcp: { namespace: "drop-system", workloads: [{ name: "pg", kind: "database", port: 5432 }, { name: "api", kind: "app", port: 8080 }] },
+  });
+  expect(m.edgeTcpPolicies).toHaveLength(2);
+  const pg = m.edgeTcpPolicies.find((p: any) => p.metadata.name === "pg-allow-edge-tcp") as any;
+  expect(pg.metadata.labels["drop.dev/allow"]).toBe("edge-tcp");
+  expect(pg.spec.podSelector.matchLabels["cnpg.io/cluster"]).toBe("pg"); // DB pods use the cnpg label
+  expect(pg.spec.ingress[0].ports).toEqual([{ protocol: "TCP", port: 5432 }]);
+  // source = edge-tcp pods in the platform namespace (both selectors on the SAME from[] element = AND)
+  const from = pg.spec.ingress[0].from[0];
+  expect(from.namespaceSelector.matchLabels["kubernetes.io/metadata.name"]).toBe("drop-system");
+  expect(from.podSelector.matchLabels["app.kubernetes.io/component"]).toBe("edge-tcp");
+  const apiP = m.edgeTcpPolicies.find((p: any) => p.metadata.name === "api-allow-edge-tcp") as any;
+  expect(apiP.spec.podSelector.matchLabels["app.kubernetes.io/name"]).toBe("api"); // app pods use the name label
+  expect(apiP.spec.ingress[0].ports).toEqual([{ protocol: "TCP", port: 8080 }]);
+});
+
+test("edgeTcpManifests: Deployment binds the whole range; Service publishes shared + active ports", () => {
+  const m = edgeTcpManifests({
+    name: "drop-edge-tcp",
+    namespace: "drop-system",
+    image: "ecr/drop:v1",
+    sharedPorts: [{ port: 5432, protocol: "postgres" }],
+    portRange: { from: 7000, to: 7099 },
+    activeDynamicPorts: [7000, 7003],
+    serviceType: "LoadBalancer",
+    annotations: { "service.beta.kubernetes.io/aws-load-balancer-type": "external" },
+  });
+  const dep = m.deployment as any;
+  expect(dep.spec.template.metadata.labels["app.kubernetes.io/component"]).toBe("edge-tcp");
+  expect(dep.spec.template.spec.containers[0].command).toEqual(["node", "dist/edge-tcp.js"]);
+  const env = dep.spec.template.spec.containers[0].env as { name: string; value: string }[];
+  expect(env.find((e) => e.name === "DROP_TCP_SHARED_PORTS")!.value).toBe("5432:postgres");
+  // the WHOLE range is bound at boot, so a freshly-allocated port is already listening (no restart)
+  expect(env.find((e) => e.name === "DROP_TCP_DYNAMIC_RANGE")!.value).toBe("7000-7099");
+  const svc = m.service as any;
+  expect(svc.spec.type).toBe("LoadBalancer");
+  expect(svc.metadata.annotations["service.beta.kubernetes.io/aws-load-balancer-type"]).toBe("external");
+  // Service publishes only shared + ACTIVE dynamic ports (NLB listener quota is scarce)
+  expect(svc.spec.ports.map((p: any) => p.port).sort((a: number, b: number) => a - b)).toEqual([5432, 7000, 7003]);
+  // ClusterIP is the local default
+  expect((edgeTcpManifests({ name: "e", namespace: "n", image: "i", sharedPorts: [], portRange: { from: 7000, to: 7099 } }).service as any).spec.type).toBe("ClusterIP");
 });
 
 test("tenantManifests: egress except CIDRs are config-driven (EKS pod/service CIDRs outside 10/8)", () => {

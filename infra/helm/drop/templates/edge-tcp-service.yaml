@@ -1,0 +1,44 @@
+{{- if .Values.tcp.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "drop.fullname" . }}-edge-tcp
+  labels:
+    {{- include "drop.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge-tcp
+  {{- if or (eq .Values.lb.mode "nlb") (eq .Values.lb.mode "dual") }}
+  annotations:
+    # Internal NLB created by the AWS Load Balancer Controller (Plan-v5 A2 "LB topology"): the L4/TCP
+    # plane rides its OWN internal NLB, separate from the HTTP ALB. Kept internal — L4 does NOT
+    # authenticate platform identity; security rests on protocol-native auth + the tenant "allow from
+    # edge-tcp" NetworkPolicy the API adds per exposed workload.
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+  {{- end }}
+spec:
+  # LoadBalancer (internal NLB) when the L4 plane rides an NLB (lb.mode nlb|dual); ClusterIP otherwise
+  # (local, or an alb-only deployment fronting L4 by other means).
+  type: {{ if or (eq .Values.lb.mode "nlb") (eq .Values.lb.mode "dual") }}LoadBalancer{{ else }}ClusterIP{{ end }}
+  ports:
+    # Shared SNI/PG ports (always published). The API GROWS this list with a per-workload listener on
+    # `drop expose --port` (patching spec.ports) — a `helm upgrade` MUST NOT shrink it back under the
+    # API: either let the API own dynamic ports (recommended), or pin persistent ones in
+    # tcp.dynamicPorts below. Each dynamic listener costs one NLB listener (quota ~50); SNI conserves them.
+    {{- range .Values.tcp.sharedPorts }}
+    - name: {{ if eq .protocol "postgres" }}pg-{{ .port }}{{ else }}sni-{{ .port }}{{ end }}
+      port: {{ .port }}
+      targetPort: {{ .port }}
+      protocol: TCP
+    {{- end }}
+    {{- range .Values.tcp.dynamicPorts }}
+    - name: dyn-{{ . }}
+      port: {{ . }}
+      targetPort: {{ . }}
+      protocol: TCP
+    {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ include "drop.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: edge-tcp
+{{- end }}

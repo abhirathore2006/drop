@@ -19,6 +19,17 @@ test("editor can publish/rollback/read only", () => {
   for (const a of ["configure", "share", "transfer", "delete"] as const) expect(can(editor, a)).toBe(false);
 });
 
+test("expose is the deploy/ship tier: owner + editor + org member yes, viewer no (A2b)", () => {
+  expect(can(owner, "expose")).toBe(true);
+  expect(can(editor, "expose")).toBe(true); // editors ship — expose is deploy-adjacent
+  expect(can(viewer, "expose")).toBe(false);
+  expect(can(stranger, "expose")).toBe(false);
+  const orgMember: Actor = { email: "m@x.com", platformRole: "member", siteRole: null, orgRole: "member" };
+  expect(can(orgMember, "expose")).toBe(true);
+  const orgViewer: Actor = { email: "ov@x.com", platformRole: "member", siteRole: null, orgRole: "viewer" };
+  expect(can(orgViewer, "expose")).toBe(false);
+});
+
 test("viewer can only read", () => {
   expect(can(viewer, "read")).toBe(true);
   for (const a of ["publish", "rollback", "configure", "share", "transfer", "delete"] as const)

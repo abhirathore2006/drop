@@ -12,12 +12,14 @@ import { api, fmtStamp, type Detail } from "../../lib/api.ts";
 import { POLL_DETAIL_MS } from "../../lib/query.ts";
 import { deriveStatus } from "../../lib/status.ts";
 import { LogsPanel } from "./LogsPanel.tsx";
+import { ExposurePanel } from "./ExposurePanel.tsx";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
 export function DbPanels({ d, isOwner, canDeploy }: { d: Detail; isOwner: boolean; canDeploy: boolean }) {
   return (
     <>
       {d.database && <DbInfoPanel d={d} isOwner={isOwner} canDeploy={canDeploy} />}
+      <ExposurePanel d={d} canExpose={canDeploy} />
       {d.database && <BackupsPanel name={d.name} canManage={canDeploy} />}
       <LogsPanel name={d.name} />
     </>

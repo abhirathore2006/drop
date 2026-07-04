@@ -262,6 +262,30 @@ const m0008_org_quotas: Migration = {
   },
 };
 
+// TCP exposure registry (A2b): one row per exposed workload. `mode='sni'` routes by the TLS SNI
+// hostname on a shared port (no port consumed → `port` NULL); `mode='port'` allocates a dedicated
+// port from the dynamic pool (`port` set + UNIQUE — a partial unique index so many NULL sni rows
+// coexist). Cascades on the owning site's delete. The edge-tcp router reads it read-only; the API's
+// expose routes are the sole writer.
+const m0009_tcp_endpoints: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("tcp_endpoints")
+      .addColumn("site_name", "text", (c) => c.primaryKey().references("sites.name").onDelete("cascade"))
+      .addColumn("port", "integer")
+      .addColumn("mode", "text", (c) => c.notNull())
+      .addColumn("protocol", "text", (c) => c.notNull())
+      .addColumn("created_by", "text", (c) => c.notNull())
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    // A dynamic port maps to at most one workload. Partial index → NULL (sni-mode) rows don't collide.
+    await sql`create unique index one_workload_per_tcp_port on tcp_endpoints(port) where port is not null`.execute(db);
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -274,6 +298,7 @@ export class InlineMigrations implements MigrationProvider {
       "0006_locks": m0006_locks,
       "0007_stacks": m0007_stacks,
       "0008_org_quotas": m0008_org_quotas,
+      "0009_tcp_endpoints": m0009_tcp_endpoints,
     };
   }
 }

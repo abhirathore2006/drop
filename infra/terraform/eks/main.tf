@@ -469,3 +469,21 @@ resource "aws_route53_record" "wildcard" {
     evaluate_target_health = true
   }
 }
+
+# --- A2b: L4 / TCP plane (edge-tcp) — NLB notes (Plan-v5 A2 "LB topology") ------------------
+# The L4/TCP plane is served by an INTERNAL NLB that the AWS Load Balancer Controller provisions
+# from the edge-tcp Service (type LoadBalancer, annotated aws-load-balancer-type: external,
+# nlb-target-type: ip, scheme: internal) — see the Helm chart (lb.mode: dual|nlb, tcp.enabled).
+# This module does NOT create that NLB (the controller does, reconciling the Service); two operator
+# concerns are NOT automated here and must be handled out of band:
+#
+#   1. Security group / ingress rules. The NLB (target-type ip) forwards to pod IPs; ensure the node/
+#      pod security groups admit the shared TCP port (5432) AND the dynamic pool (7000-7099) from the
+#      intended CLIENT CIDRs only. The plane is kept internal precisely because L4 carries no platform
+#      identity — reachability is the security boundary, alongside protocol-native auth + the tenant
+#      "allow from edge-tcp" NetworkPolicy the API adds per exposed workload.
+#
+#   2. NLB listener quota. AWS defaults to ~50 listeners per NLB; each dedicated (--port) exposure
+#      consumes one, so the dynamic pool (tcp.portRange) is the practical ceiling. SNI mode exists to
+#      conserve it — one shared listener fronts every SNI-routable workload. Raise the quota (Service
+#      Quotas: "Listeners per Network Load Balancer") before widening tcp.portRange.

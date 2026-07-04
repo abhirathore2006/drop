@@ -145,6 +145,17 @@ export class Client {
   info(name: string) {
     return this.req("GET", `/v1/sites/${name}`);
   }
+  // TCP (L4) exposure (A2b): opt-in, default off. mode 'sni' (shared port, no port consumed) or
+  // 'port' (dedicated allocated port). Response carries the connect string.
+  expose(name: string, opts: { mode: "sni" | "port"; protocol?: string }) {
+    return this.req("POST", `/v1/sites/${name}/expose`, { contentType: "application/json", body: JSON.stringify(opts) });
+  }
+  unexpose(name: string) {
+    return this.req("DELETE", `/v1/sites/${name}/expose`);
+  }
+  exposeList(org?: string) {
+    return this.req("GET", `/v1/expose${this.orgQ(org)}`);
+  }
   /** Per-process status for an app (drop ps): one row per web/worker Deployment. */
   processes(app: string) {
     return this.req("GET", `/v1/apps/${app}/processes`);

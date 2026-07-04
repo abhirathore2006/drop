@@ -120,6 +120,15 @@ export interface SecretMeta {
   updatedBy: string;
   updatedAt: string;
 }
+/** (A2b) A workload's TCP (L4) exposure state, present on the detail response iff it's exposed. */
+export interface TcpExposure {
+  mode: "sni" | "port";
+  port: number | null;
+  protocol: string; // 'postgres' | 'redis' | 'tcp'
+  connect: string; // the connect string (host:port)
+  sslmode?: string; // an sslmode hint for postgres
+}
+
 export interface Detail {
   name: string;
   type: WorkloadType;
@@ -132,6 +141,7 @@ export interface Detail {
   url: string;
   versions: Version[];
   status?: ServerStatus | null;
+  tcp?: TcpExposure; // (A2b) present when the app/database is TCP-exposed
   app?: {
     image: string | null;
     scale: { min: number; max: number } | null;
@@ -243,6 +253,10 @@ export const api = {
   restartApp: (name: string) => req("POST", `/v1/apps/${name}/restart`, {}),
   stopApp: (name: string) => req("POST", `/v1/apps/${name}/stop`, {}),
   startApp: (name: string) => req("POST", `/v1/apps/${name}/start`, {}),
+  // TCP (L4) exposure (A2b)
+  expose: (name: string, mode: "sni" | "port", protocol?: string) =>
+    req<{ name: string; tcp: TcpExposure; note?: string }>("POST", `/v1/sites/${name}/expose`, { mode, ...(protocol ? { protocol } : {}) }),
+  unexpose: (name: string) => req<{ name: string; tcp: null; note?: string }>("DELETE", `/v1/sites/${name}/expose`),
   // stacks (B2/C1)
   stacks: () => req<{ stacks: StackListItem[] }>("GET", "/v1/stacks"),
   stackGraph: (name: string) => req<StackGraph>("GET", `/v1/stacks/${encodeURIComponent(name)}/graph?include_plan=1`),

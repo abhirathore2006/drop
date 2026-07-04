@@ -33,6 +33,23 @@ test("--org is on the create/filter/re-home commands, NOT on per-resource ops", 
   expect(cmd("transfer").registeredArguments.some((a: any) => a.name() === "email" && !a.required)).toBe(true);
 });
 
+test("expose is a group (ls + default set) with unexpose top-level + db expose sugar (A2b)", () => {
+  const p = buildProgram();
+  const top = p.commands.map((c) => c.name());
+  expect(top).toContain("expose");
+  expect(top).toContain("unexpose");
+  const expose = p.commands.find((c) => c.name() === "expose")!;
+  const subs = expose.commands.map((c) => c.name());
+  expect(subs).toContain("ls");
+  // the default (name) subcommand carries --sni/--port/--protocol; ls carries --org
+  const set = expose.commands.find((c) => c.name() === "set")!;
+  for (const o of ["--sni", "--port", "--protocol"]) expect(set.options.some((x) => x.long === o)).toBe(true);
+  expect(expose.commands.find((c) => c.name() === "ls")!.options.some((o) => o.long === "--org")).toBe(true);
+  // `drop db expose <db>` sugar
+  const db = p.commands.find((c) => c.name() === "db")!;
+  expect(db.commands.map((c) => c.name())).toContain("expose");
+});
+
 test("`update` is a top-level command (self-updates the CLI)", () => {
   const p = buildProgram();
   expect(p.commands.map((c) => c.name())).toContain("update");

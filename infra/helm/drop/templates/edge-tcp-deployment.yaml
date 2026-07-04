@@ -1,0 +1,62 @@
+{{- if .Values.tcp.enabled }}
+# A2b: the L4/TCP router (edge-tcp). Runs in the PLATFORM namespace (alongside api/edge) so it has
+# cluster Service DNS + its own NetworkPolicy identity to reach every tenant's exposed workloads.
+# Opt-in (tcp.enabled). See Plan-v5 A2 "In-cluster TCP router".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "drop.fullname" . }}-edge-tcp
+  labels:
+    {{- include "drop.labels" . | nindent 4 }}
+    app.kubernetes.io/component: edge-tcp
+spec:
+  replicas: {{ .Values.tcp.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "drop.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: edge-tcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "drop.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: edge-tcp
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "drop.serviceAccountName" . }}
+      containers:
+        - name: edge-tcp
+          image: {{ include "drop.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/edge-tcp.js"]
+          # The shared SNI/PG ports are declared here; the WHOLE dynamic range is bound at boot (see
+          # DROP_TCP_DYNAMIC_RANGE) so a freshly-allocated port is already listening — the API only
+          # grows the Service's PUBLISHED-port list on expose, never restarts the router.
+          ports:
+            {{- range .Values.tcp.sharedPorts }}
+            - name: {{ if eq .protocol "postgres" }}pg-{{ .port }}{{ else }}sni-{{ .port }}{{ end }}
+              containerPort: {{ .port }}
+              protocol: TCP
+            {{- end }}
+          env:
+            - name: DROP_TCP_SHARED_PORTS
+              value: {{ include "drop.tcpSharedPorts" . | quote }}
+            - name: DROP_TCP_DYNAMIC_RANGE
+              value: {{ .Values.tcp.portRange | quote }}
+            - name: DROP_BASE_DOMAIN
+              value: {{ .Values.baseDomain | quote }}
+            # Reads tcp_endpoints from Postgres (read-only; the API owns migrations + writes) — so
+            # `drop expose` / `drop unexpose` take effect with no router restart (MetastoreRouteSource).
+            - name: DROP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "drop.secretName" . }}
+                  key: {{ .Values.secret.databaseUrlKey }}
+          resources:
+            {{- toYaml .Values.tcp.resources | nindent 12 }}
+{{- end }}
