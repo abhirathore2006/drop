@@ -45,11 +45,11 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 23 | J3 `drop exec` | done | fa46e79 | v4.channel exec; tunnel_tickets kind column; console terminal → M3 |
 | 24 | K2 App RBAC + SDK | done | d16c906 | HS256 verifyRequest (no JWKS); rbac-seed printed not auto-run; packages/auth workspace |
 | 25 | M4 Data-heavy views | todo | | |
-| 26 | H3 App→app edges | todo | | |
+| 26 | H3 App→app edges | done | e8112dc | plain env <KEY>_URL; scale-to-zero → public host wake; mutual refs = cycle |
 | 27 | E2 App previews | todo | | |
 | 28 | L2 DB branching for previews | todo | | |
-| 29 | I4 SQL console · I5 volumes | todo | | |
-| 29b | M3 Streaming surfaces | todo | | |
+| 29 | I4 SQL console · I5 volumes | done | e76f22d,d85f034 | I4 in-cluster only (501 local); I5 Recreate+forced 1/1, no snapshots v1 |
+| 29b | M3 Streaming surfaces | done | 421b9d2,bc5b168 | xterm lazy chunk; per-response CSP style nonce; verified live in Chrome |
 | 30 | D2 Template upstream diff | todo | | |
 | 31 | E3 Environments | todo | | |
 | 32 | L3 `drop dev` | todo | | |
