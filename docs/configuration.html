@@ -187,13 +187,18 @@
 <pre><code><span class="tok-k">app</span>:
   <span class="tok-k">image</span>: <span class="tok-s">todo:1</span>
   <span class="tok-k">uses</span>:
-    - { <span class="tok-k">database</span>: <span class="tok-s">tododb</span> }              <span class="tok-c"># a `drop db create tododb` in the same org</span></code></pre>
+    - { <span class="tok-k">database</span>: <span class="tok-s">tododb</span> }              <span class="tok-c"># a `drop db create tododb` in the same org</span>
+    - { <span class="tok-k">database</span>: <span class="tok-s">tododb</span>, <span class="tok-k">via</span>: <span class="tok-s">pooler</span> } <span class="tok-c"># route PGHOST through the DB's connection pooler (see database: below)</span>
+    - { <span class="tok-k">bucket</span>: <span class="tok-s">avatars</span> }            <span class="tok-c"># a bucket in the same org → S3_* env (see Buckets)</span>
+    - { <span class="tok-k">cache</span>: <span class="tok-s">sessions</span> }           <span class="tok-c"># a cache in the same org → REDIS_URL env (see Cache)</span></code></pre>
 <p>For each bound database, Drop injects into the app's pod:</p>
 <ul>
   <li><code>envFrom</code> the CNPG-generated <code>&lt;db&gt;-app</code> Secret — so <code>PGHOST</code>/<code>PGUSER</code>/<code>PGPASSWORD</code>/<code>PGDATABASE</code> come straight from the database. The password is <strong>never</strong> copied into the app's own secret, so rotation just works (the pod re-reads on restart).</li>
   <li>the cluster CA (the <code>&lt;db&gt;-ca</code> Secret, <code>ca.crt</code> only — never the CA key) mounted read-only at <code>/var/run/drop/db-ca/&lt;db&gt;/ca.crt</code>.</li>
   <li><code>PGSSLMODE=verify-full</code> and <code>PGSSLROOTCERT</code> pointed at that CA — so the app verifies the server's TLS certificate against it instead of trusting the connection blindly.</li>
+  <li>with <code>via: pooler</code>, a <code>PGHOST</code> override pointing at the database's <a href="#pooler">connection pooler</a> Service (<code>&lt;db&gt;-pooler-rw</code>) instead of the primary. It's a container env var, so it wins over the <code>&lt;db&gt;-app</code> value; enable the pooler on the database first (<code>drop db pooler enable</code>).</li>
 </ul>
+<p><code>uses</code> also binds non-database resources: <code>bucket:</code> injects <code>S3_*</code> credentials (see <a href="buckets.html">Buckets</a>) and <code>cache:</code> injects <code>REDIS_URL</code> (see <a href="cache.html">Cache</a>) — both through the write-only secret path, both same-org-only. Multiple bindings of a kind get resource-name-prefixed variables.</p>
 <div class="note tip"><span class="lbl">Tip</span><p><code>uses</code> replaces the manual <code>PG*</code> + <code>drop db password … --set-secret</code> wiring shown in example 4 below. Pass individual <code>PG*</code> only to <em>override</em> a specific value; prefer discrete <code>PG*</code> over a single <code>DATABASE_URL</code>, which some drivers silently prefer even when stale.</p></div>
 
 <h3>database:</h3>
@@ -202,7 +207,8 @@
   <span class="tok-k">name</span>: <span class="tok-s">mydb</span>                           <span class="tok-c"># optional; `drop db create mydb` sets it</span>
   <span class="tok-k">engine</span>: <span class="tok-s">postgres-18</span>                  <span class="tok-c"># v1 pins to Postgres 18 (other values are ignored, not errors)</span>
   <span class="tok-k">storage</span>: <span class="tok-s">1Gi</span>                         <span class="tok-c"># PVC size (Mi / Gi / Ti); default 1Gi, hard cap 1Gi (rejected if larger)</span>
-  <span class="tok-k">hibernation</span>: <span class="tok-s">none</span>                    <span class="tok-c"># or "scheduled" → an idle-shutdown CronJob (cost intent)</span></code></pre>
+  <span class="tok-k">hibernation</span>: <span class="tok-s">none</span>                    <span class="tok-c"># or "scheduled" → an idle-shutdown CronJob (cost intent)</span>
+  <span class="tok-k">extensions</span>: [<span class="tok-s">pgvector</span>, <span class="tok-s">pg_trgm</span>]      <span class="tok-c"># Postgres extensions created at bootstrap (allowlisted; create-time only)</span></code></pre>
 <table class="tbl">
 <thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
 <tbody>
@@ -210,9 +216,23 @@
 <tr><td><code>engine</code></td><td>string</td><td>Pinned to <code>postgres-18</code> in v1. Unknown values are pinned to the supported engine rather than rejected (future engines are additive).</td></tr>
 <tr><td><code>storage</code></td><td>string</td><td>PVC size as a binary-SI quantity (<code>Mi</code>/<code>Gi</code>/<code>Ti</code>, e.g. <code>512Mi</code>). Default <code>1Gi</code>; a <strong>hard cap of <code>1Gi</code></strong> applies today — a larger request is rejected at create with a <code>400</code> (a fuller per-app + per-tenant quota system is planned). </td></tr>
 <tr><td><code>hibernation</code></td><td>string</td><td><code>none</code> (default) or <code>scheduled</code> — the latter opts the cluster into the idle-shutdown CronJob.</td></tr>
+<tr><td><code>extensions</code></td><td>string[]</td><td>Postgres extensions to create at bootstrap, validated against a platform allowlist (default <code>pgvector, pg_trgm, pgcrypto, citext</code>). See <a href="#extensions">Extensions</a>.</td></tr>
 </tbody>
 </table>
 <div class="note warn"><span class="lbl">Note</span><p>The database password never appears in <code>drop.yaml</code>. Drop generates it at create; read it once, or rotate it straight into an app's write-only secret with <code>drop db password &lt;db&gt; --set-secret &lt;app&gt;:&lt;KEY&gt;</code>. Connect via the <code>&lt;name&gt;-rw</code> Service and the <code>&lt;name&gt;-app</code> credentials Secret in your namespace.</p></div>
+
+<h4 id="extensions">Extensions</h4>
+<p>Request Postgres extensions at create — <code>pgvector</code> (the highest-demand one for internal AI tools), <code>pg_trgm</code>, <code>pgcrypto</code>, <code>citext</code> by default (the allowlist is set per platform via <code>DROP_DB_EXTENSION_ALLOWLIST</code>). A name outside the allowlist is rejected with a <code>400</code>.</p>
+<pre><code>drop db create vecdb --ext pgvector,pg_trgm
+drop db ext ls vecdb              <span class="tok-c"># pgvector, pg_trgm  (reads the stored config)</span></code></pre>
+<p>Drop runs <code>CREATE EXTENSION IF NOT EXISTS …</code> in the cluster's bootstrap SQL (<code>pgvector</code>'s SQL name is <code>vector</code>). None of the default set needs <code>shared_preload_libraries</code>.</p>
+<div class="note warn"><span class="lbl">Create-time only (v1)</span><p>Extensions are created when the database is <strong>first initialised</strong> — CNPG's <code>initdb</code> bootstrap is immutable, so adding one to an existing database is a v1 limitation: <code>drop db ext add</code> returns a <code>409</code> pointing you to <strong>recreate the database with <code>--ext</code></strong>, or run the extension SQL yourself via a superuser migration. This is called out honestly rather than pretending an in-place add works.</p></div>
+
+<h4 id="pooler">Connection pooling (PgBouncer)</h4>
+<p>Enable a first-class CloudNativePG <code>Pooler</code> (PgBouncer) in front of the primary — it matters as soon as per-request-connection apps meet scale-to-zero churn.</p>
+<pre><code>drop db pooler enable mydb --mode transaction   <span class="tok-c"># or --mode session; default transaction</span>
+drop db pooler disable mydb                       <span class="tok-c"># deletes the pooler</span></code></pre>
+<p>The pooler is reachable at the <code>&lt;db&gt;-pooler-rw</code> Service. Route an app through it by adding <code>via: pooler</code> to its <code>uses</code> entry (see <a href="#uses">uses:</a>) — Drop then overrides <code>PGHOST</code> to the pooler instead of the primary. Transaction mode multiplexes connections per-transaction (best for many short-lived connections); session mode holds one server connection per client session (needed for session-scoped state like <code>SET</code>/advisory locks). Enable/disable are audited (<code>db.pooler.enable</code> / <code>db.pooler.disable</code>).</p>
 
 <h2>Compute environment variables</h2>
 <p class="lead">The <code>drop.yaml</code> sections above are per-bundle <em>client</em> config. The compute plane itself (enabling it, backups, the secrets and image backends) is configured on the <strong>API server</strong> through environment variables — these are operator settings, not part of any bundle.</p>

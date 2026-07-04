@@ -33,6 +33,7 @@ function DbInfoPanel({ d, isOwner, canDeploy }: { d: Detail; isOwner: boolean; c
   const [rotated, setRotated] = useState<{ password: string; warning: string | null } | null>(null);
   const [confirmRotate, setConfirmRotate] = useState(false);
   const rotate = useWorkloadAction({ onSuccess: () => setConfirmRotate(false) });
+  const pooler = useWorkloadAction(); // (I3) enable/disable the connection pooler
   const st = db.status ? deriveStatus({ type: "database", status: d.status, dbStatus: db.status }) : null;
 
   return (
@@ -75,6 +76,41 @@ function DbInfoPanel({ d, isOwner, canDeploy }: { d: Detail; isOwner: boolean; c
       </KV>
       <KV label="credentials">
         Secret <code>{db.credentialsSecret}</code> · keys <code>username</code>/<code>password</code> (not shown)
+      </KV>
+      {db.extensions && db.extensions.length > 0 && <KV label="extensions">{db.extensions.join(", ")}</KV>}
+      {/* (I3) connection pooler (PgBouncer): toggle + host. Editors can enable/disable. */}
+      <KV label="pooler">
+        {db.pooler?.enabled ? (
+          <>
+            <span className="pill pill-ok">on</span> {db.pooler.mode}
+            {db.pooler.host && (
+              <>
+                {" · "}
+                <CopyField value={db.pooler.host} />
+              </>
+            )}
+            {canDeploy && (
+              <>
+                {" "}
+                <Button size="sm" variant="danger" loading={pooler.isPending} onClick={() => pooler.mutate(() => api.setDbPooler(d.name, false))}>
+                  disable
+                </Button>
+              </>
+            )}
+          </>
+        ) : (
+          <>
+            <span className="sub">off</span>
+            {canDeploy && (
+              <>
+                {" "}
+                <Button size="sm" loading={pooler.isPending} onClick={() => pooler.mutate(() => api.setDbPooler(d.name, true, "transaction"))}>
+                  enable (transaction)
+                </Button>
+              </>
+            )}
+          </>
+        )}
       </KV>
       {isOwner && (
         <KV label="password">

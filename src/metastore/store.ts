@@ -318,14 +318,14 @@ export class MetaStore {
   }
 
   /** Workload counts by type for an org (usage reporting). */
-  async orgWorkloadCounts(orgId: string): Promise<{ site: number; app: number; database: number; bucket: number; total: number }> {
+  async orgWorkloadCounts(orgId: string): Promise<{ site: number; app: number; database: number; bucket: number; cache: number; total: number }> {
     const rows = await this.db
       .selectFrom("sites")
       .select(["type", (eb) => eb.fn.countAll().as("n")])
       .where("org_id", "=", orgId)
       .groupBy("type")
       .execute();
-    const out = { site: 0, app: 0, database: 0, bucket: 0, total: 0 };
+    const out = { site: 0, app: 0, database: 0, bucket: 0, cache: 0, total: 0 };
     for (const r of rows) {
       const n = Number(r.n);
       out[(r.type as WorkloadType) ?? "site"] += n;
@@ -361,5 +361,24 @@ export class MetaStore {
       const cfg = parseVersionCfg((r as Record<string, unknown>).vconfig) as { storage?: string } | undefined;
       return cfg && typeof cfg.storage === "string" ? cfg.storage : MAX_DB_STORAGE;
     });
+  }
+
+  /** (I2) The PVC storage of every PERSISTENT cache in an org (its current version's CacheConfig.memory,
+   *  which sizes the PVC). Ephemeral caches have no PVC → contribute nothing. Feeds the org storage
+   *  budget alongside orgDatabaseStorageRequests — approximate by design (it's the REQUEST). */
+  async orgCacheStorageRequests(orgId: string): Promise<string[]> {
+    const rows = await this.db
+      .selectFrom("sites")
+      .leftJoin("versions", (j) => j.onRef("versions.site_name", "=", "sites.name").onRef("versions.id", "=", "sites.current_version"))
+      .select(["sites.name as name", "versions.config as vconfig"])
+      .where("sites.org_id", "=", orgId)
+      .where("sites.type", "=", "cache")
+      .execute();
+    const out: string[] = [];
+    for (const r of rows) {
+      const cfg = parseVersionCfg((r as Record<string, unknown>).vconfig) as { memory?: string; persistent?: boolean } | undefined;
+      if (cfg?.persistent && typeof cfg.memory === "string") out.push(cfg.memory);
+    }
+    return out;
   }
 }

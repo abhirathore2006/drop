@@ -23,7 +23,8 @@ import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
 import { newVersionId } from "../version-id.ts";
 import { sanitizeAppConfig, assertHttpOnly, assertProcesses, type AppConfig } from "../app-config.ts";
-import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword, validateDbStorage, storageToBytes } from "../db-config.ts";
+import { sanitizeDatabaseConfig, generateDbPassword, validateDbPassword, validateDbStorage, validateDbExtensions, storageToBytes } from "../db-config.ts";
+import { sanitizeCacheConfig, validateCacheMemory, cacheMemoryToBytes, type CacheConfig } from "../cache-config.ts";
 import type { BucketStore } from "../buckets/types.ts";
 import { makeBucketStore } from "../buckets/factory.ts";
 import { QuotaStore, validateQuota, QUOTA_KEYS } from "../quotas/store.ts";
@@ -37,7 +38,8 @@ import { stripStackSpec } from "../templates/strip.ts";
 import { appManifests, releaseJobManifest, tenantManifests, type ExposedWorkload } from "../kube/manifests.ts";
 import { TcpEndpointStore, PortPoolExhaustedError, type TcpEndpoint } from "../edge-tcp/store.ts";
 import { PreviewStore, validatePreviewLabel } from "../previews/store.ts";
-import { databaseManifests } from "../kube/cnpg.ts";
+import { databaseManifests, poolerManifest, poolerName, type PoolerMode } from "../kube/cnpg.ts";
+import { cacheManifests, cacheHost } from "../kube/valkey.ts";
 import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus } from "../kube/types.ts";
 import { LockStore, LockHeldError } from "../metastore/lock.ts";
 import type { SecretStore } from "../secrets/types.ts";
@@ -256,16 +258,21 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       const u = await buckets.usage({ name: bn, namespace: ns, org: orgId }).catch(() => ({ bytes: 0, objects: 0 }));
       bucketBytes += u.bytes;
     }
-    return { dbBytes, dbCount: dbReqs.length, bucketBytes, bucketCount: bucketNames.length };
+    // (I2) Persistent caches contribute their PVC request (their memory) to the budget; ephemeral
+    // caches have no PVC → nothing. cacheCount is the count of persistent caches (the only ones costing storage).
+    const cacheReqs = await d.meta.orgCacheStorageRequests(orgId);
+    let cacheBytes = 0;
+    for (const m of cacheReqs) cacheBytes += cacheMemoryToBytes(m) ?? 0;
+    return { dbBytes, dbCount: dbReqs.length, bucketBytes, bucketCount: bucketNames.length, cacheBytes, cacheCount: cacheReqs.length };
   };
   // Returns an error string when adding `addBytes` would exceed the org's storage budget (when set), else null.
   const checkStorageBudget = async (orgId: string, ns: string, addBytes: number): Promise<string | null> => {
     const budget = await quotas.resolvedStorageBudgetBytes(orgId);
     if (budget == null) return null; // no budget configured → unlimited
     const cur = await orgStorageUsage(orgId, ns);
-    const total = cur.dbBytes + cur.bucketBytes + addBytes;
+    const total = cur.dbBytes + cur.bucketBytes + cur.cacheBytes + addBytes;
     if (total > budget) {
-      return `org storage budget exceeded: ${total} bytes would be used > ${budget} byte budget (databases ${cur.dbBytes} + buckets ${cur.bucketBytes} + new ${addBytes})`;
+      return `org storage budget exceeded: ${total} bytes would be used > ${budget} byte budget (databases ${cur.dbBytes} + buckets ${cur.bucketBytes} + caches ${cur.cacheBytes} + new ${addBytes})`;
     }
     return null;
   };
@@ -302,6 +309,30 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         await d.secrets.setSecret(scope, k, v);
         await d.meta.upsertSecretKey(site.name, k, fingerprint(v), actorEmail);
       }
+    }
+  };
+
+  // ---- cache binding (I2) — inject REDIS_URL into an app's write-only secret so the password never
+  // appears in a manifest, response, or the metastore. Exactly like bucket bindings: single binding →
+  // unprefixed `REDIS_URL`; multiple → `<LABEL>_REDIS_URL` (label = the cache name for a direct deploy,
+  // the stack resource key for a stack). The password is READ BACK from the `<name>-cache` Secret
+  // (kube.readCachePassword — the one server-side secret read) to compose the URL; it is never
+  // regenerated at bind time (that would desync it from the running Valkey). Re-run safe at every deploy. ----
+  const cacheEnvKey = (label: string, multiple: boolean) => {
+    const p = multiple ? label.toUpperCase().replace(/[^A-Z0-9]/g, "_") + "_" : "";
+    return `${p}REDIS_URL`;
+  };
+  const writeCacheBindings = async (entries: { cacheName: string; envLabel: string }[], site: Site, actorEmail: string): Promise<void> => {
+    if (entries.length === 0 || !d.kube) return;
+    const multiple = entries.length > 1;
+    const scope = { owner: site.owner, app: site.name, namespace: site.namespace };
+    for (const e of entries) {
+      const password = await d.kube.readCachePassword(site.namespace, e.cacheName);
+      if (password == null) throw new Error(`cache "${e.cacheName}" is not ready yet (no requirepass secret) — create it before deploying an app that uses it`);
+      const url = `redis://:${encodeURIComponent(password)}@${cacheHost(e.cacheName, site.namespace)}:6379`;
+      const key = cacheEnvKey(e.envLabel, multiple);
+      await d.secrets.setSecret(scope, key, url);
+      await d.meta.upsertSecretKey(site.name, key, fingerprint(url), actorEmail);
     }
   };
   const isPlatformAdmin = async (email: string) => (await d.users.getUser(email))?.role === "admin";
@@ -446,6 +477,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     let storage: {
       databases: { count: number; requestedBytes: number };
       buckets: { count: number; bytes: number };
+      caches: { count: number; bytes: number };
       budget: number | null;
     };
     try {
@@ -453,10 +485,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       storage = {
         databases: { count: use.dbCount, requestedBytes: use.dbBytes },
         buckets: { count: use.bucketCount, bytes: use.bucketBytes },
+        caches: { count: use.cacheCount, bytes: use.cacheBytes }, // (I2) persistent-cache PVC requests
         budget: await quotas.resolvedStorageBudgetBytes(r.org.id),
       };
     } catch {
-      storage = { databases: { count: 0, requestedBytes: 0 }, buckets: { count: 0, bytes: 0 }, budget: null };
+      storage = { databases: { count: 0, requestedBytes: 0 }, buckets: { count: 0, bytes: 0 }, caches: { count: 0, bytes: 0 }, budget: null };
     }
     return c.json({
       org: { slug: r.org.slug, name: r.org.name, kind: r.org.kind },
@@ -758,6 +791,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         if (bSite.orgId !== site.orgId) {
           return c.json({ error: `bucket "${u.bucket}" belongs to a different organisation and cannot be bound` }, 400);
         }
+      } else if (u.cache) {
+        const cSite = await d.meta.getSitePlain(u.cache);
+        if (!cSite || cSite.type !== "cache") {
+          return c.json({ error: `app uses cache "${u.cache}", which does not exist` }, 400);
+        }
+        if (cSite.orgId !== site.orgId) {
+          return c.json({ error: `cache "${u.cache}" belongs to a different organisation and cannot be bound` }, 400);
+        }
       }
     }
 
@@ -787,6 +828,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         // just re-writes the same values. For a direct deploy the env-key label is the bucket name.
         await writeBucketBindings(
           (appCfg.uses ?? []).filter((u) => u.bucket).map((u) => ({ bucketName: u.bucket!, envLabel: u.bucket! })),
+          theSite,
+          email,
+        );
+        // (I2) Cache bindings: read back each bound cache's requirepass password and write REDIS_URL to
+        // the app's write-only secret BEFORE the release Job / rollout (so both see it). For a direct
+        // deploy the env-key label is the cache name. Same idempotent, re-run-safe posture as buckets.
+        await writeCacheBindings(
+          (appCfg.uses ?? []).filter((u) => u.cache).map((u) => ({ cacheName: u.cache!, envLabel: u.cache! })),
           theSite,
           email,
         );
@@ -1010,7 +1059,13 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const cap = await quotas.resolvedMaxDbStorage(org.id);
     const storageErr = validateDbStorage(body, cap.bytes, cap.label);
     if (storageErr) return c.json({ error: storageErr }, 400);
-    const dbCfg = sanitizeDatabaseConfig(body, cap.bytes);
+    // (I3) extensions: validated against the platform allowlist (config). Loud rejection of a disallowed
+    // extension up front; effective at CREATE only (postInitApplicationSQL). A re-apply keeps the
+    // existing db's already-created extensions — bootstrap.initdb is immutable — so changing them here is
+    // a no-op against the running cluster (see the `db ext add` 409 route + docs "requires recreate").
+    const extErr = validateDbExtensions(body, d.cfg.dbExtensionAllowlist);
+    if (extErr) return c.json({ error: extErr }, 400);
+    const dbCfg = sanitizeDatabaseConfig(body, cap.bytes, d.cfg.dbExtensionAllowlist);
     if (!dbCfg) return c.json({ error: "invalid database config" }, 400);
     if (dbCfg.name && dbCfg.name !== name) {
       return c.json({ error: `database name "${dbCfg.name}" does not match target "${name}"` }, 400);
@@ -1224,6 +1279,50 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.post("/v1/databases/:name/hibernate", dbHibernation("hibernate"));
   app.post("/v1/databases/:name/wake", dbHibernation("wake"));
 
+  // ---- connection pooling (CNPG Pooler / PgBouncer, I3) ----
+  // Enable → emit a `<db>-pooler-rw` Pooler (one PgBouncer instance fronting the primary); disable →
+  // delete it. An app binds through it with `uses: [{ database, via: pooler }]` (PGHOST → the pooler
+  // Service). Gated at `configure` (owner/admin) — it's an infra-shape change, like visibility.
+  app.post("/v1/databases/:name/pooler", async (c) => {
+    const r = await resolveDb(c, "configure");
+    if ("err" in r) return r.err;
+    const body = (await c.req.json().catch(() => ({}))) as { enable?: unknown; mode?: unknown };
+    const enable = body.enable !== false; // default: enable (POST .../pooler {} turns it on)
+    const mode: PoolerMode = body.mode === "session" ? "session" : "transaction";
+    const ns = r.site.namespace;
+    if (enable) {
+      try {
+        await d.kube!.applyPooler(ns, poolerManifest({ name: r.site.name, namespace: ns, mode }));
+      } catch (e) {
+        return c.json({ error: `pooler enable failed: ${(e as Error).message}` }, 502);
+      }
+      await audit({ actor: r.email, action: "db.pooler.enable", target: r.site.name, targetType: "database", orgId: r.site.orgId, detail: { mode } });
+      return c.json({ name: r.site.name, pooler: { enabled: true, mode, host: `${poolerName(r.site.name)}.${ns}.svc.cluster.local` } });
+    }
+    try {
+      await d.kube!.deletePooler(ns, r.site.name);
+    } catch (e) {
+      return c.json({ error: `pooler disable failed: ${(e as Error).message}` }, 502);
+    }
+    await audit({ actor: r.email, action: "db.pooler.disable", target: r.site.name, targetType: "database", orgId: r.site.orgId, detail: {} });
+    return c.json({ name: r.site.name, pooler: { enabled: false } });
+  });
+
+  // ---- extensions (I3) — CREATE-time only. Adding to an existing db is a v1 limitation (bootstrap
+  // is immutable), so this route is HONEST: it 409s and points at recreate. `db ext ls` reads the
+  // stored config off the detail route (out.database.extensions) — no separate GET needed.
+  app.post("/v1/databases/:name/extensions", async (c) => {
+    const r = await resolveDb(c, "configure");
+    if ("err" in r) return r.err;
+    return c.json(
+      {
+        error:
+          "adding an extension to an existing database is a v1 limitation — extensions are created at bootstrap only (CNPG's initdb is immutable). Recreate the database with `--ext`, or run the extension SQL via a superuser migration.",
+      },
+      409,
+    );
+  });
+
   // ---- tenant object storage (buckets, I1) ----
   // Buckets are S3-side: no compute plane required (never gated on d.kube). Create/rotate reveal the
   // access credentials ONCE (RevealOnce posture) and never store them in the metastore; the detail
@@ -1298,6 +1397,98 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       out.push({ name: s.name, type: s.type, owner: s.owner, org: await orgOf(s.orgId) });
     }
     return c.json({ buckets: out });
+  });
+
+  // ---- managed cache (Valkey, I2) ----
+  // A single-replica Valkey, deliberately tiny (no HA/clustering) and EPHEMERAL by default. The
+  // requirepass password is generated at create, written into the `<name>-cache` Secret, and REVEALED
+  // ONCE inside the returned REDIS_URL — never returned again (apps read it via the `uses: [{cache}]`
+  // binding, which reads the Secret back to compose REDIS_URL into the app's write-only secret).
+  app.post("/v1/caches/:name", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const nameErr = validateName(name);
+    if (nameErr) return c.json({ error: nameErr }, 400);
+
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const memErr = validateCacheMemory(body);
+    if (memErr) return c.json({ error: memErr }, 400);
+    const cacheCfg = sanitizeCacheConfig(body);
+    if (!cacheCfg) return c.json({ error: "invalid cache config" }, 400);
+    if (cacheCfg.name && cacheCfg.name !== name) return c.json({ error: `cache name "${cacheCfg.name}" does not match target "${name}"` }, 400);
+
+    // Resolve the owning org first (without claiming) so the storage budget reflects the target org.
+    let site = await d.meta.getSitePlain(name);
+    const isCreate = !site; // first claim → generate the requirepass; a re-apply must NOT rotate it
+    let org: { id: string; namespace: string };
+    if (!site) {
+      await ensureUser(email);
+      const orgRes = await resolveCreateOrg(c, email); // workload cap (override-aware)
+      if ("err" in orgRes) return orgRes.err;
+      org = { id: orgRes.org.id, namespace: orgRes.org.namespace };
+    } else {
+      org = { id: site.orgId ?? "", namespace: site.namespace };
+    }
+
+    // Storage budget (item 10): only a PERSISTENT cache's PVC counts. Checked at claim time (no name is
+    // taken on rejection). Re-applies don't re-check (already counted).
+    if (isCreate) {
+      const addBytes = cacheCfg.persistent ? cacheMemoryToBytes(cacheCfg.memory) ?? 0 : 0;
+      const budgetErr = await checkStorageBudget(org.id, org.namespace, addBytes);
+      if (budgetErr) return c.json({ error: budgetErr }, 429);
+      const claimed = await d.meta.claimSite(name, email, "cache", org);
+      site = claimed ?? (await d.meta.getSitePlain(name));
+    }
+    if (!site) return c.json({ error: "claim failed" }, 500);
+    if (site.type !== "cache") return c.json({ error: `name "${name}" is a ${site.type}, not a cache` }, 409);
+    const actor = await actorFor(c.get("identity"), site);
+    if (!can(actor, "db:create")) return c.json({ error: `cache is owned by ${site.owner}` }, 403); // create-tier (editor+), like db:create
+
+    const verId = newVersionId(now());
+    const ns = site.namespace;
+    await applyTenantWithExposed(d.kube, ns); // namespace + NetworkPolicy (default-deny; intra-ns allowed) + quota + LimitRange
+    // Generate the password ONLY at create; on a re-apply read it back so applyCache doesn't rotate the
+    // Secret (and the running Valkey keeps its password). A never-created re-apply (edge case) regenerates.
+    const password = isCreate ? generateDbPassword() : (await d.kube.readCachePassword(ns, name)) ?? generateDbPassword();
+    const manifests = cacheManifests(cacheCfg, { name, namespace: ns, password });
+    await d.kube.applyCache(ns, name, manifests);
+
+    // Persist the CacheConfig on the version row so the storage budget + detail can read memory/persistent.
+    await d.meta.putVersion(name, { id: verId, publishedBy: email, createdAt: now().toISOString(), fileCount: 0, bytes: 0, config: cacheCfg });
+    await d.meta.updateSite(name, (s) => ({ ...s, currentVersion: verId }));
+    await audit({ actor: email, action: "cache.create", target: name, targetType: "cache", orgId: site.orgId, detail: { memory: cacheCfg.memory, persistent: cacheCfg.persistent } });
+
+    const host = cacheHost(name, ns);
+    const url = `redis://:${encodeURIComponent(password)}@${host}:6379`; // REVEALED ONCE — the password is embedded here and never returned again
+    return c.json({ name, version: verId, memory: cacheCfg.memory, persistent: cacheCfg.persistent, host, port: 6379, url });
+  });
+
+  // List the caller's caches (optionally scoped to one org). No creds — just name/owner/org.
+  app.get("/v1/caches", async (c) => {
+    const email = c.get("identity").email;
+    const orgSlug = c.req.query("org");
+    let orgFilterId: string | null = null;
+    if (orgSlug) {
+      const org = await d.orgs.getOrgBySlug(orgSlug);
+      if (!org) return c.json({ error: `no such org: ${orgSlug}` }, 404);
+      if (!(await d.orgs.roleOf(org.id, email)) && !(await isPlatformAdmin(email))) return c.json({ error: `not a member of org ${orgSlug}` }, 403);
+      orgFilterId = org.id;
+    }
+    const names = await d.meta.listUserSites(email);
+    const out: unknown[] = [];
+    for (const name of names) {
+      const s = await d.meta.getSitePlain(name);
+      if (!s || s.type !== "cache") continue;
+      if (orgFilterId && s.orgId !== orgFilterId) continue;
+      out.push({ name: s.name, type: s.type, owner: s.owner, org: await orgOf(s.orgId) });
+    }
+    return c.json({ caches: out });
   });
 
   // ---- rollback ----
@@ -1422,7 +1613,37 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       } catch {
         /* leave status null */
       }
+      // (I3) extensions: read from the stored current-version DatabaseConfig (create-time list — never
+      // a live cluster read). pooler: live existence + mode from the CNPG Pooler, best-effort.
+      const dbVer = versions.find((v) => v.id === site.currentVersion)?.config as { extensions?: string[] } | undefined;
+      dbInfo.extensions = dbVer?.extensions ?? [];
+      try {
+        const p = await d.kube.getPooler(ns, name);
+        dbInfo.pooler = p ? { enabled: true, mode: p.mode, host: `${poolerName(name)}.${ns}.svc.cluster.local` } : { enabled: false };
+      } catch {
+        dbInfo.pooler = { enabled: false };
+      }
       out.database = dbInfo;
+    } else if (site.type === "cache") {
+      // (I2) Cache detail: static connection metadata (host/port/memory/persistent from the stored config)
+      // + live status. NEVER the password — that's revealed once at create and bound via REDIS_URL.
+      const ns = site.namespace;
+      const cacheVer = versions.find((v) => v.id === site.currentVersion)?.config as CacheConfig | undefined;
+      const ci: Record<string, unknown> = {
+        host: cacheHost(name, ns),
+        port: 6379,
+        memory: cacheVer?.memory ?? "256Mi",
+        persistent: cacheVer?.persistent ?? false,
+        status: null,
+      };
+      if (d.kube) {
+        try {
+          ci.status = await d.kube.getCacheStatus(ns, name); // {replicas, ready, ...} | null
+        } catch {
+          /* leave status null */
+        }
+      }
+      out.cache = ci;
     } else if (site.type === "bucket") {
       // (I1) Bucket detail: endpoint/bucket/prefix + a size sweep. NO credentials — those are revealed
       // once at create/rotate only. Best-effort: an S3 read failure degrades to zeros, never 500s.
@@ -1462,6 +1683,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       runtimeState: site.runtimeState,
       appStatus: ((out.app as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["appStatus"],
       dbStatus: ((out.database as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["dbStatus"],
+      cacheStatus: ((out.cache as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["cacheStatus"],
     });
     return c.json(out);
   });
@@ -1671,7 +1893,11 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         .destroy({ owner: site.owner, app: name, namespace: site.namespace })
         .catch((e) => console.error(`delete ${name}: images.destroy failed (possible orphaned image): ${(e as Error).message}`));
     } else if (site.type === "database" && d.kube) await d.kube.deleteDatabase(site.namespace, name);
-    else if (site.type === "bucket") {
+    else if (site.type === "cache" && d.kube) {
+      // (I2) Tear down the Valkey Deployment/Service/Secret AND its PVC — a cache delete always wipes
+      // data (there is no cache backup). No --force gate: a cache is ephemeral by contract.
+      await d.kube.deleteCache(site.namespace, name);
+    } else if (site.type === "bucket") {
       // (I1) A non-empty bucket refuses deletion without ?force=1 (409), so its contents can't be
       // wiped by accident. With force (or when empty), destroy() prunes every object under the prefix.
       const ctx = { name, namespace: site.namespace, org: site.orgId ?? "" };
@@ -1686,7 +1912,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);
-    await audit({ actor: email, action: site.type === "bucket" ? "bucket.delete" : "site.delete", target: name, targetType: site.type, orgId: site.orgId, detail: { owner: site.owner } });
+    const deleteAction = site.type === "bucket" ? "bucket.delete" : site.type === "cache" ? "cache.delete" : "site.delete";
+    await audit({ actor: email, action: deleteAction, target: name, targetType: site.type, orgId: site.orgId, detail: { owner: site.owner } });
     return c.json({ deleted: name });
   });
 
@@ -1722,7 +1949,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const prefix = c.req.query("prefix") || undefined;
     const owner = c.req.query("owner")?.toLowerCase() || undefined;
     const typeQ = c.req.query("type");
-    const type = typeQ === "site" || typeQ === "app" || typeQ === "database" || typeQ === "bucket" ? typeQ : undefined;
+    const type = typeQ === "site" || typeQ === "app" || typeQ === "database" || typeQ === "bucket" || typeQ === "cache" ? typeQ : undefined;
     // Optional ?org=<slug> filter — scope the browse to one org (an unknown slug → empty page).
     const orgSlug = c.req.query("org");
     let orgId: string | undefined;
@@ -1966,7 +2193,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
   // Claim the site row for a resource if it doesn't exist yet (apps/sites/databases share the name
   // namespace). ensureUser must have run first (owner membership FKs to users).
-  const claimResource = async (siteName: string, type: "site" | "app" | "database" | "bucket", org: Org, email: string): Promise<Site> => {
+  const claimResource = async (siteName: string, type: "site" | "app" | "database" | "bucket" | "cache", org: Org, email: string): Promise<Site> => {
     let site = await d.meta.getSitePlain(siteName);
     if (!site) {
       const claimed = await d.meta.claimSite(siteName, email, type, { id: org.id, namespace: org.namespace });
@@ -2008,6 +2235,18 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await d.meta.updateSite(siteName, (s) => ({ ...s, currentVersion: verId }));
   };
 
+  // (I2) Create/update a cache resource. Composes the SAME building blocks as POST /v1/caches/:name.
+  const applyCacheResource = async (res: StackResource, siteName: string, ns: string, isCreate: boolean): Promise<void> => {
+    const cacheCfg = sanitizeCacheConfig({ memory: res.memory, persistent: res.persistent })!;
+    await ensureTenant(ns);
+    // Generate the requirepass only on first create; on a re-apply read it back so it isn't rotated.
+    const password = isCreate ? generateDbPassword() : (await d.kube!.readCachePassword(ns, siteName)) ?? generateDbPassword();
+    await d.kube!.applyCache(ns, siteName, cacheManifests(cacheCfg, { name: siteName, namespace: ns, password }));
+    const verId = newVersionId(now());
+    await d.meta.putVersion(siteName, { id: verId, publishedBy: "stack", createdAt: now().toISOString(), fileCount: 0, bytes: 0, config: cacheCfg });
+    await d.meta.updateSite(siteName, (s) => ({ ...s, currentVersion: verId }));
+  };
+
   // Create/update an app resource from a resolved image. Composes the SAME building blocks as
   // POST /v1/apps/:name (manifests + apply + secret binding). The release phase is intentionally NOT
   // run in the stack path v1 (migrations stay on `drop deploy`); noted as a deliberate deviation.
@@ -2015,10 +2254,19 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     // Resolve `uses` edges: each references a resource KEY in this stack → its materialized site name.
     // DB edges wire the manifest (envFrom); bucket edges (I1) inject S3_* creds via the secret path,
     // labelled by the stack RESOURCE KEY so multiple buckets get distinct `<KEY>_`-prefixed env vars.
-    const uses = (res.uses ?? []).filter((u) => u.database).map((u) => ({ database: siteNameForKey(spec, mapping, u.database!) }));
+    // DB edges carry `via` (I3 pooler) through so the manifest's PGHOST override applies in stacks too.
+    const uses = (res.uses ?? [])
+      .filter((u) => u.database)
+      .map((u) => ({ database: siteNameForKey(spec, mapping, u.database!), ...(u.via ? { via: u.via } : {}) }));
+    // (I2) cache edges → mapped `{ cache: <site> }` uses so the app declares the dependency + REDIS_URL binds.
+    const cacheUses = (res.uses ?? []).filter((u) => u.cache).map((u) => ({ cache: siteNameForKey(spec, mapping, u.cache!) }));
     const bucketEntries = (res.uses ?? [])
       .filter((u) => u.bucket)
       .map((u) => ({ bucketName: siteNameForKey(spec, mapping, u.bucket!), envLabel: u.bucket! }));
+    const cacheEntries = (res.uses ?? [])
+      .filter((u) => u.cache)
+      .map((u) => ({ cacheName: siteNameForKey(spec, mapping, u.cache!), envLabel: u.cache! }));
+    const allUses = [...uses, ...cacheUses];
     const appCfg: AppConfig = {
       image,
       services: res.services ?? [{ internalPort: 8080, protocol: "http" }],
@@ -2026,13 +2274,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       ...(res.env ? { env: res.env } : {}),
       ...(res.scale ? { scale: res.scale } : {}),
       trusted: res.trusted ?? true,
-      ...(uses.length ? { uses } : {}),
+      ...(allUses.length ? { uses: allUses } : {}),
       ...(res.healthcheck ? { healthcheck: res.healthcheck } : {}),
       ...(res.processes ? { processes: res.processes } : {}),
     };
     const ns = site.namespace;
     await ensureTenant(ns);
     await writeBucketBindings(bucketEntries, site, "stack"); // provision + write S3_* secrets before rollout
+    await writeCacheBindings(cacheEntries, site, "stack"); // (I2) read back each cache password + write REDIS_URL before rollout
     const sandbox = !appCfg.trusted;
     const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
     const verId = newVersionId(now()); // minted up front so it can stamp the pod-template annotation (H1)
@@ -2058,6 +2307,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       await d.images.destroy({ owner: site.owner, app: site.name, namespace: site.namespace }).catch((e) => console.error(`stack delete ${site.name}: images.destroy failed: ${(e as Error).message}`));
     } else if (site.type === "database" && d.kube) {
       await d.kube.deleteDatabase(site.namespace, site.name);
+    } else if (site.type === "cache" && d.kube) {
+      await d.kube.deleteCache(site.namespace, site.name); // (I2) Deployment/Service/Secret + PVC
     }
     await d.blob.deletePrefix(`sites/${site.name}/files/`).catch(() => {});
     await d.meta.deleteSite(site.name);
@@ -2094,7 +2345,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   };
 
   // The per-resource action a caller must hold to reconcile an EXISTING resource of this kind.
-  const actionForKind = (kind: "site" | "app" | "database" | "bucket"): Action => (kind === "site" ? "publish" : kind === "app" ? "deploy" : "db:create"); // bucket reconcile is create-tier (db:create)
+  const actionForKind = (kind: "site" | "app" | "database" | "bucket" | "cache"): Action => (kind === "site" ? "publish" : kind === "app" ? "deploy" : "db:create"); // bucket/cache reconcile is create-tier (db:create)
 
   // The last-deployed image ref for an app resource's site (its current version's stored AppConfig). Used
   // by template publish to capture a stack's DEPLOYED image (a mutable tag) so the template is instantiable
@@ -2245,6 +2496,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
             const site = await claimResource(step.siteName, res.type, org, email);
             if (res.type === "database") {
               await applyDbResource(res, step.siteName, site.namespace, step.action === "create");
+            } else if (res.type === "cache") {
+              await applyCacheResource(res, step.siteName, site.namespace, step.action === "create"); // (I2)
             } else if (res.type === "app") {
               const image = resolved?.[step.key]?.image ?? res.image;
               if (image) await applyAppResource(spec, mapping, res, site, image); // else: row claimed, awaits CLI image (in `needs`)
@@ -2424,12 +2677,12 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     for (const [key, res] of Object.entries(spec.resources)) {
       if (res.type === "app")
         for (const u of res.uses ?? []) {
-          const targetKey = u.database ?? u.bucket;
+          const targetKey = u.database ?? u.bucket ?? u.cache;
           if (!targetKey) continue;
           const target = spec.resources[targetKey];
           if (!target) continue;
           const tSite = mapping[targetKey] ?? resolveResourceName(spec.name, targetKey, target);
-          const label = u.database ? `PG* via ${tSite}-app` : `S3_* via ${tSite}`;
+          const label = u.database ? `PG* via ${tSite}-app` : u.bucket ? `S3_* via ${tSite}` : `REDIS_URL via ${tSite}`;
           edges.push({ from: targetKey, to: key, kind: "uses", label });
         }
       if (res.type === "site")

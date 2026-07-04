@@ -5,7 +5,7 @@ import { defaultSessionPath, loadSession, saveSession, type Session } from "../c
 import { Client } from "../cli/client.ts";
 import { packDir } from "../cli/pack.ts";
 import { devLoginToken, serverLogin } from "../cli/login.ts";
-import { resolveSiteName, loadAppDeploy, loadDatabaseCreate } from "../cli/resolve-name.ts";
+import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate } from "../cli/resolve-name.ts";
 import { runStackUp } from "../cli/stack.ts";
 
 function apiBase(s?: Session): string {
@@ -160,6 +160,34 @@ export function buildMcp(): McpServer {
     "bucket_rotate",
     { description: "Re-mint a bucket's access credentials (owner only). Returns the new credentials ONCE.", inputSchema: { name: z.string() } },
     async ({ name }) => run(() => getClient().then((c) => c.bucketRotate(name))),
+  );
+
+  // managed cache (Valkey, I2)
+  server.registerTool(
+    "cache_create",
+    {
+      description:
+        "Create a managed Valkey cache (single-replica; EPHEMERAL by default — a restart loses data unless persistent). Returns REDIS_URL (password embedded) ONCE — never returned again. Bind it to an app with `uses: [{ cache: <name> }]` to inject REDIS_URL automatically.",
+      inputSchema: {
+        name: z.string().describe("cache name (DNS-safe; globally unique)"),
+        memory: z.string().optional().describe("memory (k8s quantity, 64Mi–1Gi; default 256Mi)"),
+        persistent: z.boolean().optional().describe("add a small PVC so data survives restarts (default: ephemeral)"),
+        directory: z.string().optional().describe("folder whose drop.yaml cache: section supplies memory/persistent"),
+        org: z.string().optional().describe("organisation slug (default: your personal org)"),
+      },
+    },
+    async ({ name, memory, persistent, directory, org }) =>
+      run(async () => {
+        const cfg = (await loadCacheCreate(directory ? resolve(directory) : ".")) as Record<string, unknown>;
+        if (memory) cfg.memory = memory;
+        if (persistent) cfg.persistent = true;
+        return await (await getClient()).cacheCreate(name, cfg as never, org);
+      }),
+  );
+  server.registerTool(
+    "cache_status",
+    { description: "Show a cache's host/port + memory/persistent + live status. Never returns the password.", inputSchema: { name: z.string() } },
+    async ({ name }) => run(() => getClient().then((c) => c.info(name))),
   );
 
   server.registerTool(

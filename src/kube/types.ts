@@ -1,6 +1,7 @@
 import type { Readable } from "node:stream";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
+import type { CacheManifests } from "./valkey.ts";
 
 // The cluster boundary. The API depends on this port, never on a concrete k8s
 // client — so deploy logic is testable with FakeKube (no cluster), exactly as
@@ -75,6 +76,26 @@ export interface KubeClient {
   hibernateDatabase(namespace: string, name: string): Promise<void>;
   /** Wake a hibernated CNPG cluster (cnpg.io/hibernation=off). */
   wakeDatabase(namespace: string, name: string): Promise<void>;
+  /** (I2) Create-or-update a managed cache: single-replica Valkey Deployment + Service (+ requirepass
+   *  Secret at create, + a PVC when persistent). Idempotent. */
+  applyCache(namespace: string, name: string, manifests: CacheManifests): Promise<void>;
+  /** (I2) Remove the cache's Deployment/Service/Secret/PVC. Safe if absent. `deletePvc` tears down the
+   *  persistent volume too (a cache delete always wipes data — there is no cache backup). */
+  deleteCache(namespace: string, name: string): Promise<void>;
+  /** (I2) Live cache status from its Deployment + pods (an AppStatus), or null if absent. */
+  getCacheStatus(namespace: string, name: string): Promise<AppStatus | null>;
+  /** (I2) Read back the cache's generated `requirepass` password from its `<name>-cache` Secret, to
+   *  compose the `REDIS_URL` binding at deploy time. This is the ONE KubeClient method that returns a
+   *  Secret VALUE — narrowly scoped to the cache password and used ONLY server-side (the value is never
+   *  returned to a client; it is re-written into the app's write-only secret). null if the Secret/key
+   *  is absent (e.g. compute not yet reconciled). */
+  readCachePassword(namespace: string, name: string): Promise<string | null>;
+  /** (I3) Create-or-update a CNPG Pooler (PgBouncer) for a managed database. Idempotent. */
+  applyPooler(namespace: string, manifest: Record<string, unknown>): Promise<void>;
+  /** (I3) Delete a database's Pooler (`<db>-pooler-rw`). Safe if absent. */
+  deletePooler(namespace: string, dbName: string): Promise<void>;
+  /** (I3) A database's Pooler pool mode if one exists (for the detail surface), else null. */
+  getPooler(namespace: string, dbName: string): Promise<{ mode: string } | null>;
 }
 
 export interface BackupInfo {

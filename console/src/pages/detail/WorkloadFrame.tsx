@@ -13,6 +13,7 @@ import { api, orgLabel, type Detail, type Me } from "../../lib/api.ts";
 import { AppPanels } from "./AppPanels.tsx";
 import { DbPanels } from "./DbPanels.tsx";
 import { BucketPanels } from "./BucketPanels.tsx";
+import { CachePanels } from "./CachePanels.tsx";
 import { SitePanels } from "./SitePanels.tsx";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
@@ -48,6 +49,7 @@ export function WorkloadFrame({ d, me }: { d: Detail; me: Me }) {
         {d.type === "app" && <AppPanels d={d} isOwner={isOwner} canDeploy={canDeploy} />}
         {d.type === "database" && <DbPanels d={d} isOwner={isOwner} canDeploy={canDeploy} />}
         {d.type === "bucket" && <BucketPanels d={d} isOwner={isOwner} />}
+        {d.type === "cache" && <CachePanels d={d} />}
         <AccessPanel d={d} isOwner={isOwner} />
         {isOwner && <DangerPanel d={d} />}
       </div>
@@ -190,7 +192,7 @@ function DangerPanel({ d }: { d: Detail }) {
           d.type === "bucket" ? (
             <>This permanently deletes the bucket{d.bucket && d.bucket.objects > 0 ? ` and its ${d.bucket.objects} object(s)` : ""}.</>
           ) : (
-            <>This permanently tears down its workload{d.type === "database" ? " and data" : ""}.</>
+            <>This permanently tears down its workload{d.type === "database" || d.type === "cache" ? " and data" : ""}.</>
           )
         }
         confirmLabel={`delete ${d.type}`}

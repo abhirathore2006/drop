@@ -11,6 +11,7 @@ import {
 } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
+import type { CacheManifests } from "./valkey.ts";
 
 // In-memory KubeClient for tests (mirrors FakeBlob). Records every apply so tests
 // can assert what would have been sent to the cluster.
@@ -127,6 +128,51 @@ export class FakeKube implements KubeClient {
   async wakeDatabase(namespace: string, name: string): Promise<void> {
     if (!this.dbs.has(this.key(namespace, name))) throw new Error(`no such database: ${name}`);
     this.hibernated.delete(this.key(namespace, name));
+  }
+
+  // (I2) managed cache (Valkey) doubles. Records applies/deletes + remembers the requirepass password
+  // (from m.secret) so readCachePassword can return it — the deploy-time REDIS_URL binding reads it back.
+  readonly cacheApplies: { namespace: string; name: string; manifests: CacheManifests }[] = [];
+  readonly cacheDeletes: { namespace: string; name: string }[] = [];
+  private caches = new Set<string>();
+  private cachePasswords = new Map<string, string>();
+  async applyCache(namespace: string, name: string, manifests: CacheManifests): Promise<void> {
+    this.cacheApplies.push({ namespace, name, manifests });
+    this.caches.add(this.key(namespace, name));
+    const pw = (manifests.secret as { stringData?: { password?: string } } | undefined)?.stringData?.password;
+    if (pw) this.cachePasswords.set(this.key(namespace, name), pw); // set only at create (secret present)
+  }
+  async deleteCache(namespace: string, name: string): Promise<void> {
+    this.cacheDeletes.push({ namespace, name });
+    this.caches.delete(this.key(namespace, name));
+    this.cachePasswords.delete(this.key(namespace, name));
+  }
+  async getCacheStatus(namespace: string, name: string): Promise<AppStatus | null> {
+    const k = this.key(namespace, name);
+    if (this.statusOverride.has(k)) return this.statusOverride.get(k) as AppStatus;
+    return this.caches.has(k) ? { replicas: 1, ready: 1, restarts: 0, reason: "Running" } : null;
+  }
+  async readCachePassword(namespace: string, name: string): Promise<string | null> {
+    return this.cachePasswords.get(this.key(namespace, name)) ?? null;
+  }
+
+  // (I3) CNPG Pooler doubles. Keyed by namespace/dbName; records applies/deletes so tests can assert
+  // the emitted Pooler manifest (mode, cluster ref) + enable/disable lifecycle.
+  readonly poolerApplies: { namespace: string; manifest: Record<string, unknown> }[] = [];
+  readonly poolerDeletes: { namespace: string; dbName: string }[] = [];
+  private poolers = new Map<string, string>(); // key -> pool mode
+  async applyPooler(namespace: string, manifest: Record<string, unknown>): Promise<void> {
+    this.poolerApplies.push({ namespace, manifest });
+    const spec = manifest.spec as { cluster?: { name?: string }; pgbouncer?: { poolMode?: string } } | undefined;
+    this.poolers.set(this.key(namespace, spec?.cluster?.name ?? ""), spec?.pgbouncer?.poolMode ?? "transaction");
+  }
+  async deletePooler(namespace: string, dbName: string): Promise<void> {
+    this.poolerDeletes.push({ namespace, dbName });
+    this.poolers.delete(this.key(namespace, dbName));
+  }
+  async getPooler(namespace: string, dbName: string): Promise<{ mode: string } | null> {
+    const mode = this.poolers.get(this.key(namespace, dbName));
+    return mode ? { mode } : null;
   }
 
   readonly logsByName = new Map<string, string>();

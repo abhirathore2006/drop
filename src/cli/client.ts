@@ -1,6 +1,7 @@
 import type { Session } from "./session.ts";
 import type { AppConfig } from "../app-config.ts";
 import type { DatabaseConfig } from "../db-config.ts";
+import type { CacheConfig } from "../cache-config.ts";
 import type { StackSpec } from "../stack-config.ts";
 
 export class Client {
@@ -128,6 +129,21 @@ export class Client {
   }
   dbWake(name: string) {
     return this.req("POST", `/v1/databases/${name}/wake`);
+  }
+  // (I3) connection pooling: enable emits a CNPG Pooler; disable deletes it.
+  dbPooler(name: string, enable: boolean, mode?: "transaction" | "session") {
+    return this.req("POST", `/v1/databases/${name}/pooler`, { contentType: "application/json", body: JSON.stringify({ enable, ...(mode ? { mode } : {}) }) });
+  }
+  // (I3) extensions: create-time only — `ext add` on an existing db 409s honestly server-side.
+  dbExtAdd(name: string, extensions: string[]) {
+    return this.req("POST", `/v1/databases/${name}/extensions`, { contentType: "application/json", body: JSON.stringify({ add: extensions }) });
+  }
+  // (I2) managed cache (Valkey) — create returns REDIS_URL (password embedded) ONCE.
+  cacheCreate(name: string, cache: CacheConfig | Record<string, never>, org?: string) {
+    return this.req("POST", `/v1/caches/${name}${this.orgQ(org)}`, { contentType: "application/json", body: JSON.stringify(cache) });
+  }
+  cacheList(org?: string) {
+    return this.req("GET", `/v1/caches${this.orgQ(org)}`);
   }
   // tenant object storage (buckets, I1) — create/rotate return the access creds ONCE
   bucketCreate(name: string, org?: string) {

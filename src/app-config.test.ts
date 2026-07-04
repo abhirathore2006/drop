@@ -79,7 +79,7 @@ test("sanitizeAppConfig parses uses:[{database}], dropping junk / wrong shapes /
       { database: "tododb" },
       { database: "Bad_Name" }, // fails validateName → dropped
       { database: "tododb" }, // duplicate → collapsed
-      { cache: "nope" }, // wrong shape (no `database`) → dropped
+      { unknownkind: "nope" }, // wrong shape (no database/bucket/cache) → dropped
       "junk", // not an object → dropped
       { database: 123 }, // non-string → dropped
       { database: "" }, // empty → dropped
@@ -91,7 +91,7 @@ test("sanitizeAppConfig parses uses:[{database}], dropping junk / wrong shapes /
 test("sanitizeAppConfig omits uses when absent / not an array / all-invalid; caps the list at 8", () => {
   expect(sanitizeAppConfig({ image: "x:1" })!.uses).toBeUndefined();
   expect(sanitizeAppConfig({ image: "x:1", uses: "nope" })!.uses).toBeUndefined();
-  expect(sanitizeAppConfig({ image: "x:1", uses: [{ cache: "x" }] })!.uses).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", uses: [{ unknownkind: "x" }] })!.uses).toBeUndefined();
   const many = Array.from({ length: 12 }, (_, i) => ({ database: `db${i}` })); // 12 distinct valid names
   expect(sanitizeAppConfig({ image: "x:1", uses: many })!.uses!.length).toBe(8); // capped
 });
@@ -111,6 +111,24 @@ test("sanitizeAppConfig parses uses:[{bucket}] (I1) alongside {database}; dedupe
   // round-trip safe
   const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(c)))!;
   expect(twice.uses).toEqual([{ database: "tododb" }, { bucket: "avatars" }]);
+});
+
+test("sanitizeAppConfig parses uses:[{cache}] (I2) + via:pooler (I3) on a db use; dedupes; round-trips", () => {
+  const c = sanitizeAppConfig({
+    image: "x:1",
+    uses: [
+      { database: "maindb", via: "pooler" }, // (I3) route PGHOST through the pooler
+      { cache: "sessions" },
+      { cache: "sessions" }, // duplicate cache → collapsed
+      { cache: "Bad_Name" }, // fails validateName → dropped
+      { database: "other", via: "bogus" }, // unknown `via` → dropped (plain db use)
+      { cache: 7 }, // non-string → dropped
+    ],
+  })!;
+  expect(c.uses).toEqual([{ database: "maindb", via: "pooler" }, { cache: "sessions" }, { database: "other" }]);
+  // round-trip safe (CLI -> JSON -> API): via + cache survive unchanged
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(c)))!;
+  expect(twice.uses).toEqual([{ database: "maindb", via: "pooler" }, { cache: "sessions" }, { database: "other" }]);
 });
 
 test("sanitizeAppConfig uses is round-trip safe (CLI sanitizes -> JSON -> API re-sanitizes)", () => {

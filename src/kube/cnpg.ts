@@ -8,7 +8,7 @@
 // operator 1.29.x): ObjectStore is barmancloud.cnpg.io/v1; the plugin name string is
 // "barman-cloud.cloudnative-pg.io"; ScheduledBackup needs method:plugin (the default is
 // the deprecated path); hibernation is the cnpg.io/hibernation annotation (no spec field).
-import type { DatabaseConfig } from "../db-config.ts";
+import { extensionSqlName, type DatabaseConfig } from "../db-config.ts";
 
 const PLUGIN_NAME = "barman-cloud.cloudnative-pg.io";
 const CNPG_NAMESPACE = "cnpg-system"; // where the operator + plugin Deployment run
@@ -105,7 +105,18 @@ export function databaseManifests(db: DatabaseConfig, ctx: DatabaseManifestConte
       // operator over ownership. `bootstrap.initdb` is immutable post-create — re-applying with
       // the same secret ref is a no-op, so this is safe on update. NOT managed.roles: that path
       // does not reliably re-apply a changed password for the bootstrap app user (verified).
-      bootstrap: { initdb: { database: "app", owner: "app", secret: { name: `${ctx.name}-app` } } },
+      bootstrap: {
+        initdb: {
+          database: "app",
+          owner: "app",
+          secret: { name: `${ctx.name}-app` },
+          // (I3) Extensions are created at BOOTSTRAP only — postInitApplicationSQL runs once against the
+          // `app` database on first init (pgvector's SQL name is `vector`; none of the allowlisted set
+          // needs shared_preload_libraries). bootstrap.initdb is immutable post-create, so adding an
+          // extension to an EXISTING db can't ride this path — the API returns a 409 (v1 limitation).
+          ...(db.extensions?.length ? { postInitApplicationSQL: db.extensions.map((e) => `CREATE EXTENSION IF NOT EXISTS ${extensionSqlName(e)};`) } : {}),
+        },
+      },
       // WAL archiving + backups via the Barman Cloud Plugin (NOT spec.backup.barmanObjectStore).
       plugins: [{ name: PLUGIN_NAME, isWALArchiver: true, parameters: { barmanObjectName: storeName } }],
       storage: { size: db.storage },
@@ -206,6 +217,42 @@ export function databaseBackupManifest(ctx: { name: string; cluster: string; nam
       cluster: { name: ctx.cluster },
       method: "plugin", // MUST be explicit — the default is the deprecated barmanObjectStore path
       pluginConfiguration: { name: PLUGIN_NAME, parameters: { barmanObjectName: ctx.storeName } },
+    },
+  };
+}
+
+export type PoolerMode = "transaction" | "session";
+
+export interface PoolerContext {
+  name: string; // the CNPG Cluster name
+  namespace: string; // tenant namespace
+  mode: PoolerMode; // pgbouncer pool mode; "transaction" (default) multiplexes per-transaction
+}
+
+/** The pooler resource NAME (= its Service name): `<db>-pooler-rw`. The binding's PGHOST override and
+ *  the detail `pooler.host` both point here; keep this single source of truth. */
+export function poolerName(dbName: string): string {
+  return `${dbName}-pooler-rw`;
+}
+
+/** (I3) A CNPG first-class Pooler (PgBouncer) fronting the cluster's PRIMARY (type: rw). One instance;
+ *  the pool mode is pgbouncer's poolMode. The Pooler's own Service takes the Pooler's name
+ *  (`<db>-pooler-rw`), which is what an app with `uses: [{ database, via: pooler }]` targets. */
+export function poolerManifest(ctx: PoolerContext): Record<string, unknown> {
+  const name = poolerName(ctx.name);
+  return {
+    apiVersion: "postgresql.cnpg.io/v1",
+    kind: "Pooler",
+    metadata: {
+      name,
+      namespace: ctx.namespace,
+      labels: { "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name, "drop.dev/kind": "pooler" },
+    },
+    spec: {
+      cluster: { name: ctx.name },
+      instances: 1,
+      type: "rw", // front the primary (read-write); a read-only pooler is out of scope for v1
+      pgbouncer: { poolMode: ctx.mode },
     },
   };
 }

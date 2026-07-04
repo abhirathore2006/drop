@@ -179,6 +179,31 @@ test("stack: bucket resource + app→bucket `uses` edge (I1)", () => {
   expect(validateStackEdges(wrongType)).toContain("not a bucket");
 });
 
+test("stack: cache resource + app→cache `uses` edge (I2); via:pooler carried on a db use (I3)", () => {
+  const spec = sanitizeStackConfig({
+    name: "s",
+    resources: {
+      db: { type: "database" },
+      sessions: { type: "cache", memory: "512Mi", persistent: true },
+      api: { type: "app", image: "x:1", uses: [{ cache: "sessions" }, { database: "db", via: "pooler" }] },
+    },
+  })!;
+  expect(spec.resources.sessions).toEqual({ type: "cache", memory: "512Mi", persistent: true });
+  expect(spec.resources.api!.uses).toEqual([{ cache: "sessions" }, { database: "db", via: "pooler" }]);
+  expect(validateStackEdges(spec)).toBeNull();
+
+  // app uses a cache KEY that isn't in the stack
+  const missing: StackSpec = { name: "s", resources: { api: { type: "app", image: "x:1", uses: [{ cache: "ghost" }] } } };
+  expect(validateStackEdges(missing)).toContain("ghost");
+
+  // app uses a KEY that is a database, not a cache
+  const wrongType: StackSpec = {
+    name: "s",
+    resources: { db: { type: "database" }, api: { type: "app", image: "x:1", uses: [{ cache: "db" }] } },
+  };
+  expect(validateStackEdges(wrongType)).toContain("not a cache");
+});
+
 test("parseStackConfig: reads the top-level stack: section of a drop.yaml body", () => {
   const spec = parseStackConfig(
     yaml(`

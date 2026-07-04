@@ -1,5 +1,14 @@
 import { test, expect } from "bun:test";
-import { sanitizeDatabaseConfig, parseDatabaseConfig, validateDbPassword, generateDbPassword, validateDbStorage } from "./db-config.ts";
+import {
+  sanitizeDatabaseConfig,
+  parseDatabaseConfig,
+  validateDbPassword,
+  generateDbPassword,
+  validateDbStorage,
+  validateDbExtensions,
+  extensionSqlName,
+  DEFAULT_DB_EXTENSION_ALLOWLIST,
+} from "./db-config.ts";
 
 test("validateDbPassword: accepts strong printable passwords, rejects short/whitespace/quotes/non-strings", () => {
   expect(validateDbPassword("a-valid-password-123")).toBeNull();
@@ -111,4 +120,35 @@ test("parseDatabaseConfig: a bare `database:` key (null) still makes a default D
 test("parseDatabaseConfig: no database: section → undefined", () => {
   expect(parseDatabaseConfig("app:\n  image: x:1\n")).toBeUndefined();
   expect(parseDatabaseConfig("site: {}\n")).toBeUndefined();
+});
+
+// ---- (I3) extensions -------------------------------------------------------------------------
+test("validateDbExtensions: allows allowlisted names, rejects unknown / wrong types, null when absent", () => {
+  expect(validateDbExtensions({})).toBeNull(); // none requested
+  expect(validateDbExtensions({ extensions: ["pgvector", "pg_trgm"] })).toBeNull();
+  expect(validateDbExtensions({ ext: ["pgcrypto"] })).toBeNull(); // `ext` alias
+  expect(validateDbExtensions({ extensions: ["mystery"] })).not.toBeNull(); // not allowlisted
+  expect(validateDbExtensions({ extensions: "pgvector" })).not.toBeNull(); // not an array
+  expect(validateDbExtensions({ extensions: [123] })).not.toBeNull(); // non-string
+  // a custom allowlist is honored
+  expect(validateDbExtensions({ extensions: ["postgis"] }, ["postgis"])).toBeNull();
+  expect(validateDbExtensions({ extensions: ["pgvector"] }, ["postgis"])).not.toBeNull();
+});
+
+test("extensionSqlName maps pgvector → vector, others to themselves", () => {
+  expect(extensionSqlName("pgvector")).toBe("vector");
+  expect(extensionSqlName("pg_trgm")).toBe("pg_trgm");
+  expect(DEFAULT_DB_EXTENSION_ALLOWLIST).toContain("pgvector");
+});
+
+test("sanitizeDatabaseConfig: keeps only allowlisted extensions (deduped, order-preserving); omits when none", () => {
+  expect(sanitizeDatabaseConfig({})!.extensions).toBeUndefined();
+  const c = sanitizeDatabaseConfig({ extensions: ["pgvector", "pgvector", "mystery", "pg_trgm"] })!;
+  expect(c.extensions).toEqual(["pgvector", "pg_trgm"]); // dupes + disallowed dropped
+  // `ext` alias also accepted; a custom allowlist filters
+  expect(sanitizeDatabaseConfig({ ext: ["citext"] })!.extensions).toEqual(["citext"]);
+  expect(sanitizeDatabaseConfig({ extensions: ["pgvector"] }, undefined, ["postgis"])!.extensions).toBeUndefined();
+  // round-trip safe
+  const twice = sanitizeDatabaseConfig(JSON.parse(JSON.stringify(c)))!;
+  expect(twice.extensions).toEqual(["pgvector", "pg_trgm"]);
 });

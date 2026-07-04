@@ -1,6 +1,7 @@
 import type { SiteConfig } from "../site-config.ts";
 import type { AppConfig } from "../app-config.ts";
 import type { DatabaseConfig } from "../db-config.ts";
+import type { CacheConfig } from "../cache-config.ts";
 import type { RuntimeState, SiteRole, Visibility, WorkloadType } from "../db/schema.ts";
 
 export type { Visibility, WorkloadType, RuntimeState };
@@ -56,7 +57,7 @@ export interface VersionMeta {
   createdAt: string; // ISO
   fileCount: number;
   bytes: number;
-  config?: SiteConfig | AppConfig | DatabaseConfig;
+  config?: SiteConfig | AppConfig | DatabaseConfig | CacheConfig;
 }
 
 export class SiteNotFoundError extends Error {

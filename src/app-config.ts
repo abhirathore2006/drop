@@ -20,6 +20,8 @@ export interface AppScale {
 export interface AppUse {
   database?: string; // a managed database in the SAME org; deploy wires envFrom <db>-app + CA + verify-full
   bucket?: string; // (I1) a tenant bucket in the SAME org; deploy injects S3_* creds via the write-only secret path
+  cache?: string; // (I2) a managed cache (Valkey) in the SAME org; deploy injects REDIS_URL via the write-only secret path
+  via?: "pooler"; // (I3) database bindings ONLY: route the injected PGHOST at the CNPG Pooler service (needs the DB's pooler enabled)
 }
 // Readiness + liveness probes on the web container. All fields are RESOLVED seconds (the sanitizer
 // parses "10s"/"2m" durations, applies defaults, and clamps to bounds) so the manifest layer just
@@ -209,25 +211,33 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
   cfg.scale = sanitizeScale(raw.scale);
 
   // `uses` declares dependencies on managed resources. Each entry is `{ database: <name> }` (CNPG
-  // binding: envFrom `<db>-app` Secret + cluster CA + PGSSLMODE=verify-full) OR (I1) `{ bucket: <name> }`
-  // (object storage: S3_* creds injected via the write-only secret path at deploy). Same defensive
-  // posture as everything above: ignore non-array input and junk entries, require a valid workload
-  // name, collapse duplicates per kind, and cap the list. Round-trip safe — a sanitized `{ database }`
-  // or `{ bucket }` entry re-sanitizes unchanged (CLI -> JSON -> API).
+  // binding: envFrom `<db>-app` Secret + cluster CA + PGSSLMODE=verify-full; an optional `via: "pooler"`
+  // (I3) routes PGHOST at the CNPG Pooler service) OR (I1) `{ bucket: <name> }` (object storage: S3_*
+  // creds injected via the write-only secret path at deploy) OR (I2) `{ cache: <name> }` (REDIS_URL
+  // injected via the write-only secret path). Same defensive posture as everything above: ignore
+  // non-array input and junk entries, require a valid workload name, collapse duplicates per kind, and
+  // cap the list. Round-trip safe — a sanitized entry re-sanitizes unchanged (CLI -> JSON -> API).
   if (Array.isArray(raw.uses)) {
     const uses: AppUse[] = [];
     const seen = new Set<string>();
     for (const u of (raw.uses as any[]).slice(0, 8)) {
       const database = str(u?.database, 63);
       const bucket = str(u?.bucket, 63);
+      const cache = str(u?.cache, 63);
       if (database) {
         if (validateName(database) !== null || seen.has(`d:${database}`)) continue;
         seen.add(`d:${database}`);
-        uses.push({ database });
+        const entry: AppUse = { database };
+        if (u?.via === "pooler") entry.via = "pooler"; // (I3) route PGHOST through the pooler (else the primary)
+        uses.push(entry);
       } else if (bucket) {
         if (validateName(bucket) !== null || seen.has(`b:${bucket}`)) continue;
         seen.add(`b:${bucket}`);
         uses.push({ bucket });
+      } else if (cache) {
+        if (validateName(cache) !== null || seen.has(`c:${cache}`)) continue;
+        seen.add(`c:${cache}`);
+        uses.push({ cache });
       }
     }
     if (uses.length) cfg.uses = uses;

@@ -18,9 +18,10 @@ export interface UsersTable {
 
 export type Visibility = "public" | "private" | "password";
 // The `sites` discriminator. `bucket` (I1) is tenant object storage — a prefix in the platform S3
-// bucket (local) or a per-tenant prefix + scoped IAM policy (prod). It reuses the shared name
-// namespace, org ownership, roles, and audit like every other type. (cache/auth land later.)
-export type WorkloadType = "site" | "app" | "database" | "bucket";
+// bucket (local) or a per-tenant prefix + scoped IAM policy (prod). `cache` (I2) is a managed
+// single-replica Valkey (deliberately tiny, ephemeral by default). Both reuse the shared name
+// namespace, org ownership, roles, and audit like every other type. (auth lands later.)
+export type WorkloadType = "site" | "app" | "database" | "bucket" | "cache";
 
 export interface SitesTable {
   name: string;

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { parseDropYaml, CONFIG_FILE_YAML } from "../site-config.ts";
 import { parseAppConfig, type AppConfig } from "../app-config.ts";
 import { parseDatabaseConfig, type DatabaseConfig } from "../db-config.ts";
+import { parseCacheConfig, type CacheConfig } from "../cache-config.ts";
 import { validateName, generateName } from "../names.ts";
 
 export type NameSource = "arg" | "drop.yaml" | "generated";
@@ -73,4 +74,16 @@ export async function loadDatabaseCreate(dir: string): Promise<DatabaseConfig | 
   // A parse / validation error (e.g. storage over the per-database cap) must PROPAGATE — not be
   // swallowed like a missing file — so the CLI/MCP reject it up front with a clear message.
   return parseDatabaseConfig(text) ?? {};
+}
+
+/** (I2) Load a cache's config from a folder's drop.yaml `cache:` section (memory, persistent). Returns
+ *  an empty config (server applies defaults) when there's no drop.yaml or no cache: section. */
+export async function loadCacheCreate(dir: string): Promise<CacheConfig | Record<string, never>> {
+  let text: string;
+  try {
+    text = await readFile(join(dir, CONFIG_FILE_YAML), "utf8");
+  } catch {
+    return {}; // no drop.yaml → server defaults (256Mi, ephemeral)
+  }
+  return parseCacheConfig(text) ?? {};
 }

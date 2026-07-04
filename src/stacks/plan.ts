@@ -44,7 +44,7 @@ function dependencies(key: string, resources: Record<string, StackResource>): st
   const out: string[] = [];
   if (res.type === "app")
     for (const u of res.uses ?? []) {
-      const dep = u.database ?? u.bucket; // an app depends on the databases AND buckets it `uses`
+      const dep = u.database ?? u.bucket ?? u.cache; // an app depends on the databases, buckets AND caches it `uses`
       if (dep && resources[dep]) out.push(dep);
     }
   if (res.type === "site") for (const e of res.env_from ?? []) if (resources[e.resource]) out.push(e.resource);

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cache (managed Valkey) · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="buckets.html">Buckets (object storage)</a>
+      <a href="cache.html" class="active">Cache (managed Valkey)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Cache — managed Valkey</h1>
+<p class="lead">A <strong>cache</strong> is a managed, single-replica <a href="https://valkey.io">Valkey</a> (a Redis-compatible in-memory store) you create in one command and bind to an app so its connection URL — password included — arrives as an environment variable. It is deliberately tiny: the anti-Redis-Cluster. No HA, no clustering, no tuning knobs — a fast local cache or a BullMQ-style job queue for an internal app.</p>
+
+<div class="note warn"><span class="lbl">EPHEMERAL by default — a restart loses ALL data</span><p>Unless you pass <code>--persistent</code>, a cache has <strong>no disk</strong>: any restart — a redeploy, a node move, a crash, an out-of-memory kill — starts it empty. That is the right default for a cache (rebuildable) and acceptable for a queue you can re-enqueue. If you need the data to survive restarts, create it <code>--persistent</code> (a small disk with periodic snapshots), and remember that even then a cache has <strong>no backups</strong> — deleting it always wipes the data. For durable data, use a <a href="configuration.html#compute-config">managed database</a> or a <a href="buckets.html">bucket</a>.</p></div>
+
+<div class="note"><span class="lbl">A cache is a workload type</span><p>Like a site, app, database or bucket, a cache is a row in the shared resource namespace with an owner, an org, roles and an audit trail. It appears in <code>drop ls</code>, the console groups it under <strong>Caches</strong>, and it is deleted the same way.</p></div>
+
+<h2 id="create">Create a cache</h2>
+<pre><code>drop cache create sessions
+<span class="tok-c">#   ▸ creating cache sessions…</span>
+<span class="tok-c">#   ✓ cache ready — 256Mi, EPHEMERAL (a restart loses all data)</span>
+<span class="tok-c">#      host: sessions.&lt;tenant&gt;.svc.cluster.local:6379</span>
+<span class="tok-c">#   ✓ connection URL — shown once, store it now:</span>
+<span class="tok-c">#      redis://:&lt;password&gt;@sessions.&lt;tenant&gt;.svc.cluster.local:6379</span></code></pre>
+<pre><code>drop cache create jobs --memory 512Mi --persistent   <span class="tok-c"># bigger + survives restarts</span>
+drop cache create sessions --org acme                <span class="tok-c"># create in a team org</span></code></pre>
+<p><code>--memory</code> takes a k8s quantity clamped to <strong>64Mi–1Gi</strong> (default <code>256Mi</code>); it sizes the pod memory limit and, when <code>--persistent</code>, the disk. You can also declare a <code>cache:</code> section in <code>drop.yaml</code> (<code>{ memory, persistent }</code>). The <strong>connection URL is printed exactly once</strong> — the password is embedded in it, and the platform never returns it again. In practice you rarely copy it by hand: bind the cache to an app (below) and Drop injects it for you.</p>
+
+<div class="note warn"><span class="lbl">RevealOnce connection URL</span><p>Create reveals the <code>REDIS_URL</code> (with the password) <strong>one time</strong>. There is no rotate command for a cache — if you lose the URL, delete and recreate (which wipes the data, ephemeral or not). This mirrors <code>drop db password</code>'s reveal-once posture.</p></div>
+
+<h2 id="bind">Bind a cache to an app</h2>
+<p>Declare the dependency in your app's <code>drop.yaml</code> with a <code>uses</code> edge — the same mechanism that binds a database or a bucket:</p>
+<pre><code><span class="tok-k">app:</span>
+  <span class="tok-k">image:</span> my-org/worker:1
+  <span class="tok-k">uses:</span>
+    - <span class="tok-k">cache:</span> sessions       <span class="tok-c"># a cache in the SAME org</span></code></pre>
+<p>On deploy, Drop resolves the cache (it must be in the same org — a cross-org bind is refused with a <code>400</code>), reads back its password, and writes the composed URL straight into the app's <strong>write-only secret</strong>, so the pod boots with:</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><code>REDIS_URL</code></td><td><code>redis://:&lt;password&gt;@&lt;name&gt;.&lt;tenant&gt;.svc.cluster.local:6379</code> — a standard Redis URL with auth, ready for any Redis/Valkey client (or BullMQ).</td></tr>
+</tbody>
+</table>
+<p>Because the URL rides the write-only secret path, the password never appears in the manifest, the deploy response, or the console.</p>
+
+<div class="note"><span class="lbl">Multiple caches</span><p>Bind more than one and each URL is prefixed with the resource name so they don't collide — e.g. <code>SESSIONS_REDIS_URL</code>, <code>JOBS_REDIS_URL</code>. A single binding is unprefixed (<code>REDIS_URL</code>). Inside a <a href="stacks.html">stack</a>, the prefix is the resource key. This mirrors the bucket-binding convention exactly.</p></div>
+
+<h2 id="internals">How it runs</h2>
+<p>A cache is a single-replica Valkey <code>Deployment</code> plus a <code>ClusterIP</code> <code>Service</code> on port <code>6379</code> in your tenant namespace. Authentication (<code>requirepass</code>) is a platform-generated password delivered to the container through a Kubernetes <code>Secret</code> — never as plaintext in the pod spec. The pod's memory limit is your requested <code>memory</code>; Valkey's <code>maxmemory</code> is set just under it (so writes are refused before the pod is OOM-killed rather than losing the process abruptly). A <code>--persistent</code> cache adds one small <code>ReadWriteOnce</code> disk mounted at <code>/data</code> with periodic RDB snapshots, and the Deployment uses a <em>Recreate</em> rollout so the disk never double-attaches. There is <strong>no eviction policy</strong> (<code>noeviction</code>) — a full queue refuses writes rather than silently dropping jobs.</p>
+
+<h2 id="expose">Reaching it from outside the cluster</h2>
+<p>By default a cache is reachable only from apps in the same tenant namespace (the tenant network policy is default-deny; intra-namespace traffic is allowed). To connect a local client for debugging, expose it over the <a href="tcp-access.html">L4 plane</a> — a TLS-Valkey rides the shared SNI port and a plain connection rides a dedicated port — exactly like exposing a database for <code>psql</code>.</p>
+
+<h2 id="usage-delete">Status &amp; deletion</h2>
+<p>The cache detail page (and <code>drop cache ls</code> / MCP <code>cache_status</code>) surfaces the host, memory, persistence and live status — never the password.</p>
+<pre><code>drop cache rm sessions           <span class="tok-c"># tears down the Valkey AND its data (no confirmation of contents — a cache has no backup)</span></code></pre>
+
+<h2 id="quota">Quota</h2>
+<p>A cache occupies one slot against the <strong>per-org workload cap</strong>. A <strong>persistent</strong> cache's disk request also counts toward the org's <strong>storage budget</strong> (when one is set), alongside database PVC requests and bucket bytes — <code>GET /v1/orgs/&lt;slug&gt;/usage</code> reports a <code>caches</code> figure in its <code>storage</code> section. An ephemeral cache has no disk and costs nothing against the storage budget.</p>
+
+<div class="note"><span class="lbl">Queues &amp; what's next</span><p>The same primitive backs BullMQ-style job queues; a future slice pairs it with queue-scaled workers (a worker process that scales on queue depth). Cron-style scheduled jobs already exist via <a href="processes.html">app schedules</a>.</p></div>
+
+<div class="note"><span class="lbl">Audit</span><p><code>cache.create</code> and <code>cache.delete</code> are recorded in the audit trail; the password is never logged.</p></div>
+
+<div class="next">
+  <a href="buckets.html"><div class="d">← Back</div><div class="t">Buckets (object storage)</div></a>
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

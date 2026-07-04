@@ -24,6 +24,7 @@ export interface DeriveStatusInput {
   status?: ServerStatus | null;
   runtimeState?: "running" | "stopped" | null;
   appStatus?: AppStatus | null;
+  cacheStatus?: AppStatus | null; // (I2) cache Deployment status
   dbStatus?: DatabaseStatus | null;
 }
 
@@ -40,6 +41,18 @@ export function deriveStatus(input: DeriveStatusInput): NormalizedStatus {
 const APP_ERROR = /CrashLoopBackOff|ErrImagePull|ImagePullBackOff|InvalidImageName|CreateContainerConfigError|CreateContainerError|RunContainerError|StartError|OOMKilled|Error|Failed/i;
 const APP_PROGRESSING = /Pending|ContainerCreating|PodInitializing|Terminating|Init:/i;
 
+// Shared Deployment+pods → enum mapping (apps + caches); mirror of src/api/status.ts deploymentStatus.
+function deploymentStatus(st: AppStatus): NormalizedStatus {
+  const reason = st.reason || "";
+  if (APP_ERROR.test(reason)) return { status: "error", reason };
+  if (APP_PROGRESSING.test(reason)) return { status: "progressing", reason };
+  if (/NoPods/i.test(reason)) return st.replicas > 0 ? { status: "progressing", reason: "no pods yet" } : { status: "asleep", reason: "scaled to zero" };
+  if (st.replicas === 0) return { status: "asleep", reason: "scaled to zero" };
+  if (st.ready >= st.replicas) return { status: "running", reason: `${st.ready}/${st.replicas} ready` };
+  if (st.ready > 0) return { status: "degraded", reason: `${st.ready}/${st.replicas} ready` };
+  return { status: "progressing", reason: `0/${st.replicas} ready` };
+}
+
 export function mirrorNormalizeStatus(input: Omit<DeriveStatusInput, "status">): NormalizedStatus {
   if (input.type === "site") {
     return { status: "running", reason: "serving" };
@@ -49,6 +62,12 @@ export function mirrorNormalizeStatus(input: Omit<DeriveStatusInput, "status">):
     return { status: "running", reason: "ready" };
   }
 
+  if (input.type === "cache") {
+    const st = input.cacheStatus;
+    if (!st) return { status: "progressing", reason: "status unavailable" };
+    return deploymentStatus(st);
+  }
+
   if (input.type === "app") {
     if (input.runtimeState === "stopped") return { status: "stopped", reason: "stopped" };
     const st = input.appStatus;
@@ -56,15 +75,7 @@ export function mirrorNormalizeStatus(input: Omit<DeriveStatusInput, "status">):
     const reason = st.reason || "";
     if (/^Stopped$/i.test(reason)) return { status: "stopped", reason: "stopped" };
     if (/ScaledToZero/i.test(reason)) return { status: "asleep", reason: "scaled to zero" };
-    if (APP_ERROR.test(reason)) return { status: "error", reason };
-    if (APP_PROGRESSING.test(reason)) return { status: "progressing", reason };
-    if (/NoPods/i.test(reason)) {
-      return st.replicas > 0 ? { status: "progressing", reason: "no pods yet" } : { status: "asleep", reason: "scaled to zero" };
-    }
-    if (st.replicas === 0) return { status: "asleep", reason: "scaled to zero" };
-    if (st.ready >= st.replicas) return { status: "running", reason: `${st.ready}/${st.replicas} ready` };
-    if (st.ready > 0) return { status: "degraded", reason: `${st.ready}/${st.replicas} ready` };
-    return { status: "progressing", reason: `0/${st.replicas} ready` };
+    return deploymentStatus(st);
   }
 
   const st = input.dbStatus;

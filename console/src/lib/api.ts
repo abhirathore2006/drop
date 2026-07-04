@@ -2,7 +2,7 @@
 // Errors are thrown as ApiError so callers (and the query layer's 401 interceptor) can
 // branch on status.
 
-export type WorkloadType = "site" | "app" | "database" | "bucket";
+export type WorkloadType = "site" | "app" | "database" | "bucket" | "cache";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -34,12 +34,13 @@ export interface AdminOrg {
 
 export interface OrgUsage {
   org: { slug: string; name: string; kind: string };
-  workloads: { site: number; app: number; database: number; bucket: number; total: number };
+  workloads: { site: number; app: number; database: number; bucket: number; cache: number; total: number };
   cap: number; // 0 = unlimited
   quota: { hard: Record<string, string>; used: Record<string, string> } | null;
   storage?: {
     databases: { count: number; requestedBytes: number };
     buckets: { count: number; bytes: number };
+    caches: { count: number; bytes: number }; // (I2) persistent-cache PVC requests
     budget: number | null; // null = no budget configured
   };
 }
@@ -107,6 +108,20 @@ export interface BucketInfo {
   bytes: number;
   objects: number;
 }
+/** (I2) A managed cache's connection info + live status. Never carries the password. */
+export interface CacheInfo {
+  host: string;
+  port: number;
+  memory: string;
+  persistent: boolean;
+  status: AppStatus | null;
+}
+/** (I3) A database's connection-pooler state. */
+export interface PoolerInfo {
+  enabled: boolean;
+  mode?: string; // "transaction" | "session"
+  host?: string;
+}
 export interface Version {
   id: string;
   publishedBy: string;
@@ -166,8 +181,11 @@ export interface Detail {
     user: string;
     credentialsSecret: string;
     status: DatabaseStatus | null;
+    extensions?: string[]; // (I3) extensions created at bootstrap (from the stored config)
+    pooler?: PoolerInfo; // (I3) connection-pooler state
   };
   bucket?: BucketInfo;
+  cache?: CacheInfo; // (I2) present for type=cache
 }
 
 // ---- Stacks (B2/C1) ----
@@ -239,7 +257,7 @@ export interface TemplateResource {
   image?: string;
   dir?: string;
   env?: Record<string, string>;
-  uses?: { database?: string; bucket?: string }[];
+  uses?: { database?: string; bucket?: string; cache?: string }[];
   env_from?: { resource: string; as: string; output: string }[];
   storage?: string;
 }
@@ -297,6 +315,9 @@ export const api = {
   triggerDbBackup: (name: string) => req<{ backup: string }>("POST", `/v1/databases/${name}/backups`, {}),
   hibernateDb: (name: string) => req("POST", `/v1/databases/${name}/hibernate`, {}),
   wakeDb: (name: string) => req("POST", `/v1/databases/${name}/wake`, {}),
+  // (I3) connection pooling — enable emits a CNPG Pooler; disable deletes it.
+  setDbPooler: (name: string, enable: boolean, mode?: "transaction" | "session") =>
+    req<{ name: string; pooler: PoolerInfo }>("POST", `/v1/databases/${name}/pooler`, { enable, ...(mode ? { mode } : {}) }),
   rotateBucket: (name: string) =>
     req<{ name: string; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretAccessKey: string }>("POST", `/v1/buckets/${name}/rotate`, {}),
   addCollaborator: (name: string, email: string) => req("POST", `/v1/sites/${name}/collaborators`, { email }),
@@ -354,8 +375,8 @@ export function templatePreviewGraph(spec: TemplateSpec): StackGraph {
   for (const [key, res] of Object.entries(spec.resources)) {
     if (res.type === "app")
       for (const u of res.uses ?? []) {
-        const target = u.database ?? u.bucket;
-        if (target && keys.has(target)) edges.push({ from: target, to: key, kind: "uses", label: u.database ? "PG*" : "S3_*" });
+        const target = u.database ?? u.bucket ?? u.cache;
+        if (target && keys.has(target)) edges.push({ from: target, to: key, kind: "uses", label: u.database ? "PG*" : u.bucket ? "S3_*" : "REDIS_URL" });
       }
     if (res.type === "site") for (const e of res.env_from ?? []) if (keys.has(e.resource)) edges.push({ from: e.resource, to: key, kind: "env_from", label: "URL at publish" });
   }

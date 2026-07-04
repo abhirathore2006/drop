@@ -1354,7 +1354,7 @@ test("usage: workload counts + cap + cluster quota for an org", async () => {
   await call(app, "POST", "/v1/databases/pg1", "alice", {}); // database
   const slug = await personalSlug(app, "alice");
   const u = await (await call(app, "GET", `/v1/orgs/${slug}/usage`, "alice")).json();
-  expect(u.workloads).toEqual({ site: 1, app: 1, database: 1, bucket: 0, total: 3 });
+  expect(u.workloads).toEqual({ site: 1, app: 1, database: 1, bucket: 0, cache: 0, total: 3 });
   expect(u.cap).toBe(0); // unlimited by default
   expect(u.quota.hard["count/pods"]).toBe("20"); // FakeKube default quota
   await db.destroy();
@@ -1963,6 +1963,168 @@ test("org usage gains a storage section (databases + buckets + budget)", async (
   await call(app, "PUT", "/v1/admin/orgs/team/quotas", "alice", { quotas: { storage_budget_bytes: "10Gi" } });
   const usage2 = await (await call(app, "GET", "/v1/orgs/team/usage", "alice")).json();
   expect(usage2.storage.budget).toBe(10 * 2 ** 30);
+  await db.destroy();
+});
+
+// ---- (I2) managed cache (Valkey) --------------------------------------------------------------
+test("cache create returns REDIS_URL (password embedded) ONCE; detail exposes host/memory but NEVER the password; audited", async () => {
+  const { app, kube, meta, audit, db } = await mk();
+  const res = await call(app, "POST", "/v1/caches/sessions", "alice", { memory: "128Mi" });
+  expect(res.status).toBe(200);
+  const created = await res.json();
+  expect(created.name).toBe("sessions");
+  expect(created.memory).toBe("128Mi");
+  expect(created.persistent).toBe(false);
+  expect(created.host).toMatch(/^sessions\..+\.svc\.cluster\.local$/);
+  expect(created.url).toMatch(/^redis:\/\/:.+@sessions\..+\.svc\.cluster\.local:6379$/);
+  // the password embedded in the URL is what FakeKube stored for the applied cache
+  const ns = (await meta.getSitePlain("sessions"))!.namespace;
+  const password = decodeURIComponent(created.url.slice("redis://:".length, created.url.indexOf("@")));
+  expect(await kube.readCachePassword(ns, "sessions")).toBe(password);
+
+  // the applied manifest set: Deployment + Service + Secret (create) — no PVC (ephemeral)
+  const applied = kube.cacheApplies.find((a) => a.name === "sessions")!.manifests;
+  expect(applied.deployment).toBeDefined();
+  expect(applied.service).toBeDefined();
+  expect((applied.secret as any).stringData.password).toBe(password);
+  expect(applied.pvc).toBeUndefined();
+
+  // detail: host/port/memory/persistent + running status; the password NEVER appears
+  const detail = await (await call(app, "GET", "/v1/sites/sessions", "alice")).json();
+  expect(detail.type).toBe("cache");
+  expect(detail.cache.port).toBe(6379);
+  expect(detail.cache.memory).toBe("128Mi");
+  expect(detail.cache.persistent).toBe(false);
+  expect(detail.status.status).toBe("running"); // FakeKube healthy Deployment default
+  expect(JSON.stringify(detail)).not.toContain(password);
+
+  const trail = await audit.list({ action: "cache.create" });
+  expect(trail.entries.map((e: any) => e.target)).toContain("sessions");
+  await db.destroy();
+});
+
+test("cache delete tears down the Valkey (Deployment/Service/Secret + PVC); audited", async () => {
+  const { app, kube, meta, audit, db } = await mk();
+  await call(app, "POST", "/v1/caches/cache1", "alice", { persistent: true });
+  const res = await call(app, "DELETE", "/v1/sites/cache1", "alice");
+  expect(res.status).toBe(200);
+  expect(kube.cacheDeletes.map((d) => d.name)).toContain("cache1");
+  expect(await meta.getSitePlain("cache1")).toBeNull();
+  const trail = await audit.list({ action: "cache.delete" });
+  expect(trail.entries.map((e: any) => e.target)).toContain("cache1");
+  await db.destroy();
+});
+
+test("cache binding: deploy uses:[{cache}] writes REDIS_URL into the app's write-only secret (never a manifest)", async () => {
+  const { app, kube, meta, secrets, db } = await mk();
+  await call(app, "POST", "/v1/caches/kv", "alice", {});
+  const deploy = await call(app, "POST", "/v1/apps/worker", "alice", { image: "x:1", uses: [{ cache: "kv" }] });
+  expect(deploy.status).toBe(200);
+  // REDIS_URL landed in an app secret bag with the cache's password + in-namespace host
+  const bags = [...secrets.values.values()];
+  const bag = bags.find((m) => m.has("REDIS_URL"))!;
+  expect(bag).toBeTruthy();
+  const url = bag.get("REDIS_URL")!;
+  expect(url).toMatch(/^redis:\/\/:.+@kv\..+\.svc\.cluster\.local:6379$/);
+  // the password in REDIS_URL matches what the container reads (single source of truth: the Secret)
+  const ns = (await meta.getSitePlain("kv"))!.namespace;
+  const password = decodeURIComponent(url.slice("redis://:".length, url.indexOf("@")));
+  expect(await kube.readCachePassword(ns, "kv")).toBe(password);
+  // it never leaked into the app Deployment's manifest
+  const applied = kube.applies.find((a) => a.name === "worker")!.manifests;
+  expect(JSON.stringify(applied)).not.toContain(password);
+  await db.destroy();
+});
+
+test("cache binding referencing a missing cache → 400; a cache in a DIFFERENT org → 400", async () => {
+  const { app, db } = await mk();
+  const missing = await call(app, "POST", "/v1/apps/a1", "alice", { image: "x:1", uses: [{ cache: "ghostcache" }] });
+  expect(missing.status).toBe(400);
+  expect((await missing.json()).error).toContain("ghostcache");
+
+  await call(app, "POST", "/v1/caches/alicecache", "alice", {}); // alice's personal org
+  const crossOrg = await call(app, "POST", "/v1/apps/bobapp", "bob", { image: "x:1", uses: [{ cache: "alicecache" }] });
+  expect(crossOrg.status).toBe(400);
+  expect((await crossOrg.json()).error).toContain("different organisation");
+  await db.destroy();
+});
+
+test("storage budget: a PERSISTENT cache counts toward the budget (ephemeral does not)", async () => {
+  const { app, db } = await mk({ admins: ["alice@example.com"] });
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "team", name: "Team" });
+  await call(app, "PUT", "/v1/admin/orgs/team/quotas", "alice", { quotas: { storage_budget_bytes: "256Mi" } });
+  // an ephemeral cache costs no storage → allowed even at a tiny budget
+  expect((await call(app, "POST", "/v1/caches/eph?org=team", "alice", { memory: "256Mi" })).status).toBe(200);
+  // a persistent cache whose PVC (512Mi) exceeds the remaining budget → 429
+  const over = await call(app, "POST", "/v1/caches/big?org=team", "alice", { memory: "512Mi", persistent: true });
+  expect(over.status).toBe(429);
+  expect((await over.json()).error).toMatch(/storage budget exceeded/);
+  // org usage surfaces the caches storage section
+  const usage = await (await call(app, "GET", "/v1/orgs/team/usage", "alice")).json();
+  expect(usage.workloads.cache).toBe(1); // only the ephemeral one claimed
+  expect(usage.storage.caches).toEqual({ count: 0, bytes: 0 }); // ephemeral → 0 persistent PVCs
+  await db.destroy();
+});
+
+// ---- (I3) extensions + pooler -----------------------------------------------------------------
+test("db create --ext renders postInitApplicationSQL; unknown extension → 400; ext ls reads the stored config; ext add → 409", async () => {
+  const { app, kube, db } = await mk();
+  // unknown extension rejected up front
+  const bad = await call(app, "POST", "/v1/databases/vecdb", "alice", { extensions: ["mystery"] });
+  expect(bad.status).toBe(400);
+  expect((await bad.json()).error).toMatch(/not allowed/);
+
+  // create with allowlisted extensions → CREATE EXTENSION in the CNPG bootstrap
+  const ok = await call(app, "POST", "/v1/databases/vecdb", "alice", { extensions: ["pgvector", "pg_trgm"] });
+  expect(ok.status).toBe(200);
+  const cluster = kube.dbApplies.find((a) => a.name === "vecdb")!.manifests.cluster as any;
+  expect(cluster.spec.bootstrap.initdb.postInitApplicationSQL).toEqual([
+    "CREATE EXTENSION IF NOT EXISTS vector;",
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
+  ]);
+  // ext ls (via detail) reflects the stored list
+  const detail = await (await call(app, "GET", "/v1/sites/vecdb", "alice")).json();
+  expect(detail.database.extensions).toEqual(["pgvector", "pg_trgm"]);
+  // ext add on an existing db is an honest 409 (v1 limitation)
+  const add = await call(app, "POST", "/v1/databases/vecdb/extensions", "alice", { add: ["citext"] });
+  expect(add.status).toBe(409);
+  expect((await add.json()).error).toMatch(/v1 limitation/);
+  await db.destroy();
+});
+
+test("pooler enable emits a CNPG Pooler; detail surfaces it; disable deletes it; both audited", async () => {
+  const { app, kube, audit, db } = await mk();
+  await call(app, "POST", "/v1/databases/pgdb", "alice", {});
+  // enable (transaction mode)
+  const en = await call(app, "POST", "/v1/databases/pgdb/pooler", "alice", { enable: true, mode: "transaction" });
+  expect(en.status).toBe(200);
+  expect((await en.json()).pooler).toEqual({ enabled: true, mode: "transaction", host: expect.stringContaining("pgdb-pooler-rw.") });
+  const pooler = kube.poolerApplies.at(-1)!.manifest as any;
+  expect(pooler.kind).toBe("Pooler");
+  expect(pooler.metadata.name).toBe("pgdb-pooler-rw");
+  expect(pooler.spec.pgbouncer.poolMode).toBe("transaction");
+  // detail surfaces pooler state
+  const detail = await (await call(app, "GET", "/v1/sites/pgdb", "alice")).json();
+  expect(detail.database.pooler).toEqual({ enabled: true, mode: "transaction", host: expect.stringContaining("pgdb-pooler-rw.") });
+  // disable
+  const dis = await call(app, "POST", "/v1/databases/pgdb/pooler", "alice", { enable: false });
+  expect(dis.status).toBe(200);
+  expect(kube.poolerDeletes.map((d) => d.dbName)).toContain("pgdb");
+  const detail2 = await (await call(app, "GET", "/v1/sites/pgdb", "alice")).json();
+  expect(detail2.database.pooler).toEqual({ enabled: false });
+  // both actions audited
+  expect((await audit.list({ action: "db.pooler.enable" })).entries.map((e: any) => e.target)).toContain("pgdb");
+  expect((await audit.list({ action: "db.pooler.disable" })).entries.map((e: any) => e.target)).toContain("pgdb");
+  await db.destroy();
+});
+
+test("deploy uses:[{database, via: pooler}] wires PGHOST at the pooler Service", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/databases/maindb", "alice", {});
+  const res = await call(app, "POST", "/v1/apps/webapi", "alice", { image: "x:1", uses: [{ database: "maindb", via: "pooler" }] });
+  expect(res.status).toBe(200);
+  const ctr = (kube.applies.find((a) => a.name === "webapi")!.manifests.deployment as any).spec.template.spec.containers[0];
+  expect(ctr.env).toContainEqual({ name: "PGHOST", value: "maindb-pooler-rw" });
   await db.destroy();
 });
 

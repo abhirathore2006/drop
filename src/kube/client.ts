@@ -18,7 +18,8 @@ import {
   type ReleaseResult,
 } from "./types.ts";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
-import { databaseBackupManifest, databasePasswordJob, DEFAULT_OPERAND_IMAGE, PWSET_SECRET, type DatabaseManifests } from "./cnpg.ts";
+import { databaseBackupManifest, databasePasswordJob, DEFAULT_OPERAND_IMAGE, PWSET_SECRET, poolerName, type DatabaseManifests } from "./cnpg.ts";
+import type { CacheManifests } from "./valkey.ts";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -297,6 +298,56 @@ export class KubeApiClient implements KubeClient {
     await this.call("DELETE", this.secretPath(namespace, `${name}-backup-creds`));
     await this.call("DELETE", this.secretPath(namespace, `${name}-app`)); // platform-owned creds (bootstrap.initdb + password rotation)
     await this.call("DELETE", this.secretPath(namespace, PWSET_SECRET(name))); // reap a crash-orphaned rotation Secret
+  }
+
+  // --- (I2) managed cache (Valkey) -------------------------------------------------------------
+  private pvcPath = (ns: string, n: string) => `/api/v1/namespaces/${ns}/persistentvolumeclaims/${n}`;
+
+  async applyCache(namespace: string, name: string, m: CacheManifests): Promise<void> {
+    // requirepass Secret + PVC (when persistent) FIRST — the Deployment's secretKeyRef/volume resolve
+    // at pod start. The Secret is emitted only at create (m.secret); on a re-apply it already exists.
+    if (m.secret) await this.apply(this.secretPath(namespace, this.objName(m.secret)), m.secret as Record<string, unknown>);
+    if (m.pvc) await this.apply(this.pvcPath(namespace, this.objName(m.pvc)), m.pvc as Record<string, unknown>);
+    await this.apply(this.deploymentPath(namespace, name), m.deployment as Record<string, unknown>);
+    await this.apply(this.servicePath(namespace, name), m.service as Record<string, unknown>);
+  }
+
+  async deleteCache(namespace: string, name: string): Promise<void> {
+    await this.call("DELETE", this.servicePath(namespace, name));
+    await this.call("DELETE", this.deploymentPath(namespace, name));
+    await this.call("DELETE", this.secretPath(namespace, `${name}-cache`));
+    // A cache delete ALWAYS wipes data — there is no cache backup; drop the PVC too (404 if ephemeral).
+    await this.call("DELETE", this.pvcPath(namespace, `${name}-cache-data`));
+  }
+
+  async getCacheStatus(namespace: string, name: string): Promise<AppStatus | null> {
+    // A cache is a plain Deployment labelled like an app (app.kubernetes.io/name=<name>) — reuse the
+    // app-status path verbatim (replicas/ready + the pod restart/crash reason).
+    return this.getAppStatus(namespace, name);
+  }
+
+  async readCachePassword(namespace: string, name: string): Promise<string | null> {
+    const r = await this.call("GET", this.secretPath(namespace, `${name}-cache`));
+    if (r.status === 404) return null;
+    if (r.status >= 300) throw new Error(`readCachePassword ${name} -> ${r.status}`);
+    const b64 = ((JSON.parse(r.body).data ?? {}) as Record<string, string>).password;
+    return b64 ? Buffer.from(b64, "base64").toString("utf8") : null;
+  }
+
+  // --- (I3) CNPG Pooler (PgBouncer connection pooling) ------------------------------------------
+  private poolerPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/poolers/${n}`;
+  async applyPooler(namespace: string, manifest: Record<string, unknown>): Promise<void> {
+    await this.assertCrd("postgresql.cnpg.io"); // the CNPG operator serves the Pooler CRD
+    await this.apply(this.poolerPath(namespace, this.objName(manifest)), manifest);
+  }
+  async deletePooler(namespace: string, dbName: string): Promise<void> {
+    await this.call("DELETE", this.poolerPath(namespace, poolerName(dbName)));
+  }
+  async getPooler(namespace: string, dbName: string): Promise<{ mode: string } | null> {
+    const r = await this.call("GET", this.poolerPath(namespace, poolerName(dbName)));
+    if (r.status >= 300) return null;
+    const mode = (JSON.parse(r.body).spec?.pgbouncer?.poolMode as string) || "transaction";
+    return { mode };
   }
 
   // --- generic per-key Secret mutations (used by KubeSecretStore for app secrets) ---

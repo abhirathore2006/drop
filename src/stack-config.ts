@@ -21,8 +21,9 @@ import {
   type AppProcess,
 } from "./app-config.ts";
 import { sanitizeDatabaseConfig, type Hibernation } from "./db-config.ts";
+import { sanitizeCacheConfig } from "./cache-config.ts";
 
-export type StackResourceKind = "site" | "app" | "database" | "bucket";
+export type StackResourceKind = "site" | "app" | "database" | "bucket" | "cache";
 
 /** A2 opt-in TCP exposure, carried in the spec (parsed + stored now; enforced by A2 later). */
 export interface StackExpose {
@@ -67,6 +68,10 @@ export interface StackResource {
   // --- database ---
   storage?: string;
   hibernation?: Hibernation;
+
+  // --- cache (I2) ---
+  memory?: string;
+  persistent?: boolean;
 }
 
 export interface StackSpec {
@@ -136,6 +141,16 @@ function sanitizeBucket(sub: Record<string, unknown>): StackResource {
   return res;
 }
 
+/** Sanitize a `cache`-typed stack resource by REUSING `sanitizeCacheConfig` (memory clamp + persistent
+ *  default). A cache carries no content, so no `dir`/`env`. */
+function sanitizeCache(sub: Record<string, unknown>): StackResource | undefined {
+  const cc = sanitizeCacheConfig(sub);
+  if (!cc) return undefined;
+  const res: StackResource = { type: "cache", memory: cc.memory, persistent: cc.persistent };
+  if (cc.name && validateName(cc.name) === null) res.name = cc.name;
+  return res;
+}
+
 /** Sanitize a `site`-typed stack resource. Site routing config (redirects/headers/…) lives in the
  *  published bundle's OWN drop.yaml `site:` section — the stack spec carries only wiring: the build
  *  context (`dir`), a static `env`, and `env_from` edges (publish-time substitution from an app). */
@@ -184,6 +199,7 @@ export function sanitizeStackConfig(input: unknown): StackSpec | undefined {
     if (type === "app") res = sanitizeApp(sub);
     else if (type === "database") res = sanitizeDb(sub);
     else if (type === "bucket") res = sanitizeBucket(sub);
+    else if (type === "cache") res = sanitizeCache(sub);
     else if (type === "site") res = sanitizeSite(sub);
     else continue; // unknown/absent type → ignore the entry
     if (res) resources[key] = res;
@@ -209,6 +225,10 @@ export function validateStackEdges(spec: StackSpec): string | null {
           const t = spec.resources[u.bucket];
           if (!t) return `app "${key}" uses bucket "${u.bucket}", which is not a resource in this stack`;
           if (t.type !== "bucket") return `app "${key}" uses "${u.bucket}", which is a ${t.type}, not a bucket`;
+        } else if (u.cache) {
+          const t = spec.resources[u.cache];
+          if (!t) return `app "${key}" uses cache "${u.cache}", which is not a resource in this stack`;
+          if (t.type !== "cache") return `app "${key}" uses "${u.cache}", which is a ${t.type}, not a cache`;
         }
       }
     } else if (res.type === "site") {

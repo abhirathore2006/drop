@@ -49,6 +49,17 @@ function sweep(): NormalizeStatusInput[] {
       }
     }
   }
+  // (I2) caches — always-on single-replica Deployments (no runtimeState/scale-to-zero).
+  inputs.push({ type: "cache", cacheStatus: null });
+  for (const reason of appReasons) {
+    for (const [replicas, ready] of [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ] as const) {
+      inputs.push({ type: "cache", cacheStatus: { replicas, ready, restarts: 0, reason } });
+    }
+  }
   inputs.push({ type: "database", dbStatus: null });
   for (const hibernated of [true, false]) {
     for (const phase of dbPhases) {

@@ -13,7 +13,7 @@ async function fix() {
 }
 
 // claim a resource into the owner's personal org (the FK chain needs the org to exist first).
-async function claim(t: { meta: MetaStore; orgs: OrgStore }, name: string, owner: string, type: "site" | "app" | "database" = "site") {
+async function claim(t: { meta: MetaStore; orgs: OrgStore }, name: string, owner: string, type: "site" | "app" | "database" | "cache" = "site") {
   const o = await t.orgs.ensurePersonalOrg(owner);
   return t.meta.claimSite(name, owner, type, { id: o.id, namespace: o.namespace });
 }
@@ -141,11 +141,12 @@ test("countSitesInOrg + orgWorkloadCounts by type", async () => {
   await claim({ meta, orgs }, "a1", "alice@x.com", "app");
   await claim({ meta, orgs }, "a2", "alice@x.com", "app");
   await claim({ meta, orgs }, "d1", "alice@x.com", "database");
-  expect(await meta.countSitesInOrg(o.id)).toBe(4);
-  expect(await meta.orgWorkloadCounts(o.id)).toEqual({ site: 1, app: 2, database: 1, bucket: 0, total: 4 });
+  await claim({ meta, orgs }, "k1", "alice@x.com", "cache");
+  expect(await meta.countSitesInOrg(o.id)).toBe(5);
+  expect(await meta.orgWorkloadCounts(o.id)).toEqual({ site: 1, app: 2, database: 1, bucket: 0, cache: 1, total: 5 });
   // a different org with nothing in it
   const empty = await orgs.ensurePersonalOrg("bob@x.com");
   expect(await meta.countSitesInOrg(empty.id)).toBe(0);
-  expect(await meta.orgWorkloadCounts(empty.id)).toEqual({ site: 0, app: 0, database: 0, bucket: 0, total: 0 });
+  expect(await meta.orgWorkloadCounts(empty.id)).toEqual({ site: 0, app: 0, database: 0, bucket: 0, cache: 0, total: 0 });
   await db.destroy();
 });

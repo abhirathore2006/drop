@@ -9,7 +9,7 @@ import { loadConfig, saveConfig, resolveApiBase, resolveUpdateUrl } from "./conf
 import { Client } from "./client.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
-import { resolveSiteName, loadAppDeploy, loadDatabaseCreate } from "./resolve-name.ts";
+import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate } from "./resolve-name.ts";
 import { buildAndPushImage } from "./build-push.ts";
 import { runStackUp } from "./stack.ts";
 import { parseStackConfig } from "../stack-config.ts";
@@ -436,10 +436,16 @@ export function buildProgram(): Command {
     .command("create <name> [dir]")
     .description("Create a managed Postgres database (reads the database: section from dir/drop.yaml if present)")
     .option("--org <slug>", "create in this organisation (default: your personal org)")
-    .action(async (name: string, dir: string | undefined, opts: { org?: string }) => {
+    .option("--ext <list>", "comma-separated Postgres extensions to create at bootstrap (e.g. pgvector,pg_trgm) — allowlisted; create-time only")
+    .action(async (name: string, dir: string | undefined, opts: { org?: string; ext?: string }) => {
       const err = validateName(name);
       if (err) throw new Error(err);
       const cfg = await loadDatabaseCreate(dir ?? ".");
+      // (I3) `--ext a,b` merges into the config's extensions (server validates against the allowlist).
+      if (opts.ext) {
+        const exts = opts.ext.split(",").map((s) => s.trim()).filter(Boolean);
+        if (exts.length) (cfg as Record<string, unknown>).extensions = exts;
+      }
       console.log(`  ▸ creating database ${name}…`);
       const res = await (await client()).dbCreate(name, cfg, opts.org);
       console.log(`  ✓ ${res.engine} ready`);
@@ -524,6 +530,77 @@ export function buildProgram(): Command {
       if (res.tcp.sslmode) console.log(`     ${res.tcp.sslmode}`);
       if (res.note) console.log(`     note: ${res.note}`);
     });
+
+  // (I3) connection pooling (CNPG Pooler / PgBouncer)
+  const pooler = db.command("pooler").description("Manage the database's connection pooler (PgBouncer)");
+  pooler
+    .command("enable <name>")
+    .description("Enable a PgBouncer connection pooler for the database (bind apps with `uses: [{ database, via: pooler }]`)")
+    .option("--mode <mode>", "pool mode: transaction (default) or session", "transaction")
+    .action(async (name: string, opts: { mode?: string }) => {
+      const mode = opts.mode === "session" ? "session" : "transaction";
+      const res = (await (await client()).dbPooler(name, true, mode)) as { pooler: { mode: string; host: string } };
+      console.log(`  ✓ pooler enabled for ${name} (${res.pooler.mode} mode)`);
+      console.log(`     host: ${res.pooler.host}  — apps bound with via: pooler route PGHOST here`);
+    });
+  pooler
+    .command("disable <name>")
+    .description("Disable (delete) the database's connection pooler")
+    .action(async (name: string) => {
+      await (await client()).dbPooler(name, false);
+      console.log(`  ✓ pooler disabled for ${name}`);
+    });
+
+  // (I3) extensions — create-time only; `ext add` on an existing db 409s honestly.
+  const ext = db.command("ext").description("Manage the database's Postgres extensions (create-time only)");
+  ext
+    .command("ls <name>")
+    .description("List the extensions created on the database (from the stored config)")
+    .action(async (name: string) => {
+      const info = (await (await client()).info(name)) as { database?: { extensions?: string[] } };
+      const exts = info.database?.extensions ?? [];
+      console.log(exts.length ? `  ${exts.join(", ")}` : "  (none)");
+    });
+  ext
+    .command("add <name> <extensions>")
+    .description("Add extensions to an EXISTING database — v1 limitation: extensions are create-time only (recreate with --ext)")
+    .action(async (name: string, extensions: string) => {
+      const exts = extensions.split(",").map((s) => s.trim()).filter(Boolean);
+      await (await client()).dbExtAdd(name, exts); // server returns a clear 409
+    });
+
+  // ---- caches (managed Valkey, I2) ----
+  const cache = program.command("cache").description("Manage managed caches (Valkey — create / ls / rm)");
+  cache
+    .command("create <name> [dir]")
+    .description("Create a managed Valkey cache (EPHEMERAL by default — a restart loses data unless --persistent). Reads cache: from dir/drop.yaml if present.")
+    .option("--org <slug>", "create in this organisation (default: your personal org)")
+    .option("--memory <size>", "memory (a k8s quantity, 64Mi–1Gi; default 256Mi)")
+    .option("--persistent", "add a small PVC so data survives restarts (default: ephemeral)")
+    .action(async (name: string, dir: string | undefined, opts: { org?: string; memory?: string; persistent?: boolean }) => {
+      const err = validateName(name);
+      if (err) throw new Error(err);
+      const cfg = (await loadCacheCreate(dir ?? ".")) as Record<string, unknown>;
+      if (opts.memory) cfg.memory = opts.memory;
+      if (opts.persistent) cfg.persistent = true;
+      console.log(`  ▸ creating cache ${name}…`);
+      const res = (await (await client()).cacheCreate(name, cfg as never, opts.org)) as {
+        memory: string; persistent: boolean; host: string; port: number; url: string;
+      };
+      console.log(`  ✓ cache ready — ${res.memory}, ${res.persistent ? "persistent" : "EPHEMERAL (a restart loses all data)"}`);
+      console.log(`     host: ${res.host}:${res.port}`);
+      console.log(`  ✓ connection URL — shown once, store it now (or bind with \`uses: [{ cache: ${name} }]\` to inject REDIS_URL automatically):`);
+      console.log(`     ${res.url}`);
+    });
+  cache
+    .command("ls")
+    .description("List your caches")
+    .option("--org <slug>", "show only caches in this organisation")
+    .action(async (opts: { org?: string }) => show(await (await client()).cacheList(opts.org)));
+  cache
+    .command("rm <name>")
+    .description("Delete a cache (tears down the Valkey + its data — there is no cache backup)")
+    .action(async (name: string) => show(await (await client()).remove(name)));
 
   // ---- buckets (tenant object storage, I1) ----
   const bucket = program.command("bucket").description("Manage object-storage buckets (create / ls / rotate / rm)");

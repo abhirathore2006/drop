@@ -14,9 +14,48 @@ export interface DatabaseConfig {
   engine: DatabaseEngine; // v1 pins to the repo-standard Postgres major
   storage: string; // PVC size, a k8s quantity (e.g. "10Gi")
   hibernation: Hibernation; // "scheduled" opts into the idle-shutdown CronJob (cost intent)
+  extensions?: string[]; // (I3) Postgres extensions to CREATE at bootstrap (allowlisted); omitted when none
 }
 
 const ENGINE: DatabaseEngine = "postgres-18";
+
+// (I3) The platform allowlist of Postgres extensions a tenant may request at CREATE time. Overridable
+// via config (DROP_DB_EXTENSION_ALLOWLIST). pgvector is the single highest-demand extension (internal
+// AI tools are exactly Drop's audience); the rest are broadly useful + safe (no shared_preload needed).
+export const DEFAULT_DB_EXTENSION_ALLOWLIST = ["pgvector", "pg_trgm", "pgcrypto", "citext"];
+// The SQL extension NAME per friendly name — pgvector's `CREATE EXTENSION` name is `vector`, not
+// `pgvector`. Everything else is its own SQL name. (Kept honest against the actual pg extension names.)
+const EXTENSION_SQL_NAME: Record<string, string> = { pgvector: "vector" };
+
+/** The `CREATE EXTENSION`-able SQL name for a friendly extension name (pgvector → vector). */
+export function extensionSqlName(ext: string): string {
+  return EXTENSION_SQL_NAME[ext] ?? ext;
+}
+
+/** Validate a requested `extensions` list against the platform allowlist. Returns an error string
+ *  (for a 400), or null when acceptable (including when none is requested). Accepts the `extensions`
+ *  key (and the `ext` alias, so `--ext` maps straight through). Run at the CLI/control-plane boundary. */
+export function validateDbExtensions(input: unknown, allowlist: string[] = DEFAULT_DB_EXTENSION_ALLOWLIST): string | null {
+  if (input == null || typeof input !== "object") return null;
+  const raw = (input as Record<string, unknown>).extensions ?? (input as Record<string, unknown>).ext;
+  if (raw == null) return null;
+  if (!Array.isArray(raw)) return "extensions must be an array of extension names";
+  const allow = new Set(allowlist);
+  for (const e of raw) {
+    if (typeof e !== "string") return "extensions must be extension-name strings";
+    if (!allow.has(e)) return `extension "${e}" is not allowed — the platform allowlist is: ${allowlist.join(", ")}`;
+  }
+  return null;
+}
+
+/** Filter a raw extensions value to the allowlisted, deduped, order-preserving list. Junk → []. */
+function sanitizeExtensions(raw: unknown, allowlist: string[]): string[] {
+  if (!Array.isArray(raw)) return [];
+  const allow = new Set(allowlist);
+  const out: string[] = [];
+  for (const e of raw) if (typeof e === "string" && allow.has(e) && !out.includes(e)) out.push(e);
+  return out;
+}
 // Per-database storage cap (interim, until the full app+tenant quota system — see Future.md).
 // A hard ceiling on the PVC a database may request; the default sits at the cap.
 export const MAX_DB_STORAGE = "1Gi";
@@ -56,11 +95,21 @@ function str(v: unknown, max = 2048): string | undefined {
  * no required field — sensible defaults stand in). The "is there a database section?"
  * decision lives in parseDatabaseConfig (key presence).
  */
-export function sanitizeDatabaseConfig(input: unknown, capBytes: number = MAX_DB_STORAGE_BYTES): DatabaseConfig | undefined {
+export function sanitizeDatabaseConfig(
+  input: unknown,
+  capBytes: number = MAX_DB_STORAGE_BYTES,
+  extensionAllowlist: string[] = DEFAULT_DB_EXTENSION_ALLOWLIST,
+): DatabaseConfig | undefined {
   if (input != null && typeof input !== "object") return undefined;
   const raw = (input ?? {}) as Record<string, unknown>;
 
   const cfg: DatabaseConfig = { engine: ENGINE, storage: DEFAULT_STORAGE, hibernation: "none" };
+
+  // (I3) extensions: CREATE-time only (postInitApplicationSQL). Accept the `extensions` key AND the
+  // `ext` alias (so `--ext a,b` maps straight through); keep only allowlisted names — the loud
+  // rejection of a disallowed one is validateDbExtensions at the CLI/control-plane boundary.
+  const exts = sanitizeExtensions(raw.extensions ?? raw.ext, extensionAllowlist);
+  if (exts.length) cfg.extensions = exts;
 
   const name = str(raw.name, 63);
   if (name && validateName(name) === null) cfg.name = name;

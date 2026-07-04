@@ -211,7 +211,11 @@ function appBinding(app: AppConfig, name: string): AppBinding {
   // mount the cluster CA (`<db>-ca`, ca.crt ONLY — never the CA private key) read-only, and turn
   // on full TLS verification. The `<db>-app`/`<db>-ca` Secrets are namespace-scoped, so this only
   // resolves when the DB shares the app's namespace — the API enforces same-org before we get here.
-  const boundDbs = app.uses?.map((u) => u.database) ?? [];
+  // Only the database uses matter for the CNPG binding (bucket/cache uses inject their env via the
+  // write-only secret path at deploy, not here). Keep the full use entries so `via: "pooler"` (I3) can
+  // flip PGHOST at the pooler Service.
+  const boundUses = app.uses?.filter((u) => u.database) ?? [];
+  const boundDbs = boundUses.map((u) => u.database!);
   return {
     // Sources, in order:
     //  - <db>-app: each bound database's CNPG creds Secret (app.uses) — the base layer.
@@ -231,6 +235,11 @@ function appBinding(app: AppConfig, name: string): AppBinding {
       ? [
           { name: "PGSSLMODE", value: "verify-full" },
           { name: "PGSSLROOTCERT", value: `${DB_CA_MOUNT_BASE}/${boundDbs[0]}/ca.crt` },
+          // (I3) `via: "pooler"` → route PGHOST at the CNPG Pooler Service (`<db>-pooler-rw`) instead of
+          // the primary. Container `env` (not envFrom) so it WINS over any PGHOST the `<db>-app`/config
+          // Secrets carry — the exact precedence trick PGSSLMODE uses. PG* is single-connection, so v1
+          // applies this to the FIRST bound db when it declares via:pooler.
+          ...(boundUses[0]!.via === "pooler" ? [{ name: "PGHOST", value: `${boundDbs[0]}-pooler-rw` }] : []),
         ]
       : [],
     volumes: boundDbs.map((db) => ({ name: `db-ca-${db}`, secret: { secretName: `${db}-ca`, items: [{ key: "ca.crt", path: "ca.crt" }] } })),

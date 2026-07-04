@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { databaseManifests, databasePasswordJob } from "./cnpg.ts";
+import { databaseManifests, databasePasswordJob, poolerManifest, poolerName } from "./cnpg.ts";
 import type { DatabaseConfig } from "../db-config.ts";
 
 const base: DatabaseConfig = { engine: "postgres-18", storage: "10Gi", hibernation: "none" };
@@ -181,4 +181,30 @@ test("databaseManifests: hibernation:scheduled labels the Cluster for the idle C
   expect(off.metadata.labels["drop.dev/hibernation"]).toBe("none");
   const on = databaseManifests({ ...base, hibernation: "scheduled" }, localCtx).cluster as any;
   expect(on.metadata.labels["drop.dev/hibernation"]).toBe("scheduled");
+});
+
+// ---- (I3) extensions + pooler ----------------------------------------------------------------
+test("databaseManifests: extensions render as postInitApplicationSQL CREATE EXTENSION (pgvector → vector)", () => {
+  const m = databaseManifests({ ...base, extensions: ["pgvector", "pg_trgm"] }, localCtx);
+  const initdb = (m.cluster as any).spec.bootstrap.initdb;
+  expect(initdb.postInitApplicationSQL).toEqual([
+    "CREATE EXTENSION IF NOT EXISTS vector;",
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
+  ]);
+});
+
+test("databaseManifests: no extensions → no postInitApplicationSQL key", () => {
+  const m = databaseManifests(base, localCtx);
+  expect((m.cluster as any).spec.bootstrap.initdb.postInitApplicationSQL).toBeUndefined();
+});
+
+test("poolerManifest: CNPG Pooler (rw, one instance) named <db>-pooler-rw with the pgbouncer pool mode", () => {
+  const p = poolerManifest({ name: "billing-db", namespace: "drop-t-alice", mode: "transaction" });
+  expect(poolerName("billing-db")).toBe("billing-db-pooler-rw");
+  expect(p.apiVersion).toBe("postgresql.cnpg.io/v1");
+  expect(p.kind).toBe("Pooler");
+  expect((p.metadata as any).name).toBe("billing-db-pooler-rw");
+  expect((p.spec as any)).toEqual({ cluster: { name: "billing-db" }, instances: 1, type: "rw", pgbouncer: { poolMode: "transaction" } });
+  // session mode is carried through
+  expect((poolerManifest({ name: "billing-db", namespace: "ns", mode: "session" }).spec as any).pgbouncer.poolMode).toBe("session");
 });

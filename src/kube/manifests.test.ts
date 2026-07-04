@@ -207,6 +207,25 @@ test("appManifests: uses binds a db — envFrom <db>-app + CA volume/mount + ver
   expect(ctr.volumeMounts).toEqual([{ name: "db-ca-tododb", mountPath: "/var/run/drop/db-ca/tododb", readOnly: true }]);
 });
 
+test("appManifests: via:pooler (I3) overrides PGHOST at the <db>-pooler-rw Service (container env wins over envFrom)", () => {
+  const m = appManifests(
+    { ...base, uses: [{ database: "tododb", via: "pooler" }] },
+    { name: "todo", namespace: "drop-acme", host: "todo.drop.example.com" },
+  );
+  const ctr = (m.deployment as any).spec.template.spec.containers[0];
+  // envFrom still layers the <db>-app creds; PGHOST is a CONTAINER env (wins over any envFrom PGHOST).
+  expect(ctr.envFrom[0]).toEqual({ secretRef: { name: "tododb-app" } });
+  expect(ctr.env).toEqual([
+    { name: "PGSSLMODE", value: "verify-full" },
+    { name: "PGSSLROOTCERT", value: "/var/run/drop/db-ca/tododb/ca.crt" },
+    { name: "PGHOST", value: "tododb-pooler-rw" },
+  ]);
+  // without via:pooler there is NO PGHOST override (the app uses the primary via its own connection).
+  const noPooler = appManifests({ ...base, uses: [{ database: "tododb" }] }, { name: "todo", namespace: "ns", host: "h" });
+  const env = (noPooler.deployment as any).spec.template.spec.containers[0].env;
+  expect(env.find((e: any) => e.name === "PGHOST")).toBeUndefined();
+});
+
 test("appManifests: nothing DB-related when uses is absent", () => {
   const m = appManifests(base, { name: "todo", namespace: "ns", host: "h" });
   const pod = (m.deployment as any).spec.template.spec;

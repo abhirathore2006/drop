@@ -31,6 +31,7 @@ export function WorkloadGrid({ items }: { items: ListItem[] }) {
   const groups: { t: WorkloadType; label: string }[] = [
     { t: "app", label: "Apps" },
     { t: "database", label: "Databases" },
+    { t: "cache", label: "Caches" },
     { t: "bucket", label: "Buckets" },
     { t: "site", label: "Sites" },
   ];
@@ -86,7 +87,7 @@ export function UsageSummary({ items }: { items: ListItem[] }) {
             </div>
             <div className="card-foot">
               <span className="sub">
-                {u.workloads.app} apps · {u.workloads.database} dbs · {u.workloads.bucket} buckets · {u.workloads.site} sites
+                {u.workloads.app} apps · {u.workloads.database} dbs · {u.workloads.cache} caches · {u.workloads.bucket} buckets · {u.workloads.site} sites
               </span>
             </div>
             {u.quota && (
