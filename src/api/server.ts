@@ -98,6 +98,12 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   app.get("/site/:name", shell);
   app.get("/bucket/:name", shell); // I1: bucket detail page
   app.get("/stack/:name", shell); // C1: the read-only stack canvas
+  // M1 information architecture — top-level sections the sidebar navigates to.
+  app.get("/stacks", shell);
+  app.get("/templates", shell);
+  app.get("/template/:slug", shell); // D1: deep link for docs-site badges
+  app.get("/activity", shell);
+  app.get("/settings", shell);
 
   // Public docs site — the same static files GitHub Pages serves (docs/), now
   // shipped with the deployment and served at /docs. Uses relative links, so it

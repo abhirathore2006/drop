@@ -27,11 +27,11 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 6 | M0 Console re-platform + foundation | done | 5c0118c | Vite@6, wouter, TanStack Query; CSP strict; normalizeStatus pure (server wiring pending); vite dev proxy :8473 |
 | 6b | M0.5 Drop zone publish | done | a2ef18f | USTAR writer lockstep-tested vs archive.ts; fflate lazy chunk; + status field wired into site detail |
 | 7 | C1 Read-only canvas | done | 4506133 | graph endpoint w/ aggregated ns status lists; xyflow lazy chunk; CSP unchanged |
-| 8 | I1 Buckets (+FM item 10 quotas) | todo | | |
+| 8 | I1 Buckets (+FM item 10 quotas) | done | eba3cc9 | floci prefix store; org_quotas migration 0008; aws-iam store deferred (TF template) |
 | 9 | A2 L4 plane: NLB + TCP router | in-progress | a477b9c | A2a router core done (SNI/PG-preamble/splice/caps); A2b = registry+expose API+manifests/Helm/TF |
 | 10 | J1 Service accounts / CI tokens | todo | | |
 | 11 | D1 Template registry | todo | | |
-| 12 | E1 Static previews · H2 cron | todo | | |
+| 12 | E1 Static previews · H2 cron | in-progress | eba3cc9 | H2 done (in I1+H2 commit); E1 dispatching |
 | 13 | I2 Valkey · I3 PG depth | todo | | |
 | 14 | L1b Queue-scaled workers | todo | | |
 | 15 | A3 `db:proxy` tunnel | todo | | |
