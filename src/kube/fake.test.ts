@@ -110,6 +110,56 @@ test("FakeKube: stopApp/startApp on a NON-cron app never touch a cronJob field (
   expect(k.stopped.has("ns/billing")).toBe(false);
 });
 
+// ---- L1b: queue-scaled workers (KEDA) ----
+
+test("FakeKube: applyApp carries a scale_on worker's ScaledObject/TriggerAuthentication; deleteApp clears them", async () => {
+  const k = new FakeKube();
+  const m = appManifests(
+    {
+      image: "app:1",
+      services: [{ internalPort: 8080, protocol: "http" }],
+      uses: [{ cache: "sessions" }],
+      processes: { web: {}, worker: { command: "node worker.js", scaleOn: { queue: "jobs", target: 10 } } },
+    },
+    { name: "app", namespace: "drop-acme", host: "app.example.com" },
+  );
+  expect(m.workers![0]!.scaledObject).toBeDefined();
+  expect(m.workers![0]!.triggerAuth).toBeDefined();
+
+  await k.applyApp("drop-acme", "app", m);
+  const applied = await k.getApp("drop-acme", "app");
+  expect(applied!.workers![0]!.scaledObject).toEqual(m.workers![0]!.scaledObject);
+  expect(applied!.workers![0]!.triggerAuth).toEqual(m.workers![0]!.triggerAuth);
+
+  await k.deleteApp("drop-acme", "app");
+  expect(await k.getApp("drop-acme", "app")).toBeNull(); // ScaledObject/TriggerAuthentication gone with everything else
+});
+
+test("FakeKube: toggling scale_on off (redeploy without it) drops the ScaledObject/TriggerAuthentication from the stored manifests", async () => {
+  const k = new FakeKube();
+  const withScaleOn = appManifests(
+    {
+      image: "app:1",
+      services: [{ internalPort: 8080, protocol: "http" }],
+      uses: [{ cache: "sessions" }],
+      processes: { worker: { command: "w", scaleOn: { queue: "jobs", target: 10 } } },
+    },
+    { name: "app", namespace: "ns", host: "h" },
+  );
+  await k.applyApp("ns", "app", withScaleOn);
+  expect((await k.getApp("ns", "app"))!.workers![0]!.scaledObject).toBeDefined();
+
+  // redeploy the SAME app, `scale_on` removed
+  const withoutScaleOn = appManifests(
+    { image: "app:1", services: [{ internalPort: 8080, protocol: "http" }], processes: { worker: { command: "w" } } },
+    { name: "app", namespace: "ns", host: "h" },
+  );
+  await k.applyApp("ns", "app", withoutScaleOn);
+  const now = await k.getApp("ns", "app");
+  expect(now!.workers![0]!.scaledObject).toBeUndefined();
+  expect(now!.workers![0]!.triggerAuth).toBeUndefined();
+});
+
 // ---- C1: aggregated namespace status lists ----
 
 test("listNamespace{App,Database}Statuses: scoped to the namespace, honor overrides", async () => {

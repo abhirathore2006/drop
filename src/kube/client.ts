@@ -144,7 +144,11 @@ export class KubeApiClient implements KubeClient {
   private backupPath = (ns: string, n: string) => `/apis/postgresql.cnpg.io/v1/namespaces/${ns}/backups/${n}`;
   private jobPath = (ns: string, n: string) => `/apis/batch/v1/namespaces/${ns}/jobs/${n}`;
   private cronJobPath = (ns: string, n: string) => `/apis/batch/v1/namespaces/${ns}/cronjobs/${n}`; // (H2)
+  // Also the KEDA core ScaledObject the HTTP add-on auto-creates for the web process (see stopApp/
+  // startApp's pause-annotation dance) — same kind, same path shape, reused for (L1b) worker
+  // ScaledObjects below since a worker's name (`<app>-<process>`) never collides with the web app name.
   private scaledObjectPath = (ns: string, n: string) => `/apis/keda.sh/v1alpha1/namespaces/${ns}/scaledobjects/${n}`;
+  private triggerAuthPath = (ns: string, n: string) => `/apis/keda.sh/v1alpha1/namespaces/${ns}/triggerauthentications/${n}`; // (L1b)
   private objName = (o: Record<string, unknown>) => (o.metadata as { name: string }).name;
 
   /** Fail fast if a CRD's API group isn't served yet (SSA returns a bare 404 otherwise). */
@@ -195,6 +199,10 @@ export class KubeApiClient implements KubeClient {
     // then throwing would orphan the Deployment/Service/NetworkPolicy. Only the web process needs
     // the HTTP add-on — a worker-only app has no HTTPScaledObject and shouldn't require it.
     if (m.httpScaledObject) await this.assertCrd("http.keda.sh");
+    // (L1b) Same reasoning for a queue-scaled worker's core KEDA ScaledObject/TriggerAuthentication —
+    // fail before creating the worker Deployment rather than orphan it on a cluster without KEDA core
+    // installed (distinct from the HTTP add-on check above: a worker-only app never touches that one).
+    if ((m.workers ?? []).some((w) => w.scaledObject)) await this.assertCrd("keda.sh");
     // namespace is provisioned (PSA-labeled) by applyTenant — don't re-apply a bare one here.
     // The env Secret is REPLACED, not server-side-merged: SSA on a Secret's stringData does
     // NOT prune keys removed since the last deploy. DELETE unconditionally (404 if absent —
@@ -208,9 +216,19 @@ export class KubeApiClient implements KubeClient {
     if (m.ingressPolicy) await this.apply(this.netpolPath(namespace, this.objName(m.ingressPolicy)), m.ingressPolicy as Record<string, unknown>);
     if (m.httpScaledObject) await this.apply(this.hsoPath(namespace, name), m.httpScaledObject as Record<string, unknown>);
     // Worker process Deployments: apply the current set, then prune any worker removed since the
-    // last deploy (SSA can't prune an object that's no longer in the manifest list).
-    for (const w of m.workers ?? []) await this.apply(this.deploymentPath(namespace, w.name), w.deployment as Record<string, unknown>);
+    // last deploy (SSA can't prune an object that's no longer in the manifest list). (L1b) A scale_on
+    // worker ALSO carries a TriggerAuthentication + ScaledObject — apply the auth first since the
+    // ScaledObject's authenticationRef names it.
+    for (const w of m.workers ?? []) {
+      await this.apply(this.deploymentPath(namespace, w.name), w.deployment as Record<string, unknown>);
+      if (w.triggerAuth) await this.apply(this.triggerAuthPath(namespace, this.objName(w.triggerAuth)), w.triggerAuth as Record<string, unknown>);
+      if (w.scaledObject) await this.apply(this.scaledObjectPath(namespace, this.objName(w.scaledObject)), w.scaledObject as Record<string, unknown>);
+    }
     await this.pruneWorkers(namespace, name, new Set((m.workers ?? []).map((w) => w.name)));
+    // (L1b) Prune ScaledObjects/TriggerAuthentications for any worker that no longer declares
+    // scale_on (toggled off) or was removed entirely — same "keep set" pattern as pruneWorkers, keyed
+    // by the SAME worker names since a scale_on worker's queue-scaling objects share its Deployment name.
+    await this.pruneQueueScaling(namespace, name, new Set((m.workers ?? []).filter((w) => w.scaledObject).map((w) => w.name)));
 
     // (H2) `schedule` → a CronJob instead of the whole web/worker shape (assertProcesses already
     // refused schedule alongside processes/an explicit services/healthcheck, so m.cronJob and
@@ -225,6 +243,7 @@ export class KubeApiClient implements KubeClient {
         await this.call("DELETE", this.servicePath(namespace, name));
         await this.call("DELETE", this.deploymentPath(namespace, name));
         await this.pruneWorkers(namespace, name, new Set());
+        await this.pruneQueueScaling(namespace, name, new Set()); // (L1b) a CronJob has no workers either
       }
       await this.apply(this.cronJobPath(namespace, name), m.cronJob as Record<string, unknown>);
     } else {
@@ -261,6 +280,30 @@ export class KubeApiClient implements KubeClient {
     }
   }
 
+  /** (L1b) Delete queue-scaling ScaledObjects/TriggerAuthentications for an app's workers that aren't
+   *  in `keep` — same label (`drop.dev/workload`+`drop.dev/process`) and prune-by-GET-then-diff pattern
+   *  as pruneWorkers, just against the two extra KEDA-core kinds a scale_on worker carries. Covers a
+   *  worker whose `scale_on` was removed (still exists, no longer queue-scaled), one removed entirely,
+   *  and — via the empty `keep` set callers pass — full teardown (deleteApp) and the schedule-toggle-on
+   *  path (a CronJob has no workers at all). */
+  private async pruneQueueScaling(namespace: string, name: string, keep: Set<string>): Promise<void> {
+    const sel = encodeURIComponent(`drop.dev/workload=${name},drop.dev/process`);
+    const so = await this.call("GET", `/apis/keda.sh/v1alpha1/namespaces/${namespace}/scaledobjects?labelSelector=${sel}`);
+    if (so.status < 300) {
+      for (const o of (JSON.parse(so.body).items ?? []) as any[]) {
+        const on = o.metadata?.name as string | undefined;
+        if (on && !keep.has(on)) await this.call("DELETE", this.scaledObjectPath(namespace, on));
+      }
+    }
+    const ta = await this.call("GET", `/apis/keda.sh/v1alpha1/namespaces/${namespace}/triggerauthentications?labelSelector=${sel}`);
+    if (ta.status < 300) {
+      for (const o of (JSON.parse(ta.body).items ?? []) as any[]) {
+        const on = o.metadata?.name as string | undefined;
+        if (on && !keep.has(on)) await this.call("DELETE", this.triggerAuthPath(namespace, on));
+      }
+    }
+  }
+
   async deleteApp(namespace: string, name: string): Promise<void> {
     await this.call("DELETE", this.hsoPath(namespace, name));
     await this.call("DELETE", this.netpolPath(namespace, `${name}-allow-interceptor`));
@@ -268,6 +311,7 @@ export class KubeApiClient implements KubeClient {
     await this.call("DELETE", this.secretPath(namespace, `${name}-env`));
     await this.call("DELETE", this.deploymentPath(namespace, name));
     await this.pruneWorkers(namespace, name, new Set()); // tear down every worker Deployment too
+    await this.pruneQueueScaling(namespace, name, new Set()); // (L1b) and their ScaledObjects/TriggerAuthentications
     await this.deleteReleaseJobs(namespace, name); // and any release Jobs left for log retrieval
     await this.deleteCronJob(namespace, name); // (H2) and the CronJob (+ its spawned Jobs), if this was a cron app
   }

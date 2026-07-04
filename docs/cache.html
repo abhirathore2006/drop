@@ -89,7 +89,7 @@ drop cache create sessions --org acme                <span class="tok-c"># creat
 <h2 id="quota">Quota</h2>
 <p>A cache occupies one slot against the <strong>per-org workload cap</strong>. A <strong>persistent</strong> cache's disk request also counts toward the org's <strong>storage budget</strong> (when one is set), alongside database PVC requests and bucket bytes — <code>GET /v1/orgs/&lt;slug&gt;/usage</code> reports a <code>caches</code> figure in its <code>storage</code> section. An ephemeral cache has no disk and costs nothing against the storage budget.</p>
 
-<div class="note"><span class="lbl">Queues &amp; what's next</span><p>The same primitive backs BullMQ-style job queues; a future slice pairs it with queue-scaled workers (a worker process that scales on queue depth). Cron-style scheduled jobs already exist via <a href="processes.html">app schedules</a>.</p></div>
+<div class="note"><span class="lbl">Queues &amp; queue-scaled workers</span><p>The same primitive backs BullMQ-style job queues. Pair a cache with a <a href="processes.html#scale-on">worker process declaring <code>scale_on</code></a> and it scales on queue depth — down to zero replicas when the queue is empty — via a KEDA <code>ScaledObject</code> on the redis-lists trigger, no new infrastructure required. Cron-style scheduled jobs also exist, via <a href="processes.html">app schedules</a>.</p></div>
 
 <div class="note"><span class="lbl">Audit</span><p><code>cache.create</code> and <code>cache.delete</code> are recorded in the audit trail; the password is never logged.</p></div>
 

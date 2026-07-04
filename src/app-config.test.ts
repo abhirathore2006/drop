@@ -219,6 +219,74 @@ test("sanitizeAppConfig processes: scale_on reserved (L1b) round-trips as scaleO
   expect(sanitizeAppConfig({ image: "x:1", processes: { w: { command: "w", scale_on: { queue: "jobs" } } } })!.processes!.w!.scaleOn).toBeUndefined();
 });
 
+// ---- L1b: queue-scaled workers ----
+
+test("sanitizeAppConfig processes: scale_on target is clamped to [1,1000], not rejected", () => {
+  expect(sanitizeAppConfig({ image: "x:1", processes: { w: { command: "w", scale_on: { queue: "jobs", target: 0 } } } })!.processes!.w!.scaleOn).toEqual({
+    queue: "jobs",
+    target: 1,
+  });
+  expect(sanitizeAppConfig({ image: "x:1", processes: { w: { command: "w", scale_on: { queue: "jobs", target: -5 } } } })!.processes!.w!.scaleOn).toEqual({
+    queue: "jobs",
+    target: 1,
+  });
+  expect(sanitizeAppConfig({ image: "x:1", processes: { w: { command: "w", scale_on: { queue: "jobs", target: 5000 } } } })!.processes!.w!.scaleOn).toEqual({
+    queue: "jobs",
+    target: 1000,
+  });
+  expect(sanitizeAppConfig({ image: "x:1", processes: { w: { command: "w", scale_on: { queue: "jobs", target: 42.9 } } } })!.processes!.w!.scaleOn).toEqual({
+    queue: "jobs",
+    target: 42,
+  }); // floored
+  // a non-number target still drops the whole scale_on block (unchanged behavior)
+  expect(sanitizeAppConfig({ image: "x:1", processes: { w: { command: "w", scale_on: { queue: "jobs", target: "10" } } } })!.processes!.w!.scaleOn).toBeUndefined();
+});
+
+test("assertProcesses: scale_on on the web process is rejected", () => {
+  const app = sanitizeAppConfig({
+    image: "x:1",
+    uses: [{ cache: "sessions" }],
+    processes: { web: { command: "a", scale_on: { queue: "jobs", target: 10 } } },
+  })!;
+  expect(() => assertProcesses(app)).toThrow(/scale_on.*web process/i);
+});
+
+test("assertProcesses: scale_on requires a {cache} binding in uses", () => {
+  const noCache = sanitizeAppConfig({ image: "x:1", processes: { worker: { command: "w", scale_on: { queue: "jobs", target: 10 } } } })!;
+  expect(() => assertProcesses(noCache)).toThrow(/requires at least one \{cache\}/);
+  // a database or bucket binding doesn't satisfy it — must be a cache
+  const wrongUse = sanitizeAppConfig({
+    image: "x:1",
+    uses: [{ database: "db" }, { bucket: "b" }],
+    processes: { worker: { command: "w", scale_on: { queue: "jobs", target: 10 } } },
+  })!;
+  expect(() => assertProcesses(wrongUse)).toThrow(/requires at least one \{cache\}/);
+  // with a cache binding, it's accepted
+  const withCache = sanitizeAppConfig({
+    image: "x:1",
+    uses: [{ cache: "sessions" }],
+    processes: { worker: { command: "w", scale_on: { queue: "jobs", target: 10 } } },
+  })!;
+  expect(() => assertProcesses(withCache)).not.toThrow();
+});
+
+test("expandProcesses: a scale_on worker defaults min:0/max:3 (queue is the wake source); scale.min/max still override", () => {
+  const app = sanitizeAppConfig({
+    image: "x:1",
+    uses: [{ cache: "sessions" }],
+    processes: {
+      worker: { command: "w", scale_on: { queue: "jobs", target: 5 } },
+      capped: { command: "c", scale_on: { queue: "jobs2", target: 5 }, scale: { min: 2, max: 8 } },
+    },
+  })!;
+  const procs = expandProcesses(app, "app");
+  const worker = procs.find((p) => p.process === "worker")!;
+  expect(worker.scale).toEqual({ min: 0, max: 3 }); // default for a scale_on worker (not the plain-worker {1,1})
+  expect(worker.scaleOn).toEqual({ queue: "jobs", target: 5 });
+  const capped = procs.find((p) => p.process === "capped")!;
+  expect(capped.scale).toEqual({ min: 2, max: 8 }); // explicit scale still wins
+});
+
 test("assertProcesses: at most one web — two webs throw (deploy 400s); zero/one are fine", () => {
   // key `web` + another process explicitly web:true → two webs
   const two = sanitizeAppConfig({ image: "x:1", processes: { web: { command: "a" }, worker: { web: true, command: "b" } } })!;

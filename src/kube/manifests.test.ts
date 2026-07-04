@@ -436,6 +436,115 @@ test("appManifests: schedule stamps drop.dev/version on the CronJob's pod templa
   expect((versioned.cronJob as any).spec.jobTemplate.spec.template.metadata.annotations).toEqual({ "drop.dev/version": "v_1" });
 });
 
+// ---- L1b: queue-scaled workers (KEDA on Valkey lists) ----
+
+test("appManifests: scale_on worker emits a redis-trigger ScaledObject + TriggerAuthentication alongside its Deployment", () => {
+  const app = sanitizeAppConfig({
+    image: "app:1",
+    uses: [{ cache: "sessions" }],
+    processes: { web: {}, worker: { command: "node worker.js", scale_on: { queue: "jobs", target: 10 } } },
+  })!;
+  const m = appManifests(app, { name: "app", namespace: "drop-acme", host: "app.example.com" });
+  expect(m.workers).toHaveLength(1);
+  const w = m.workers![0]!;
+  expect(w.name).toBe("app-worker");
+
+  // Deployment: replicas = min (default 0 for a scale_on worker) as the INITIAL value; KEDA takes over.
+  expect((w.deployment as any).spec.replicas).toBe(0);
+
+  const so = w.scaledObject as any;
+  expect(so.apiVersion).toBe("keda.sh/v1alpha1");
+  expect(so.kind).toBe("ScaledObject");
+  expect(so.metadata).toMatchObject({ name: "app-worker", namespace: "drop-acme" });
+  expect(so.spec.scaleTargetRef).toEqual({ name: "app-worker", kind: "Deployment" });
+  expect(so.spec.minReplicaCount).toBe(0);
+  expect(so.spec.maxReplicaCount).toBe(3); // scale_on default max
+  expect(so.spec.triggers).toEqual([
+    {
+      type: "redis",
+      metadata: { address: "sessions.drop-acme.svc.cluster.local:6379", listName: "jobs", listLength: "10" },
+      authenticationRef: { name: "app-worker" },
+    },
+  ]);
+
+  const ta = w.triggerAuth as any;
+  expect(ta.apiVersion).toBe("keda.sh/v1alpha1");
+  expect(ta.kind).toBe("TriggerAuthentication");
+  expect(ta.metadata).toMatchObject({ name: "app-worker", namespace: "drop-acme" });
+  expect(ta.spec.secretTargetRef).toEqual([{ parameter: "password", name: "sessions-cache", key: "password" }]);
+});
+
+test("appManifests: a plain worker (no scale_on) has NO ScaledObject/TriggerAuthentication", () => {
+  const app = sanitizeAppConfig({ image: "app:1", processes: { web: {}, worker: { command: "w" } } })!;
+  const m = appManifests(app, { name: "app", namespace: "ns", host: "h" });
+  const w = m.workers![0]!;
+  expect(w.scaledObject).toBeUndefined();
+  expect(w.triggerAuth).toBeUndefined();
+  expect((w.deployment as any).spec.replicas).toBe(1); // unchanged plain-worker min≥1 default
+});
+
+test("appManifests: scale_on worker respects an explicit scale.min/max (min may be >0)", () => {
+  const app = sanitizeAppConfig({
+    image: "app:1",
+    uses: [{ cache: "sessions" }],
+    processes: { worker: { command: "w", scale: { min: 1, max: 5 }, scale_on: { queue: "jobs", target: 20 } } },
+  })!;
+  const m = appManifests(app, { name: "app", namespace: "ns", host: "h" });
+  const w = m.workers![0]!;
+  expect((w.deployment as any).spec.replicas).toBe(1);
+  expect((w.scaledObject as any).spec.minReplicaCount).toBe(1);
+  expect((w.scaledObject as any).spec.maxReplicaCount).toBe(5);
+  expect((w.scaledObject as any).spec.triggers[0].metadata.listLength).toBe("20");
+});
+
+test("appManifests: multi-cache uses → the ScaledObject address points at the FIRST cache binding", () => {
+  const app = sanitizeAppConfig({
+    image: "app:1",
+    uses: [{ database: "db1" }, { cache: "sessions" }, { cache: "jobs-cache" }],
+    processes: { worker: { command: "w", scale_on: { queue: "jobs", target: 10 } } },
+  })!;
+  const m = appManifests(app, { name: "app", namespace: "drop-acme", host: "h" });
+  const so = m.workers![0]!.scaledObject as any;
+  expect(so.spec.triggers[0].metadata.address).toBe("sessions.drop-acme.svc.cluster.local:6379");
+});
+
+test("appManifests: two scale_on workers each get their OWN uniquely-named ScaledObject/TriggerAuthentication", () => {
+  const app = sanitizeAppConfig({
+    image: "app:1",
+    uses: [{ cache: "sessions" }],
+    processes: {
+      emailer: { command: "e", scale_on: { queue: "emails", target: 5 } },
+      thumbnailer: { command: "t", scale_on: { queue: "thumbs", target: 20 } },
+    },
+  })!;
+  const m = appManifests(app, { name: "app", namespace: "ns", host: "h" });
+  expect(m.workers).toHaveLength(2);
+  const names = m.workers!.map((w) => w.name).sort();
+  expect(names).toEqual(["app-emailer", "app-thumbnailer"]);
+  for (const w of m.workers!) {
+    expect((w.scaledObject as any).metadata.name).toBe(w.name);
+    expect((w.triggerAuth as any).metadata.name).toBe(w.name);
+  }
+  const emailer = m.workers!.find((w) => w.process === "emailer")!;
+  expect((emailer.scaledObject as any).spec.triggers[0].metadata.listName).toBe("emails");
+  const thumbnailer = m.workers!.find((w) => w.process === "thumbnailer")!;
+  expect((thumbnailer.scaledObject as any).spec.triggers[0].metadata.listName).toBe("thumbs");
+});
+
+test("appManifests: scale_on on the web process throws (assertProcesses re-enforced at the manifest layer)", () => {
+  const app = sanitizeAppConfig({
+    image: "app:1",
+    uses: [{ cache: "sessions" }],
+    processes: { web: { scale_on: { queue: "jobs", target: 10 } } },
+  })!;
+  expect(() => appManifests(app, { name: "app", namespace: "ns", host: "h" })).toThrow(/scale_on.*web process/i);
+});
+
+test("appManifests: scale_on without a {cache} binding throws (assertProcesses re-enforced at the manifest layer)", () => {
+  const app = sanitizeAppConfig({ image: "app:1", processes: { worker: { command: "w", scale_on: { queue: "jobs", target: 10 } } } })!;
+  expect(() => appManifests(app, { name: "app", namespace: "ns", host: "h" })).toThrow(/requires at least one \{cache\}/);
+});
+
 test("appManifests: schedule + processes/explicit non-default services/healthcheck throw (exclusivity re-enforced at the manifest layer)", () => {
   const ctx = { name: "x", namespace: "ns", host: "h" };
   expect(() => appManifests(sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", processes: { worker: { command: "w" } } })!, ctx)).toThrow(/schedule/i);

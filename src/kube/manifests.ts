@@ -3,6 +3,7 @@
 // v1 is 443-only (one HTTP service); scaling is owned by the KEDA HTTP Add-on
 // (HTTPScaledObject), so the Deployment intentionally omits spec.replicas.
 import { type AppConfig, type AppResources, type ExpandedProcess, assertHttpOnly, assertProcesses, expandProcesses } from "../app-config.ts";
+import { cacheHost } from "./valkey.ts";
 
 export interface ManifestContext {
   name: string; // claimed workload name (DNS-safe)
@@ -26,6 +27,14 @@ export interface WorkerManifests {
   name: string; // Deployment name: `<app>-<process>`
   process: string; // the process key
   deployment: Record<string, unknown>; // plain Deployment (no Service / HTTPScaledObject)
+  // (L1b) Present only when this worker declares `scale_on` — assertProcesses already guarantees the
+  // app has a `{cache}` binding to point at before appManifests ever builds these. A KEDA core
+  // `ScaledObject` (redis-lists trigger on the bound Valkey) + the `TriggerAuthentication` it
+  // references for the cache's password. Named the SAME as the worker Deployment (`w.name`) — legal
+  // since they're different API kinds, and it keeps client.ts's prune-by-keep-set logic trivial (one
+  // name, three kinds to reconcile: Deployment, ScaledObject, TriggerAuthentication).
+  scaledObject?: Record<string, unknown>;
+  triggerAuth?: Record<string, unknown>;
 }
 export interface AppManifests {
   // The WEB process objects (named `<app>`). Absent for a worker-only app — a legal shape now that
@@ -437,8 +446,14 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
   }
 
   // --- worker processes: a plain Deployment each (no Service, no HTTPScaledObject) ---
-  // Static replicas = scale.min (min≥1, enforced in expandProcesses). `scaleOn`/scale.max are
-  // reserved for L1b (KEDA queue scaling) and IGNORED here.
+  // Static replicas = scale.min (min≥1 for a plain worker; may be 0 for a scale_on worker — see
+  // expandProcesses). (L1b) A worker with `scale_on` ALSO gets a KEDA ScaledObject below, pointed at
+  // the FIRST `{cache}` binding in `uses` — v1 binds a single Valkey per app (mirrors the DB/bucket
+  // binding convention: "first" is deterministic and unambiguous for the common one-cache case; a
+  // multi-cache app would need a per-process `cache:` key to disambiguate, out of scope here).
+  // assertProcesses (called above) already guarantees a bound cache exists whenever any scale_on is
+  // present, so `cacheUse` is non-null by the time a worker with scaleOn reaches the loop below.
+  const cacheUse = app.uses?.find((u) => u.cache);
   const workers: WorkerManifests[] = [];
   for (const w of processes.filter((p) => !p.web)) {
     const labels = {
@@ -448,16 +463,53 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
       "drop.dev/process": w.process, // distinguishes workers from the web Deployment
     };
     const container = buildContainer({ name: w.name, image: app.image, binding, command: w.command, resources: w.resources });
-    workers.push({
+    const wm: WorkerManifests = {
       name: w.name,
       process: w.process,
       deployment: {
         apiVersion: "apps/v1",
         kind: "Deployment",
         metadata: { name: w.name, namespace: ctx.namespace, labels },
+        // `replicas: w.scale.min` is the INITIAL value even for a scale_on worker — KEDA's ScaledObject
+        // takes over the count once its controller reconciles (same "first apply, then KEDA owns it"
+        // pattern as the web Deployment, just kept explicit here: an entirely-absent `replicas` field
+        // on a brand-new Deployment defaults to 1, which would be wrong for a min:0 scale_on worker).
         spec: { replicas: w.scale.min, selector: { matchLabels: labels }, template: { metadata: podTemplateMeta(labels, ctx), spec: podSpec(ctx, container, binding) } },
       },
-    });
+    };
+    if (w.scaleOn && cacheUse?.cache) {
+      // KEDA's redis-lists scaler wants `address` (host:port) and `password` supplied separately.
+      // `address` is plaintext trigger metadata (not a secret) — a ClusterIP host:port isn't sensitive,
+      // same reasoning as the DB binding's PGHOST. The password stays out of the manifest entirely: the
+      // TriggerAuthentication below references the cache's OWN `<cache>-cache` Secret (see valkey.ts) —
+      // the same Secret the app's own REDIS_URL binding reads back from (src/api/server.ts) — so no new
+      // secret is minted here and the write-only posture holds (this file never carries secret VALUES).
+      const address = `${cacheHost(cacheUse.cache, ctx.namespace)}:6379`;
+      wm.triggerAuth = {
+        apiVersion: "keda.sh/v1alpha1",
+        kind: "TriggerAuthentication",
+        metadata: { name: w.name, namespace: ctx.namespace, labels },
+        spec: { secretTargetRef: [{ parameter: "password", name: `${cacheUse.cache}-cache`, key: "password" }] },
+      };
+      wm.scaledObject = {
+        apiVersion: "keda.sh/v1alpha1",
+        kind: "ScaledObject",
+        metadata: { name: w.name, namespace: ctx.namespace, labels },
+        spec: {
+          scaleTargetRef: { name: w.name, kind: "Deployment" },
+          minReplicaCount: w.scale.min, // (L1b) may be 0 — the queue is the wake source
+          maxReplicaCount: w.scale.max,
+          triggers: [
+            {
+              type: "redis",
+              metadata: { address, listName: w.scaleOn.queue, listLength: String(w.scaleOn.target) },
+              authenticationRef: { name: w.name },
+            },
+          ],
+        },
+      };
+    }
+    workers.push(wm);
   }
   if (workers.length) out.workers = workers;
 

@@ -46,7 +46,12 @@ export interface AppProcess {
   scale?: AppScale; // web: KEDA bounds; worker: static replicas (min≥1 enforced at expand time)
   resources?: AppResources; // overrides the app-level default for this process
   web?: boolean; // explicit web marker (the `web` key defaults to true; any other key to false)
-  scaleOn?: { queue: string; target: number }; // RESERVED for L1b (queue-scaled workers); round-trips, IGNORED by manifests today
+  // (L1b) Queue-scaled worker config: emits a KEDA `ScaledObject` (redis-lists trigger) pointed at
+  // the app's bound Valkey cache, alongside this worker's Deployment. Valid ONLY on a non-web process
+  // (assertProcesses rejects it on web) whose app has at least one `{cache}` binding in `uses`
+  // (assertProcesses rejects it otherwise) — the queue lives in that cache. `target` is clamped to
+  // [1,1000] at sanitize time (see the `processes` loop below).
+  scaleOn?: { queue: string; target: number };
 }
 export interface AppConfig {
   name?: string;
@@ -275,9 +280,11 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
 
   // `processes` → a map of named processes replacing the implicit single web process. Each key must
   // be a DNS-safe name (it becomes `<app>-<key>` for workers). Same defensive posture: ignore junk
-  // entries/values, cap the map, and re-sanitize unchanged. `scale_on` is RESERVED for L1b (queue
-  // scaling) — accepted and round-tripped here, but IGNORED by the manifest layer today. Web
-  // uniqueness (at most one web process) is enforced at deploy via assertProcesses, not dropped here.
+  // entries/values, cap the map, and re-sanitize unchanged. (L1b) `scale_on` activates KEDA queue
+  // scaling on a worker (see the manifest layer); its `target` is clamped to [1,1000] here so a junk
+  // or wildly out-of-range value never reaches the manifest layer. Web uniqueness (at most one web
+  // process), scale_on-on-web rejection, and the scale_on/cache-binding requirement are all enforced
+  // at deploy via assertProcesses, not dropped here.
   if (raw.processes && typeof raw.processes === "object" && !Array.isArray(raw.processes)) {
     const procs: Record<string, AppProcess> = {};
     for (const [key, val] of Object.entries(raw.processes as Record<string, unknown>).slice(0, 16)) {
@@ -294,11 +301,13 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
       const resources = sanitizeResources(p.resources);
       if (resources) proc.resources = resources;
       if (typeof p.web === "boolean") proc.web = p.web;
-      // accept drop.yaml's `scale_on` AND the sanitized `scaleOn` (round-trip safety)
+      // accept drop.yaml's `scale_on` AND the sanitized `scaleOn` (round-trip safety). `target` is
+      // CLAMPED into [1,1000] (not rejected) — same defensive posture as healthcheck durations — so a
+      // typo'd 0 or a runaway 100000 becomes a sane bound instead of dropping the whole block.
       const so = (p.scale_on ?? p.scaleOn) as Record<string, unknown> | undefined;
       if (so && typeof so === "object") {
         const queue = str(so.queue, 253);
-        const target = typeof so.target === "number" && so.target >= 1 ? Math.floor(so.target) : undefined;
+        const target = typeof so.target === "number" && isFinite(so.target) ? Math.min(1000, Math.max(1, Math.floor(so.target))) : undefined;
         if (queue && target != null) proc.scaleOn = { queue, target };
       }
       procs[key] = proc;
@@ -348,6 +357,12 @@ export function isWebProcess(key: string, p: AppProcess): boolean {
  * (the sanitizer's implicit default single service doesn't count — see isDefaultServices), and
  * `healthcheck`. These checks run BEFORE the web-uniqueness check below (schedule+processes should
  * name schedule as the conflict, not "two web processes").
+ *
+ * (L1b) Two more rules for `scale_on` (queue-scaled workers), both loud 400s rather than silent
+ * drops: (a) it's meaningless on the web process — that process already scales on HTTP traffic via
+ * the KEDA HTTP add-on, not a Valkey list — so a `scale_on` there is rejected outright; (b) it
+ * requires at least one `{cache}` binding in `uses`, since the queue it watches lives in that bound
+ * Valkey — without one the manifest layer would have no address to point the KEDA trigger at.
  */
 export function assertProcesses(app: AppConfig): void {
   if (app.schedule) {
@@ -362,6 +377,14 @@ export function assertProcesses(app: AppConfig): void {
   if (webs.length > 1) {
     throw new Error(`an app may declare at most one "web" process; got ${webs.length} (${webs.map(([k]) => k).join(", ")})`);
   }
+  const webScaleOn = webs.find(([, p]) => p.scaleOn);
+  if (webScaleOn) {
+    throw new Error(`"scale_on" is not valid on the web process ("${webScaleOn[0]}") — it already scales on HTTP traffic, not a queue`);
+  }
+  const hasScaleOn = Object.values(app.processes).some((p) => p.scaleOn);
+  if (hasScaleOn && !(app.uses ?? []).some((u) => u.cache)) {
+    throw new Error(`"scale_on" requires at least one {cache} binding in "uses" — the queue it watches lives in the bound Valkey cache`);
+  }
 }
 
 /** A fully-resolved process (deployment name, web flag, scale, resources), ready for the manifest
@@ -371,14 +394,17 @@ export interface ExpandedProcess {
   process: string; // the process key ("web" for the implicit process)
   web: boolean; // gets Service + HTTPScaledObject; workers get a plain Deployment
   command?: string | string[];
-  scale: AppScale; // web: KEDA bounds; worker: static replicas (min≥1)
+  scale: AppScale; // web: KEDA bounds; worker: static replicas (min≥1) — UNLESS scaleOn (see below)
   resources?: AppResources;
-  scaleOn?: { queue: string; target: number }; // RESERVED for L1b; ignored by manifests today
+  scaleOn?: { queue: string; target: number }; // (L1b) present → the manifest layer emits a KEDA ScaledObject for this worker
 }
 
 /** Expand an AppConfig into its concrete processes. Workers get min≥1 static scale (a scale-to-zero
- *  worker has no wake source, so it would never run). Per-process resources/scale override the
- *  app-level defaults; command is per-process only. */
+ *  worker has no wake source, so it would never run) — UNLESS the worker declares `scale_on` (L1b): a
+ *  queue-scaled worker IS woken by something (KEDA watching the bound Valkey list depth), so min:0 is
+ *  safe and is the default (idle queue → zero pods); max also defaults higher (3, matching web) since
+ *  such a worker is expected to actually scale. Per-process resources/scale override the app-level
+ *  defaults; command is per-process only. */
 export function expandProcesses(app: AppConfig, appName: string): ExpandedProcess[] {
   if (!app.processes) {
     return [{ name: appName, process: "web", web: true, scale: app.scale ?? { ...DEFAULT_APP_SCALE }, resources: app.resources }];
@@ -396,10 +422,13 @@ export function expandProcesses(app: AppConfig, appName: string): ExpandedProces
         scaleOn: p.scaleOn,
       });
     } else {
-      // Workers are static (no HTTPScaledObject in L1): replicas = min, min≥1. `max` + `scaleOn`
-      // are carried through but only activate under L1b (KEDA queue scaling).
-      const min = Math.max(1, p.scale?.min ?? 1);
-      const max = Math.max(min, p.scale?.max ?? 1);
+      // Workers are static (no HTTPScaledObject) with min≥1 — UNLESS this worker declares `scale_on`
+      // (L1b): a KEDA ScaledObject then owns its replica count between min and max, and min:0 is safe
+      // (queue depth is the wake source, unlike a plain worker with none), so it's the default rather
+      // than being clamped up to 1. max defaults to 3 (not 1) for the same reason — a queue-scaled
+      // worker is meant to scale, not sit at a single static replica.
+      const min = p.scaleOn ? Math.max(0, p.scale?.min ?? 0) : Math.max(1, p.scale?.min ?? 1);
+      const max = p.scaleOn ? Math.max(min, p.scale?.max ?? 3) : Math.max(min, p.scale?.max ?? 1);
       out.push({
         name: `${appName}-${key}`,
         process: key,

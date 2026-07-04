@@ -92,13 +92,39 @@
 <tr><td><code>command</code></td><td>string / array</td><td>What the process runs. A <strong>string</strong> runs in shell form (<code>["/bin/sh","-c", …]</code>); an <strong>array</strong> is passed through unchanged (exec form). Omit to use the image's own entrypoint.</td></tr>
 <tr><td><code>scale</code></td><td>object</td><td><code>{ min, max }</code>. For <code>web</code>: KEDA replica bounds (as <a href="configuration.html#app"><code>app.scale</code></a>). For a <strong>worker</strong>: static replicas — <code>min</code> is enforced <code>≥ 1</code> (see note) and is the running count today.</td></tr>
 <tr><td><code>resources</code></td><td>object</td><td><code>{ cpu, memory }</code> limits for this process, overriding the app-level default.</td></tr>
-<tr><td><code>scale_on</code></td><td>object</td><td><strong>Reserved.</strong> <code>{ queue, target }</code> is accepted and round-tripped for forward compatibility but <strong>ignored today</strong>; queue-scaled workers (KEDA on a Valkey list) land in a later slice.</td></tr>
+<tr><td><code>scale_on</code></td><td>object</td><td><code>{ queue, target }</code> — turns this worker into a <strong>queue-scaled worker</strong>: a KEDA <code>ScaledObject</code> watches <code>queue</code>'s length on the app's bound <a href="cache.html">cache</a> and scales replicas so each one carries roughly <code>target</code> jobs. See <a href="#scale-on">below</a>. Not valid on the <code>web</code> process.</td></tr>
 </tbody>
 </table>
 <div class="note"><span class="lbl">Rules</span><ul>
   <li><strong>At most one <code>web</code>.</strong> Zero is fine — a <strong>worker-only app</strong> is legal (no Service, no host, just workers). More than one web process is rejected at deploy with a <code>400</code>.</li>
-  <li><strong>Workers are <code>min ≥ 1</code>.</strong> A scale-to-zero worker has no wake source (nothing routes traffic to it), so it would never run; Drop enforces at least one replica. A <code>web</code> process may still scale to zero.</li>
+  <li><strong>Workers are <code>min ≥ 1</code> — unless <code>scale_on</code>.</strong> A plain scale-to-zero worker has no wake source (nothing routes traffic to it), so it would never run; Drop enforces at least one replica. A <code>web</code> process may still scale to zero, and so may a <code>scale_on</code> worker (see below) — the queue itself is the wake source.</li>
   <li><strong>Zero migration.</strong> Omit <code>processes:</code> entirely and the app is exactly one web process — identical to before.</li>
+</ul></div>
+
+<h3 id="scale-on">scale_on: queue-scaled workers</h3>
+<p>Pair a worker with a <a href="cache.html">cache</a> and it scales on <strong>queue depth</strong> instead of sitting at a fixed replica count — the same primitive that backs BullMQ-style job queues, with zero new infrastructure. Under the hood: a KEDA <code>ScaledObject</code> with the <strong>redis-lists</strong> trigger watches the length of <code>scale_on.queue</code> on the app's bound Valkey and drives replicas between <code>scale.min</code> and <code>scale.max</code> so each replica carries roughly <code>scale_on.target</code> queued jobs.</p>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">image</span>: <span class="tok-s">myapp:1</span>
+  <span class="tok-k">uses</span>:
+    - <span class="tok-k">cache</span>: <span class="tok-s">jobs</span>                       <span class="tok-c"># the queue lives in this bound Valkey</span>
+  <span class="tok-k">processes</span>:
+    <span class="tok-k">web</span>:    { <span class="tok-k">command</span>: <span class="tok-s">"node server.js"</span> }
+    <span class="tok-k">worker</span>: { <span class="tok-k">command</span>: <span class="tok-s">"node worker.js"</span>,
+              <span class="tok-k">scale</span>: { <span class="tok-k">min</span>: 0, <span class="tok-k">max</span>: 10 },
+              <span class="tok-k">scale_on</span>: { <span class="tok-k">queue</span>: <span class="tok-s">"jobs"</span>, <span class="tok-k">target</span>: 10 } }  <span class="tok-c"># ~10 queued jobs per replica</span></code></pre>
+<table class="tbl">
+<thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>queue</code></td><td>string</td><td><strong>Required.</strong> The name of the Valkey list (the BullMQ queue name, or whatever your worker <code>LPUSH</code>/<code>BRPOP</code>s against).</td></tr>
+<tr><td><code>target</code></td><td>number</td><td><strong>Required.</strong> Desired queue length per replica — KEDA computes the replica count from <code>queueLength / target</code>. Clamped to <strong>1–1000</strong>.</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="lbl">Rules</span><ul>
+  <li><strong>Requires a <code>{cache}</code> binding.</strong> The app's <code>uses</code> must declare at least one <code>{ cache: &lt;name&gt; }</code> — that's where the queue lives. Missing one is rejected at deploy with a <code>400</code>.</li>
+  <li><strong>Not valid on <code>web</code>.</strong> The web process already scales on HTTP traffic (via the KEDA HTTP add-on); <code>scale_on</code> there is rejected with a <code>400</code>.</li>
+  <li><strong><code>min: 0</code> is allowed and is the default.</strong> Unlike a plain worker, a <code>scale_on</code> worker has a real wake source — an empty queue means legitimately zero replicas, and KEDA scales it back up the moment something is enqueued. <code>max</code> defaults to <code>3</code> if unset.</li>
+  <li><strong>Multiple caches: first one wins.</strong> If the app binds more than one cache, the trigger points at the <strong>first</strong> <code>{cache}</code> entry in <code>uses</code> — declare exactly one cache binding if you need to be unambiguous.</li>
+  <li><strong>Password stays out of the manifest.</strong> The trigger's address (host:port) is plain — a ClusterIP name isn't sensitive — but the cache's password is wired through a KEDA <code>TriggerAuthentication</code> that references the cache's own write-only Secret; it's never copied anywhere.</li>
 </ul></div>
 
 <h3 id="schedule">schedule:</h3>
@@ -134,7 +160,7 @@
   running migrations…
   applied 0003_add_index
   done</code></pre>
-<div class="note tip"><span class="lbl">Tip</span><p>Each process counts as pods against your tenant quota, same as any workload. A worker that's idle most of the time is still an always-on replica (<code>min ≥ 1</code>) — size it accordingly, or wait for queue-scaled workers.</p></div>
+<div class="note tip"><span class="lbl">Tip</span><p>Each process counts as pods against your tenant quota, same as any workload. A worker that's idle most of the time is still an always-on replica (<code>min ≥ 1</code>) — size it accordingly, or reach for <a href="#scale-on"><code>scale_on</code></a> to scale it with queue depth instead (down to zero when idle).</p></div>
 
 <div class="next">
   <a href="configuration.html"><div class="d">← Back</div><div class="t">Configuration (drop.yaml)</div></a>
