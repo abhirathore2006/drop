@@ -322,6 +322,50 @@ export function buildMcp(): McpServer {
     async ({ name, org }) => run(() => getClient().then((c) => c.stackGet(name, org))),
   );
 
+  // ---- templates (D1): the golden-path registry. Agent-safe: dry_run returns the plan before applying. ----
+  server.registerTool(
+    "template_list",
+    { description: "List templates you can see (public + your orgs'). Each carries its slug, description, visibility, and latest version.", inputSchema: {} },
+    async () => run(() => getClient().then((c) => c.templateList())),
+  );
+  server.registerTool(
+    "template_show",
+    {
+      description: "Show a template's variables, readme, and stack spec (so you can gather values before deploying).",
+      inputSchema: { slug: z.string(), version: z.string().optional().describe("a specific version (default: latest)") },
+    },
+    async ({ slug, version }) => run(() => getClient().then((c) => c.templateGet(slug, version))),
+  );
+  server.registerTool(
+    "template_deploy",
+    {
+      description:
+        "Instantiate a template into a NEW stack. Set dry_run=true FIRST to get the ordered plan without creating anything (the agent-safe shape); then deploy for real. On a real deploy the returned write-only secrets are set on their apps automatically.",
+      inputSchema: {
+        slug: z.string(),
+        name: z.string().describe("the new stack's name"),
+        vars: z.record(z.string(), z.string()).optional().describe("variable values (key → value); required vars must be provided"),
+        version: z.string().optional().describe("a specific version (default: latest)"),
+        dry_run: z.boolean().optional().describe("true → return the plan without applying (do this first)"),
+      },
+    },
+    async ({ slug, name, vars, version, dry_run }) =>
+      run(async () => {
+        const c = await getClient();
+        const res = await c.templateInstantiate(slug, { name, vars: vars ?? {}, version }, dry_run);
+        if (dry_run || res.dryRun) return { dryRun: true, plan: res.plan, secretsToSet: (res.secretsToSet ?? []).map((s: any) => `${s.app}.${s.key}`) };
+        // Real deploy: write the secrets the server lifted out of the spec, then restart their apps.
+        const restarted = new Set<string>();
+        for (const s of res.secretsToSet ?? []) await c.setSecret(s.app, s.key, s.value);
+        for (const s of res.secretsToSet ?? []) {
+          if (restarted.has(s.app)) continue;
+          restarted.add(s.app);
+          await c.restartApp(s.app).catch(() => {});
+        }
+        return { stack: res.stack, version: res.version, specVersion: res.specVersion, plan: res.plan, secretsSet: (res.secretsToSet ?? []).map((s: any) => `${s.app}.${s.key}`), needs: res.needs };
+      }),
+  );
+
   // ---- organisations (group resources + org-level permissions) ----
   server.registerTool(
     "org_create",

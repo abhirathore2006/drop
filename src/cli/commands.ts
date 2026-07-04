@@ -1,6 +1,8 @@
 import { Command } from "commander";
-import { rm } from "node:fs/promises";
+import { rm, readFile } from "node:fs/promises";
+import { createInterface } from "node:readline/promises";
 import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { defaultSessionPath, loadSession, saveSession } from "./session.ts";
 import { loadConfig, saveConfig, resolveApiBase, resolveUpdateUrl } from "./config.ts";
 import { Client } from "./client.ts";
@@ -9,6 +11,8 @@ import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate } from "./resolve-name.ts";
 import { buildAndPushImage } from "./build-push.ts";
 import { runStackUp } from "./stack.ts";
+import { parseStackConfig } from "../stack-config.ts";
+import { CONFIG_FILE_YAML } from "../site-config.ts";
 import { validateName } from "../names.ts";
 import { VERSION } from "../version.ts";
 
@@ -46,6 +50,55 @@ async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const c of process.stdin) chunks.push(c as Buffer);
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Commander collector for repeatable options (`--var a --var b` → ["a","b"]). */
+const collect = (v: string, acc: string[]): string[] => (acc.push(v), acc);
+
+interface TemplateVarSpec { key: string; description?: string; default?: string; required: boolean; secret?: boolean }
+/** Parse a `--var key:description:default` declaration (the default may itself contain colons). */
+function parseVarSpec(s: string, required: Set<string>, secret: Set<string>): TemplateVarSpec {
+  const [key, desc, ...rest] = s.split(":");
+  const v: TemplateVarSpec = { key: (key ?? "").trim(), required: required.has((key ?? "").trim()) };
+  if (desc && desc.length) v.description = desc;
+  const def = rest.join(":");
+  if (def.length) v.default = def;
+  if (secret.has(v.key)) v.secret = true;
+  return v;
+}
+
+/** Parse `--set k=v` pairs into a values map (first `=` splits). */
+function parseSets(sets: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const s of sets) {
+    const i = s.indexOf("=");
+    if (i < 0) throw new Error(`invalid --set "${s}" — use key=value`);
+    out[s.slice(0, i)] = s.slice(i + 1);
+  }
+  return out;
+}
+
+/** Prompt (TTY only) for any required variable still missing a value; `--set` values always win. */
+async function promptMissingVars(
+  variables: TemplateVarSpec[],
+  values: Record<string, string>,
+): Promise<Record<string, string>> {
+  const missing = variables.filter((v) => v.required && !(v.key in values) && v.default == null);
+  if (missing.length === 0) return values;
+  if (!process.stdin.isTTY) {
+    throw new Error(`missing required variable(s): ${missing.map((v) => v.key).join(", ")} — pass them with --set key=value`);
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    for (const v of missing) {
+      const label = `${v.key}${v.description ? ` (${v.description})` : ""}${v.secret ? " [secret]" : ""}: `;
+      const answer = (await rl.question(label)).trim();
+      if (answer.length) values[v.key] = answer;
+    }
+  } finally {
+    rl.close();
+  }
+  return values;
 }
 
 /** Ask the instance which CLI version it serves (so `update` can show current → target). Best-effort. */
@@ -233,6 +286,125 @@ export function buildProgram(): Command {
     .option("--org <slug>", "the stack's organisation")
     .option("--cascade", "also delete the stack's resources (destructive)")
     .action(async (name: string, opts: { org?: string; cascade?: boolean }) => show(await (await client()).stackDelete(name, { org: opts.org, cascade: opts.cascade })));
+
+  // ---- templates (D1): the golden-path registry ----
+  const template = program.command("template").description("Publish + browse reusable stack templates");
+  template
+    .command("publish")
+    .description("Publish a template from an existing stack (--from-stack) or a drop.yaml stack: section (--file)")
+    .requiredOption("--slug <slug>", "template slug (3–40 chars, DNS-label shaped) — the `drop new <slug>` name")
+    .option("--from-stack <name>", "export an existing stack (captures its deployed images; strips secrets/digests)")
+    .option("--file <path>", "read the stack: section from this drop.yaml (default: ./drop.yaml)")
+    .option("--name <name>", "human-facing template name (default: the slug)")
+    .option("--description <text>", "one-line description for the catalog card")
+    .option("--visibility <v>", "public (instance-wide) or org (members only)", "org")
+    .option("--var <spec>", "declare a variable: key:description:default (repeatable)", collect, [])
+    .option("--required <key>", "mark a declared variable required (repeatable)", collect, [])
+    .option("--secret <key>", "mark a declared variable secret — never stored in the spec (repeatable)", collect, [])
+    .option("--readme <path>", "attach a README file (rendered on the template page)")
+    .option("--allow <key>", "allow a flagged credential-looking env value through (audited; repeatable)", collect, [])
+    .option("--org <slug>", "publish into this organisation (default: your personal org)")
+    .action(
+      async (opts: {
+        slug: string;
+        fromStack?: string;
+        file?: string;
+        name?: string;
+        description?: string;
+        visibility?: string;
+        var: string[];
+        required: string[];
+        secret: string[];
+        readme?: string;
+        allow: string[];
+        org?: string;
+      }) => {
+        const requiredSet = new Set(opts.required);
+        const secretSet = new Set(opts.secret);
+        const variables = opts.var.map((s) => parseVarSpec(s, requiredSet, secretSet));
+        const readme = opts.readme ? await readFile(opts.readme, "utf8") : undefined;
+        const visibility = opts.visibility === "public" ? "public" : "org";
+        const payload: Parameters<Client["templatePublish"]>[0] = {
+          slug: opts.slug,
+          name: opts.name,
+          description: opts.description,
+          visibility,
+          variables,
+          readme,
+          allow: opts.allow,
+          org: opts.org,
+        };
+        if (opts.fromStack) {
+          payload.from_stack = opts.fromStack;
+        } else {
+          const path = opts.file ?? join(".", CONFIG_FILE_YAML);
+          const text = await readFile(path, "utf8");
+          const spec = parseStackConfig(text);
+          if (!spec) throw new Error(`${path} has no valid stack: section (needs a name and at least one resource)`);
+          payload.spec = spec;
+        }
+        const res = await (await client()).templatePublish(payload);
+        console.log(`  ✓ published template ${res.slug} v${res.version} (${res.visibility}) — ${res.resources} resource(s)`);
+        for (const n of res.notes ?? []) console.log(`    · ${n}`);
+        for (const r of res.removed ?? []) console.log(`    · removed secret env ${r.resourceKey}.${r.envKey}`);
+        console.log(`  deploy it with:  drop new ${res.slug}`);
+      },
+    );
+  template
+    .command("ls")
+    .description("List templates you can see (public + your orgs')")
+    .action(async () => show(await (await client()).templateList()));
+  template
+    .command("show <slug>")
+    .description("Show a template's variables, readme, and spec")
+    .option("--version <v>", "a specific version (default: latest)")
+    .action(async (slug: string, opts: { version?: string }) => show(await (await client()).templateGet(slug, opts.version)));
+
+  // `drop new <slug>` — instantiate a template into a new stack (prompts for missing required vars on a TTY).
+  program
+    .command("new <slug>")
+    .description("Instantiate a template into a new stack (resolves variables, runs up, writes returned secrets)")
+    .option("--version <v>", "instantiate a specific version (default: latest)")
+    .option("--org <slug>", "create in this organisation (default: your personal org)")
+    .option("--set <k=v>", "set a variable value (repeatable; wins over prompts)", collect, [])
+    .option("--name <stackname>", "the new stack's name (default: the slug)")
+    .option("--dry-run", "resolve + print the plan without creating anything")
+    .action(async (slug: string, opts: { version?: string; org?: string; set: string[]; name?: string; dryRun?: boolean }) => {
+      const c = await client();
+      const tpl = await c.templateGet(slug, opts.version);
+      const variables: TemplateVarSpec[] = tpl.variables ?? [];
+      let values = parseSets(opts.set);
+      values = await promptMissingVars(variables, values);
+      const name = opts.name ?? slug;
+      const err = validateName(name);
+      if (err) throw new Error(`stack name "${name}": ${err}`);
+
+      const res = await c.templateInstantiate(slug, { name, org: opts.org, vars: values, version: opts.version }, opts.dryRun);
+      if (opts.dryRun || res.dryRun) {
+        console.log(`  plan for ${name} (from ${slug} v${res.version ?? tpl.version}):`);
+        for (const s of res.plan ?? []) console.log(`    ${s.action.padEnd(6)} ${s.kind.padEnd(9)} ${s.key} → ${s.siteName}`);
+        if ((res.secretsToSet ?? []).length) console.log(`  would set ${res.secretsToSet.length} secret(s): ${res.secretsToSet.map((s: any) => `${s.app}.${s.key}`).join(", ")}`);
+        console.log("  (dry run — nothing applied)");
+        return;
+      }
+      console.log(`  ✓ stack ${res.stack} created from template ${slug} v${res.version} (spec v${res.specVersion})`);
+      // Write the secrets the server lifted out of the spec, then restart the apps that got them.
+      const secrets: { app: string; key: string; value: string }[] = res.secretsToSet ?? [];
+      const restarted = new Set<string>();
+      for (const s of secrets) {
+        await c.setSecret(s.app, s.key, s.value);
+        console.log(`    · set secret ${s.app}.${s.key}`);
+      }
+      for (const s of secrets) {
+        if (restarted.has(s.app)) continue;
+        restarted.add(s.app);
+        await c.restartApp(s.app).catch(() => {}); // best-effort: the app may be scale-to-zero / not yet started
+      }
+      for (const need of res.needs ?? []) {
+        console.log(`    · note: resource ${need.key} still needs ${need.kind} (build/publish it, or re-run from source)`);
+      }
+      console.log(`  view it:  drop stack status ${res.stack}`);
+    });
 
   const db = program.command("db").description("Manage managed Postgres databases (create / password)");
   db

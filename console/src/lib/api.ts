@@ -204,6 +204,60 @@ export interface StackGraph {
   plan?: GraphPlanStep[]; // present only with ?include_plan; already filtered to non-noop steps
 }
 
+// ---- Templates (D1) ----
+export interface TemplateVariable {
+  key: string;
+  description?: string;
+  default?: string;
+  required: boolean;
+  secret?: boolean;
+}
+export interface TemplateListItem {
+  slug: string;
+  name: string;
+  description: string | null;
+  visibility: "public" | "org";
+  org?: Org | null;
+  latestVersion: string | null;
+  resources: number;
+  createdAt: string;
+}
+/** A template resource — a loose union over the stack resource kinds (only the fields the preview reads). */
+export interface TemplateResource {
+  type: WorkloadType;
+  name?: string;
+  image?: string;
+  dir?: string;
+  env?: Record<string, string>;
+  uses?: { database?: string; bucket?: string }[];
+  env_from?: { resource: string; as: string; output: string }[];
+  storage?: string;
+}
+export interface TemplateSpec {
+  name: string;
+  resources: Record<string, TemplateResource>;
+}
+export interface TemplateDetail {
+  slug: string;
+  name: string;
+  description: string | null;
+  visibility: "public" | "org";
+  org?: Org | null;
+  version: string;
+  versions: string[];
+  variables: TemplateVariable[];
+  readme: string | null;
+  spec: TemplateSpec;
+}
+export interface InstantiateResult {
+  stack: string;
+  version: string;
+  specVersion: number;
+  plan: GraphPlanStep[];
+  secretsToSet: { app: string; resourceKey: string; key: string; value: string }[];
+  needs?: { key: string; kind: string; siteName: string }[];
+}
+
 async function req<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
@@ -260,7 +314,39 @@ export const api = {
   // stacks (B2/C1)
   stacks: () => req<{ stacks: StackListItem[] }>("GET", "/v1/stacks"),
   stackGraph: (name: string) => req<StackGraph>("GET", `/v1/stacks/${encodeURIComponent(name)}/graph?include_plan=1`),
+  // templates (D1)
+  templates: () => req<{ templates: TemplateListItem[] }>("GET", "/v1/templates"),
+  template: (slug: string, version?: string) => req<TemplateDetail>("GET", `/v1/templates/${encodeURIComponent(slug)}${version ? `?version=${encodeURIComponent(version)}` : ""}`),
+  instantiate: (slug: string, body: { name: string; org?: string; vars: Record<string, string>; version?: string }) =>
+    req<InstantiateResult>("POST", `/v1/templates/${encodeURIComponent(slug)}/instantiate`, body),
 };
+
+/**
+ * Build a read-only C1 StackGraph from a template spec — NODES ONLY, no live status (a preview never
+ * polls the cluster). Edges mirror the server graph: db→app via `uses`, app→site via `env_from`.
+ */
+export function templatePreviewGraph(spec: TemplateSpec): StackGraph {
+  const nodes: GraphNode[] = Object.entries(spec.resources).map(([key, res]) => ({
+    key,
+    siteName: res.name ?? `${spec.name}-${key}`,
+    type: res.type,
+    url: "",
+    currentVersion: null,
+    exists: false,
+    status: { status: "unknown", reason: "preview" },
+  }));
+  const keys = new Set(nodes.map((n) => n.key));
+  const edges: GraphEdge[] = [];
+  for (const [key, res] of Object.entries(spec.resources)) {
+    if (res.type === "app")
+      for (const u of res.uses ?? []) {
+        const target = u.database ?? u.bucket;
+        if (target && keys.has(target)) edges.push({ from: target, to: key, kind: "uses", label: u.database ? "PG*" : "S3_*" });
+      }
+    if (res.type === "site") for (const e of res.env_from ?? []) if (keys.has(e.resource)) edges.push({ from: e.resource, to: key, kind: "env_from", label: "URL at publish" });
+  }
+  return { name: spec.name, specVersion: 0, nodes, edges };
+}
 
 /** The detail route for a graph node's workload type — the existing per-type detail page. */
 export const stackNodePath = (n: { type: WorkloadType; siteName: string }): string => `/${n.type}/${encodeURIComponent(n.siteName)}`;

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Templates · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="templates.html" class="active">Templates</a>
+      <a href="buckets.html">Buckets (object storage)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <a href="tokens.html">CI tokens (service accounts)</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Templates</h1>
+<p class="lead">A <strong>template</strong> is a published, reusable <a href="stacks.html">stack</a>: a sanitized spec plus a set of <em>variables</em>, stored per-instance in a registry. Anyone who can see it runs <code>drop new &lt;slug&gt;</code> (or clicks "Deploy this stack" in the console) to instantiate their own copy — the same declarative <code>up</code> that reconciles a hand-written stack, with variables substituted and secrets collected. Templates are the golden-path catalog: publish a working stack once, and the next team ships in one command.</p>
+
+<div class="note"><span class="lbl">Note</span><p>Publishing runs a <strong>strip pass</strong> that refuses (fail-closed) to bake secrets or pinned image digests into a shared spec. Instantiating never stores a secret in the template or the stack spec — secret variables are written through the same <a href="cli-mcp.html">write-only secret path</a> as <code>drop secret set</code>.</p></div>
+
+<h2>Model</h2>
+<p>The registry is <strong>per-instance</strong>. A template is org-owned, with a slug that is unique across the whole instance (the <code>drop new</code> namespace), and each published version is immutable:</p>
+<pre><code><span class="tok-k">templates</span>(id, slug <span class="tok-c">unique</span>, org_id, name, description, visibility, created_by, created_at)
+<span class="tok-k">template_versions</span>(template_id, version, spec, variables, readme, created_by, created_at)</code></pre>
+<table>
+<thead><tr><th>Visibility</th><th>Who can see / instantiate it</th></tr></thead>
+<tbody>
+<tr><td><code>public</code></td><td><strong>Instance-wide</strong> — every user of this Drop. The default for an internal-tool catalog.</td></tr>
+<tr><td><code>org</code></td><td><strong>Members only</strong> — anyone in the owning organisation. It is a <code>404</code> for outsiders (list, get and instantiate).</td></tr>
+</tbody>
+</table>
+<p>Re-publishing a slug appends a new version (never mutates an existing one) and refreshes the catalog card's name/description/visibility. <code>drop new</code> takes <code>--version</code> to pin an older one.</p>
+
+<h2>Variables</h2>
+<p>A variable is <code>{ key, description?, default?, required, secret? }</code>. Two placeholders are substituted across every string value of the spec at instantiate time:</p>
+<table>
+<thead><tr><th>Placeholder</th><th>Resolves to</th></tr></thead>
+<tbody>
+<tr><td><code>${var.KEY}</code></td><td>the variable's value — an explicit <code>--set</code> wins, else its <code>default</code>. A <code>required</code> variable with neither is a <code>400</code> (the CLI prompts for it on a TTY).</td></tr>
+<tr><td><code>${stack}</code></td><td>the new stack's name — so template-relative hostnames like <code>${stack}-db-rw</code> resolve to the instantiated database.</td></tr>
+</tbody>
+</table>
+<div class="note warn"><span class="lbl">Secrets never touch the spec</span><p>A <code>secret: true</code> variable may only be used as the <strong>whole value</strong> of a resource <code>env</code> entry (e.g. <code>SESSION_SECRET: ${var.session_secret}</code>). At instantiate that entry is <em>lifted out</em> of the spec into a <code>secretsToSet</code> plan — <code>{ app, key, value }</code> — that the CLI (or console, or MCP tool) writes through the write-only secret path <strong>after</strong> the <code>up</code>, then restarts the app. The secret value is never stored in the template, never in the stack spec, and never in the audit log (only the key name is recorded). Using a secret variable anywhere else is a hard error.</p></div>
+
+<h2>Publishing &amp; the strip pass</h2>
+<p>Publish from an existing, working stack (<code>--from-stack</code>) or from a <code>drop.yaml</code>'s <code>stack:</code> section (<code>--file</code>):</p>
+<pre><code><span class="tok-c">$ drop template publish --from-stack myproduct --slug myproduct \</span>
+<span class="tok-c">    --visibility public --var 'db_storage:database volume size:1Gi' \</span>
+<span class="tok-c">    --var 'session_secret:app session secret' --required session_secret --secret session_secret \</span>
+<span class="tok-c">    --readme README.md</span></code></pre>
+<p>A <code>--from-stack</code> export captures each app's <strong>deployed</strong> image (a mutable tag) so the template is instantiable without the original source. Then the strip pass runs:</p>
+<table>
+<thead><tr><th>Step</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td>Digests</td><td>A concrete image digest (<code>repo:tag@sha256:…</code>) is stripped to <code>repo:tag</code>. <code>dir:</code> build contexts and mutable tags are kept.</td></tr>
+<tr><td>Stack-relative</td><td>Explicit resource <code>name:</code> overrides are dropped (instantiate re-derives <code>&lt;stack&gt;-&lt;key&gt;</code>); the concrete stack-name prefix inside env values is rewritten to <code>${stack}</code>.</td></tr>
+<tr><td>Registered secrets</td><td>Env keys already registered as write-only secrets (<code>app_secret_keys</code>) are removed — they never belong in a shared spec.</td></tr>
+<tr><td>Credential flag</td><td>A remaining env value whose <em>key</em> looks secret (<code>/pass|secret|token|key|credential/i</code>) <strong>and</strong> whose value has high entropy is <strong>flagged</strong> — unless it is already variable-ized (<code>${var.…}</code>) or explicitly allowed.</td></tr>
+</tbody>
+</table>
+<div class="note warn"><span class="lbl">Fail closed</span><p>Publishing <strong>refuses</strong> while any flagged value remains. Fix it the right way — replace it with a <code>${var.…}</code> variable — or, once you've confirmed it is <em>not</em> a secret, pass <code>--allow &lt;ENVKEY&gt;</code> to let that specific value through. Every <code>--allow</code> is recorded in the audit trail (<code>template.publish</code>).</p></div>
+
+<h2>Instantiating — <code>drop new</code></h2>
+<pre><code><span class="tok-c">$ drop new myproduct</span>                          <span class="tok-c"># latest version, stack name = the slug</span>
+<span class="tok-c">$ drop new myproduct --name shop --set db_storage=5Gi</span>
+<span class="tok-c">$ drop new myproduct --version 2 --org acme</span>     <span class="tok-c"># a pinned version, into a team org</span></code></pre>
+<p><code>drop new</code> resolves the template, fills variables from <code>--set</code> (which always wins) and <strong>prompts</strong> for any missing required variable on an interactive terminal, then runs the same reconcile as <code>drop up</code>. The new stack records its <strong>provenance</strong> (<code>from_template</code>, <code>from_template_version</code>), so <code>drop stack outdated</code> can later compare it against the template's latest. After the up, the CLI writes any returned secrets to their apps and restarts them, printing exactly what it set.</p>
+<p>Agents use the MCP tools <code>template_list</code>, <code>template_show</code> and <code>template_deploy</code>. As with stacks, the agent-safe shape is <strong>plan first</strong>: <code>template_deploy</code> with <code>dry_run: true</code> returns the ordered plan before anything is created.</p>
+
+<h2>The console &amp; deep-link badges</h2>
+<p>The <strong>Templates</strong> tab lists every template you can see as cards (name, description, visibility badge). Each card deep-links to <code>/template/&lt;slug&gt;</code> — a page that renders the README, a variables form (required, defaults, and <em>secret fields as password inputs</em>), a read-only canvas preview of the stack graph, and a <strong>Deploy this stack</strong> button that instantiates it and drops you on the new stack's canvas.</p>
+<p>That deep link is stable, so a docs page or README can carry a "Deploy on Drop" badge pointing straight at <code>https://&lt;your-drop&gt;/template/&lt;slug&gt;</code>.</p>
+
+<h2>Seeding the catalog</h2>
+<p>The two <a href="../examples/">examples</a> ship as ready-to-publish templates. With the API running locally (dev-auth on by default):</p>
+<pre><code><span class="tok-c">$ make seed-templates</span>       <span class="tok-c"># idempotent — publishes `guestbook` + `notes` if absent</span></code></pre>
+<p>It runs <code>scripts/seed-templates.mjs</code> against <code>DROP_API</code> (set <code>DROP_TOKEN</code> for a CI service token instead of the local dev token). Each seed publishes an image-pinned stack with a <code>db_storage</code> variable and a secret <code>session_secret</code>, so instantiating one exercises the whole loop end-to-end.</p>
+
+<div class="next">
+  <a href="stacks.html"><div class="d">← Back</div><div class="t">Stacks</div></a>
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

@@ -185,6 +185,37 @@ export interface ServiceTokensTable {
   revoked_at: Ts | null; // soft revocation mark (null = live)
 }
 
+/** A publishable template (D1): a named, org-owned, visibility-scoped catalog entry. `slug` is UNIQUE
+ *  instance-wide (the golden-path namespace). `visibility` is 'public' (instance-wide) | 'org' (members
+ *  only). Its published versions live in `template_versions`. */
+export interface TemplatesTable {
+  id: string;
+  slug: string;
+  org_id: string;
+  name: string;
+  description: string | null;
+  visibility: ColumnType<TemplateVisibility, TemplateVisibility | undefined, TemplateVisibility>;
+  created_by: string;
+  created_at: Generated<Ts>;
+}
+
+export type TemplateVisibility = "public" | "org";
+
+/** jsonb template spec (a sanitized, stripped StackSpec) + jsonb variable declarations. */
+type JsonTemplateSpec = ColumnType<StackSpec, string, string>;
+
+/** One immutable published version of a template (D1). `version` is a monotonic integer-as-text. `spec`
+ *  is the template-relative stack spec; `variables` is the TemplateVariable[] declaration array. */
+export interface TemplateVersionsTable {
+  template_id: string;
+  version: string;
+  spec: JsonTemplateSpec;
+  variables: ColumnType<unknown[], string, string>; // jsonb TemplateVariable[]: stringify on write, parse at store boundary
+  readme: string | null;
+  created_by: string;
+  created_at: Generated<Ts>;
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -201,4 +232,6 @@ export interface Database {
   org_quotas: OrgQuotasTable;
   tcp_endpoints: TcpEndpointsTable;
   service_tokens: ServiceTokensTable;
+  templates: TemplatesTable;
+  template_versions: TemplateVersionsTable;
 }

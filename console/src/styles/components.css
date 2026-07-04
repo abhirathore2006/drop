@@ -1189,3 +1189,84 @@ code.reveal {
   margin-top: 22px;
   font-size: 13px;
 }
+
+/* ---- D1: template detail page (/template/:slug) ---- */
+.template-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 20px;
+  margin-top: 14px;
+}
+@media (min-width: 900px) {
+  .template-grid {
+    grid-template-columns: 1.4fr 1fr;
+  }
+}
+.template-readme h3,
+.template-deploy h3,
+.template-preview h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+.template-readme .readme {
+  font-size: 14px;
+  line-height: 1.55;
+}
+.template-readme .readme h4 {
+  margin: 14px 0 6px;
+  font-size: 15px;
+}
+.template-readme .readme h5 {
+  margin: 12px 0 6px;
+  font-size: 13px;
+}
+.template-readme .readme h6 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.template-readme .readme ul {
+  margin: 6px 0 6px 18px;
+}
+.template-deploy {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  align-self: start;
+}
+.template-deploy input {
+  width: 100%;
+}
+.template-deploy .lbl,
+.vars-head {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 8px 0 4px;
+}
+.vars-head {
+  margin-top: 16px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.template-deploy .req {
+  color: var(--danger, #d33);
+}
+.vars-secret {
+  margin-left: 6px;
+  font-size: 10px;
+}
+.small {
+  font-size: 12px;
+}
+.template-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+.template-legend .legend-chip {
+  cursor: default;
+}

@@ -62,7 +62,7 @@ ENV    := DROP_S3_BUCKET=$(BUCKET) DROP_S3_ENDPOINT=http://localhost:$(FLOCI_POR
 LOADENV := set -a; [ -f .env ] && . ./.env; : "$${DROP_DEV_AUTH:=1}"; set +a;
 
 .DEFAULT_GOAL := help
-.PHONY: help setup start stop restart status logs floci postgres publish login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down nuke dev-console
+.PHONY: help setup start stop restart status logs floci postgres publish seed-templates login stop-all build reset trust-cert untrust-cert compute-up compute-down cluster-up cluster-down engine doctor up down nuke dev-console
 
 help:
 	@echo "Drop — local dev (node $(NODE_VERSION)):"
@@ -342,3 +342,8 @@ publish:
 	@$(LOADENV) if [ "$$DROP_DEV_AUTH" = "1" ]; then $(NODE) dist/drop.js dev-login alice alice@example.com --api http://localhost:$(API_PORT) >/dev/null; fi
 	@$(NODE) dist/drop.js publish $(DIR) $(NAME) --api http://localhost:$(API_PORT)
 	@[ -n "$(NAME)" ] && echo "view:  http://$(NAME).$(BASE_DOMAIN):$(EDGE_PORT)/" || echo "(local URL is http://<name>.$(BASE_DOMAIN):$(EDGE_PORT)/ )"
+
+# Seed the D1 template registry with the two example apps (idempotent). Needs the API up + DROP_DEV_AUTH=1
+# (the default with no .env). See scripts/seed-templates.mjs + docs/templates.html.
+seed-templates:
+	@$(LOADENV) DROP_API=http://localhost:$(API_PORT) $(NODE) scripts/seed-templates.mjs

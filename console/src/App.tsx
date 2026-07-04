@@ -15,6 +15,7 @@ import { LoginGate } from "./pages/LoginGate.tsx";
 import { SettingsPage } from "./pages/SettingsPage.tsx";
 import { StackPage } from "./pages/StackPage.tsx";
 import { StacksPage } from "./pages/StacksPage.tsx";
+import { TemplatePage } from "./pages/TemplatePage.tsx";
 import { TemplatesPage } from "./pages/TemplatesPage.tsx";
 import { WorkloadDetailPage } from "./pages/WorkloadDetailPage.tsx";
 import { WorkloadsPage } from "./pages/WorkloadsPage.tsx";
@@ -107,6 +108,14 @@ function Shell({ me }: { me: Me }) {
               </Route>
               <Route path="/templates">
                 <TemplatesPage />
+              </Route>
+              <Route path="/template/:slug">
+                {(p) => (
+                  <>
+                    <DocTitle title={`${dec(p.slug)} · template · drop`} />
+                    <TemplatePage key={p.slug} slug={dec(p.slug)} />
+                  </>
+                )}
               </Route>
               <Route path="/activity">
                 <ActivityPage me={me} />

@@ -1710,6 +1710,131 @@ test("stack graph: compute-off degrades statuses to the no-status outputs (endpo
   await db.destroy();
 });
 
+// ============================ D1: template registry ============================
+const widgetTpl = {
+  name: "widget",
+  resources: {
+    db: { type: "database", storage: "1Gi" },
+    web: {
+      type: "app",
+      image: "web:1",
+      uses: [{ database: "db" }],
+      env: { PGHOST: "${stack}-db-rw", SESSION_SECRET: "${var.session}" },
+    },
+  },
+};
+const sessionVar = [{ key: "session", description: "app session secret", required: true, secret: true }];
+
+test("template publish → list → get → instantiate: provenance recorded, secretsToSet NOT in spec, audited", async () => {
+  const { app, audit, db } = await mk();
+
+  // publish (public); the strip pass sees no flags (SESSION_SECRET is variable-ized)
+  const pub = await call(app, "POST", "/v1/templates", "alice", { slug: "widget", name: "Widget", visibility: "public", spec: widgetTpl, variables: sessionVar, readme: "# Widget\nA guestbook template." });
+  expect(pub.status).toBe(200);
+  expect((await pub.json()).version).toBe("1");
+
+  // list (public → visible to everyone, incl. bob)
+  const list = await (await call(app, "GET", "/v1/templates", "alice")).json();
+  expect(list.templates.map((t: any) => t.slug)).toContain("widget");
+  expect((await (await call(app, "GET", "/v1/templates", "bob")).json()).templates.map((t: any) => t.slug)).toContain("widget");
+
+  // get: readme + variables + the template-relative spec (secret still declared, not yet resolved)
+  const get = await (await call(app, "GET", "/v1/templates/widget", "alice")).json();
+  expect(get.readme).toContain("Widget");
+  expect(get.variables).toEqual(sessionVar);
+  expect(get.spec.resources.web.env.SESSION_SECRET).toBe("${var.session}");
+
+  // instantiate → new stack "shop"; runs the same up path
+  const inst = await call(app, "POST", "/v1/templates/widget/instantiate", "alice", { name: "shop", vars: { session: "top-secret-value" } });
+  expect(inst.status).toBe(200);
+  const body = await inst.json();
+  expect(body.stack).toBe("shop");
+  expect(body.version).toBe("1");
+  expect(body.plan.map((s: any) => [s.action, s.key])).toEqual([["create", "db"], ["create", "web"]]);
+  // secretsToSet resolved to the materialized app name + carries the value the caller supplied
+  expect(body.secretsToSet).toEqual([{ app: "shop-web", resourceKey: "web", key: "SESSION_SECRET", value: "top-secret-value" }]);
+
+  // the applied stack spec has ${stack} resolved and the SECRET REMOVED, and records provenance
+  const stack = await (await call(app, "GET", "/v1/stacks/shop", "alice")).json();
+  expect(stack.spec.resources.web.env.PGHOST).toBe("shop-db-rw");
+  expect(stack.spec.resources.web.env.SESSION_SECRET).toBeUndefined();
+  expect(stack.fromTemplate).toBe("widget");
+  expect(stack.fromTemplateVersion).toBe("1");
+
+  // audit rows for BOTH the publish and the instantiate
+  expect((await audit.list({ action: "template.publish" })).entries.map((e: any) => e.target)).toContain("widget");
+  expect((await audit.list({ action: "stack.instantiate" })).entries.map((e: any) => e.target)).toContain("shop");
+  // secret VALUE never lands in the audit trail
+  expect(JSON.stringify(await audit.list({ action: "stack.instantiate" }))).not.toContain("top-secret-value");
+  await db.destroy();
+});
+
+test("template instantiate dry-run returns the plan and creates nothing", async () => {
+  const { app, kube, db } = await mk();
+  await call(app, "POST", "/v1/templates", "alice", { slug: "widget", spec: widgetTpl, variables: sessionVar });
+  const dry = await call(app, "POST", "/v1/templates/widget/instantiate?dry_run=1", "alice", { name: "shop2", vars: { session: "x" } });
+  expect(dry.status).toBe(200);
+  const b = await dry.json();
+  expect(b.dryRun).toBe(true);
+  expect(b.plan.map((s: any) => [s.action, s.key])).toEqual([["create", "db"], ["create", "web"]]);
+  expect(kube.applies.length).toBe(0); // nothing hit the cluster
+  expect((await call(app, "GET", "/v1/stacks/shop2", "alice")).status).toBe(404); // no stack created
+  await db.destroy();
+});
+
+test("template instantiate: a missing required variable is a 400 (no stack created)", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/templates", "alice", { slug: "widget", spec: widgetTpl, variables: sessionVar });
+  const miss = await call(app, "POST", "/v1/templates/widget/instantiate", "alice", { name: "shop3", vars: {} });
+  expect(miss.status).toBe(400);
+  expect((await miss.json()).missing).toContain("session");
+  expect((await call(app, "GET", "/v1/stacks/shop3", "alice")).status).toBe(404);
+  await db.destroy();
+});
+
+test("template visibility: an org template is 404 for a non-member (list + get + instantiate)", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" });
+  const spec = { name: "internaltpl", resources: { db: { type: "database" } } };
+  expect((await call(app, "POST", "/v1/templates?org=acme", "alice", { slug: "internal", visibility: "org", spec, variables: [] })).status).toBe(200);
+
+  // alice (member) sees it; bob (outsider) does not
+  expect((await (await call(app, "GET", "/v1/templates/internal", "alice")).json()).slug).toBe("internal");
+  expect((await call(app, "GET", "/v1/templates/internal", "bob")).status).toBe(404);
+  expect((await (await call(app, "GET", "/v1/templates", "bob")).json()).templates.map((t: any) => t.slug)).not.toContain("internal");
+  expect((await call(app, "POST", "/v1/templates/internal/instantiate", "bob", { name: "x" })).status).toBe(404);
+  await db.destroy();
+});
+
+test("template publish FAILS CLOSED on a credential-looking value; --allow lets it through (audited)", async () => {
+  const { app, audit, db } = await mk();
+  const leaky = { name: "leaky", resources: { web: { type: "app", image: "w:1", env: { API_TOKEN: "aB3xK9pQ2mZ7wL4vR8nT" } } } };
+  const bad = await call(app, "POST", "/v1/templates", "alice", { slug: "leaky", spec: leaky, variables: [] });
+  expect(bad.status).toBe(400);
+  expect((await bad.json()).flags.length).toBe(1);
+
+  const ok = await call(app, "POST", "/v1/templates", "alice", { slug: "leaky", spec: leaky, variables: [], allow: ["API_TOKEN"] });
+  expect(ok.status).toBe(200);
+  const trail = await audit.list({ action: "template.publish" });
+  expect((trail.entries.find((e: any) => e.target === "leaky")!.detail as any).allow).toEqual(["API_TOKEN"]);
+  await db.destroy();
+});
+
+test("template publish preserves ${var} placeholders in TYPED fields; instantiate substitutes them", async () => {
+  const { app, db } = await mk();
+  const spec = { name: "sized", resources: { db: { type: "database", storage: "${var.db_storage}" } } };
+  await call(app, "POST", "/v1/templates", "alice", { slug: "sized", spec, variables: [{ key: "db_storage", default: "1Gi", required: false }] });
+  // the stored template spec keeps the placeholder (the full sanitizer would have reset it to the default)
+  const get = await (await call(app, "GET", "/v1/templates/sized", "alice")).json();
+  expect(get.spec.resources.db.storage).toBe("${var.db_storage}");
+  // instantiate with an override (within the 1Gi per-database cap) → substituted into the concrete spec
+  const inst = await call(app, "POST", "/v1/templates/sized/instantiate", "alice", { name: "sizedstack", vars: { db_storage: "512Mi" } });
+  expect(inst.status).toBe(200);
+  const stack = await (await call(app, "GET", "/v1/stacks/sizedstack", "alice")).json();
+  expect(stack.spec.resources.db.storage).toBe("512Mi");
+  await db.destroy();
+});
+
 // ============================ I1: buckets + item 10 quotas ============================
 
 test("bucket create returns creds ONCE; detail exposes usage but NEVER creds; audited", async () => {

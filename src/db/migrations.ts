@@ -315,6 +315,46 @@ const m0010_service_tokens: Migration = {
   },
 };
 
+// Template registry (D1): a per-INSTANCE catalog of publishable stack specs. A `templates` row is the
+// named, org-owned, visibility-scoped catalog entry (slug UNIQUE instance-wide — the golden-path
+// namespace); `template_versions` holds each immutable published version's sanitized stack spec, its
+// variable declarations, and a readme. `visibility='public'` is instance-wide (the internal-tool
+// default); `visibility='org'` is members-only. Instantiating (`drop new <slug>`) resolves the latest
+// (or a pinned) version, substitutes variables, and runs the SAME reconcile as a stack `up`, recording
+// provenance on the created stack (`from_template`/`from_template_version` — columns already on `stacks`).
+const m0011_templates: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("templates")
+      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn("slug", "text", (c) => c.notNull().unique()) // instance-wide golden-path namespace
+      .addColumn("org_id", "text", (c) => c.notNull().references("organisations.id").onDelete("cascade"))
+      .addColumn("name", "text", (c) => c.notNull())
+      .addColumn("description", "text")
+      .addColumn("visibility", "text", (c) => c.notNull().defaultTo("org")) // 'public' (instance-wide) | 'org' (members only)
+      .addColumn("created_by", "text", (c) => c.notNull().references("users.email"))
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    // Visibility-scoped browse: public templates are instance-wide; org templates filter by org_id.
+    await db.schema.createIndex("templates_visibility_idx").on("templates").columns(["visibility", "org_id"]).execute();
+
+    await db.schema
+      .createTable("template_versions")
+      .addColumn("template_id", "text", (c) => c.notNull().references("templates.id").onDelete("cascade"))
+      .addColumn("version", "text", (c) => c.notNull()) // monotonic integer-as-text ("1","2",…)
+      .addColumn("spec", "jsonb", (c) => c.notNull()) // the sanitized, stripped, template-relative stack spec
+      .addColumn("variables", "jsonb", (c) => c.notNull()) // TemplateVariable[] declarations
+      .addColumn("readme", "text")
+      .addColumn("created_by", "text", (c) => c.notNull().references("users.email"))
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addPrimaryKeyConstraint("template_versions_pk", ["template_id", "version"])
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -329,6 +369,7 @@ export class InlineMigrations implements MigrationProvider {
       "0008_org_quotas": m0008_org_quotas,
       "0009_tcp_endpoints": m0009_tcp_endpoints,
       "0010_service_tokens": m0010_service_tokens,
+      "0011_templates": m0011_templates,
     };
   }
 }

@@ -29,7 +29,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 7 | C1 Read-only canvas | done | 4506133 | graph endpoint w/ aggregated ns status lists; xyflow lazy chunk; CSP unchanged |
 | 8 | I1 Buckets (+FM item 10 quotas) | done | eba3cc9 | floci prefix store; org_quotas migration 0008; aws-iam store deferred (TF template) |
 | 9 | A2 L4 plane: NLB + TCP router | done | see log | A2a a477b9c + A2b (this commit); stack-driven expose deferred |
-| 10 | J1 Service accounts / CI tokens | todo | | |
+| 10 | J1 Service accounts / CI tokens | done | 2b4056c | drop_st_ tokens; scope grammar; DROP_TOKEN CI env; console Tokens tab |
 | 11 | D1 Template registry | todo | | |
 | 12 | E1 Static previews · H2 cron | in-progress | eba3cc9 | H2 done (in I1+H2 commit); E1 dispatching |
 | 13 | I2 Valkey · I3 PG depth | todo | | |

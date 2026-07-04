@@ -246,6 +246,34 @@ export class Client {
     const qs = q.toString();
     return this.req("DELETE", `/v1/stacks/${name}${qs ? `?${qs}` : ""}`);
   }
+  // templates (D1): publish / list / get / instantiate
+  templatePublish(payload: {
+    slug: string;
+    name?: string;
+    description?: string;
+    visibility?: "public" | "org";
+    spec?: StackSpec;
+    from_stack?: string;
+    variables?: { key: string; description?: string; default?: string; required: boolean; secret?: boolean }[];
+    readme?: string;
+    allow?: string[];
+    org?: string;
+  }) {
+    const { org, ...rest } = payload;
+    return this.req("POST", `/v1/templates${this.orgQ(org)}`, { contentType: "application/json", body: JSON.stringify(rest) });
+  }
+  templateList() {
+    return this.req("GET", `/v1/templates`);
+  }
+  templateGet(slug: string, version?: string) {
+    return this.req("GET", `/v1/templates/${encodeURIComponent(slug)}${version ? `?version=${encodeURIComponent(version)}` : ""}`);
+  }
+  templateInstantiate(slug: string, payload: { name: string; org?: string; vars?: Record<string, string>; version?: string }, dryRun?: boolean) {
+    return this.req("POST", `/v1/templates/${encodeURIComponent(slug)}/instantiate${dryRun ? "?dry_run=1" : ""}`, {
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  }
   // platform admin: users + roles + status
   adminListUsers() {
     return this.req("GET", `/v1/admin/users`);

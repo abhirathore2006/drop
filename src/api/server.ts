@@ -30,6 +30,10 @@ import { QuotaStore, validateQuota, QUOTA_KEYS } from "../quotas/store.ts";
 import { sanitizeStackConfig, validateStackEdges, resolveResourceName, type StackSpec, type StackResource } from "../stack-config.ts";
 import { planStack, StackCycleError, type LivePresence, type PlanStep } from "../stacks/plan.ts";
 import { StackStore } from "../stacks/store.ts";
+import { TemplateStore, validateTemplateSlug } from "../templates/store.ts";
+import type { TemplateVisibility } from "../db/schema.ts";
+import { substituteTemplate, sanitizeVariables } from "../templates/vars.ts";
+import { stripStackSpec } from "../templates/strip.ts";
 import { appManifests, releaseJobManifest, tenantManifests, type ExposedWorkload } from "../kube/manifests.ts";
 import { TcpEndpointStore, PortPoolExhaustedError, type TcpEndpoint } from "../edge-tcp/store.ts";
 import { databaseManifests } from "../kube/cnpg.ts";
@@ -59,6 +63,7 @@ export interface Deps {
   quotas?: QuotaStore; // (item 10) per-org quota overrides; defaults over `db`
   locks?: LockStore; // lease-based advisory locks (serialize deploy/release per app); defaults over `db`
   stacks?: StackStore; // stack metadata + resource mapping (B2); defaults over `db`
+  templates?: TemplateStore; // (D1) template registry (templates + template_versions); defaults over `db`
   tcp?: TcpEndpointStore; // (A2b) TCP exposure registry (tcp_endpoints); defaults over `db`
   tokens?: ServiceTokenStore; // (J1) service accounts / scoped CI tokens; defaults over `db`
   now?: () => Date;
@@ -75,6 +80,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const now = d.now ?? (() => new Date());
   const locks = d.locks ?? new LockStore(d.db); // serialize deploy/release per app
   const stacks = d.stacks ?? new StackStore(d.db); // stack metadata + resource mapping
+  const templates = d.templates ?? new TemplateStore(d.db); // (D1) template registry
   const buckets = d.bucket ?? makeBucketStore(d.cfg); // (I1) tenant object storage (floci-prefix locally)
   const quotas = d.quotas ?? new QuotaStore(d.db); // (item 10) per-org quota overrides
   const tcp = d.tcp ?? new TcpEndpointStore(d.db); // (A2b) TCP exposure registry
@@ -2013,46 +2019,59 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // The per-resource action a caller must hold to reconcile an EXISTING resource of this kind.
   const actionForKind = (kind: "site" | "app" | "database" | "bucket"): Action => (kind === "site" ? "publish" : kind === "app" ? "deploy" : "db:create"); // bucket reconcile is create-tier (db:create)
 
-  // ---- POST /v1/stacks/:name/up : reconcile the desired spec (plan + execute; ?dry_run=1 = plan) ----
-  app.post("/v1/stacks/:name/up", async (c) => {
-    const email = c.get("identity").email;
-    const name = c.req.param("name");
-    const nameErr = validateName(name);
-    if (nameErr) return c.json({ error: nameErr }, 400);
+  // The last-deployed image ref for an app resource's site (its current version's stored AppConfig). Used
+  // by template publish to capture a stack's DEPLOYED image (a mutable tag) so the template is instantiable
+  // without the original source. Returns undefined for an un-deployed app / a version recorded before H1.
+  const deployedImageOf = async (siteName: string): Promise<string | undefined> => {
+    const site = await d.meta.getSitePlain(siteName);
+    if (!site?.currentVersion) return undefined;
+    const versions = await d.meta.listVersions(siteName);
+    const cur = versions.find((v) => v.id === site.currentVersion);
+    const cfg = cur?.config as { image?: string } | undefined;
+    return typeof cfg?.image === "string" ? cfg.image : undefined;
+  };
 
-    await ensureUser(email); // provision the user + personal org (org membership FKs to users)
-    const orgRes = await resolveStackOrg(c, email);
-    if ("err" in orgRes) return orgRes.err;
-    const org = orgRes.org;
+  // Core stack reconcile (plan + execute), shared by POST /v1/stacks/:name/up AND template instantiate
+  // (D1). Inputs are already parsed + sanitized; returns a { status, body } the route serializes. The only
+  // template-specific knobs are `provenance` (stamped on the stack row at CREATE) and the audit action —
+  // everything else is byte-for-byte the original up handler, so a plain `up` and an `instantiate` reconcile
+  // through EXACTLY the same code path.
+  const reconcileStack = async (
+    identity: Identity,
+    args: {
+      name: string;
+      org: Org;
+      spec: StackSpec;
+      resolved?: Record<string, { image?: string }>;
+      prune: boolean;
+      dryRun: boolean;
+      specVersion?: number;
+      provenance?: { fromTemplate: string; fromTemplateVersion: string };
+      auditAction?: string;
+      auditDetail?: Record<string, unknown>;
+    },
+  ): Promise<{ status: number; body: Record<string, unknown> }> => {
+    const email = identity.email;
+    const { name, org, spec, prune, dryRun } = args;
+    const resolved = args.resolved;
 
-    let body: { spec?: unknown; resolved?: Record<string, { image?: string }>; prune?: boolean; spec_version?: number };
-    try {
-      body = (await c.req.json()) as typeof body;
-    } catch {
-      return c.json({ error: "invalid JSON body" }, 400);
-    }
-    const spec = sanitizeStackConfig(body.spec);
-    if (!spec) return c.json({ error: "invalid stack spec (needs a name and at least one resource)" }, 400);
-    if (spec.name !== name) return c.json({ error: `stack name "${spec.name}" does not match target "${name}"` }, 400);
+    if (spec.name !== name) return { status: 400, body: { error: `stack name "${spec.name}" does not match target "${name}"` } };
     const edgeErr = validateStackEdges(spec);
-    if (edgeErr) return c.json({ error: edgeErr }, 400);
+    if (edgeErr) return { status: 400, body: { error: edgeErr } };
 
-    const prune = body.prune === true;
-    const dryRun = c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true";
     const existing = await stacks.getByName(org.id, name);
     const mapping = existing ? await stacks.mapping(existing.id) : {};
 
-    // Each resource materializes as a valid site name — surface an over-long/invalid name as a clean 400
-    // rather than a cryptic cluster error later.
+    // Each resource materializes as a valid site name — surface an over-long/invalid name as a clean 400.
     for (const [key] of Object.entries(spec.resources)) {
       const sn = siteNameForKey(spec, mapping, key);
       const e = validateName(sn);
-      if (e) return c.json({ error: `resource "${key}" resolves to an invalid site name "${sn}": ${e}` }, 400);
+      if (e) return { status: 400, body: { error: `resource "${key}" resolves to an invalid site name "${sn}": ${e}` } };
     }
 
     // Optimistic concurrency: a stale editor's spec_version is rejected before any work.
-    if (existing && body.spec_version != null && body.spec_version !== existing.specVersion) {
-      return c.json({ error: `stack was modified (spec_version ${existing.specVersion}, you sent ${body.spec_version}) — re-fetch and retry` }, 409);
+    if (existing && args.specVersion != null && args.specVersion !== existing.specVersion) {
+      return { status: 409, body: { error: `stack was modified (spec_version ${existing.specVersion}, you sent ${args.specVersion}) — re-fetch and retry` } };
     }
 
     // Live existence + cross-org conflict check over every candidate site name (spec + removed keys).
@@ -2063,7 +2082,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     for (const sn of candidateNames) {
       const s = await d.meta.getSitePlain(sn);
       if (!s) continue;
-      if (s.orgId && s.orgId !== org.id) return c.json({ error: `resource "${sn}" already exists in another organisation` }, 409);
+      if (s.orgId && s.orgId !== org.id) return { status: 409, body: { error: `resource "${sn}" already exists in another organisation` } };
       live[sn] = { type: s.type };
     }
 
@@ -2072,7 +2091,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       const sn = siteNameForKey(spec, mapping, key);
       if (!live[sn]) continue;
       const s = (await d.meta.getSitePlain(sn))!;
-      if (!can(await actorFor(c.get("identity"), s), actionForKind(res.type))) return c.json({ error: `not permitted to reconcile "${sn}" (${res.type})` }, 403);
+      if (!can(await actorFor(identity, s), actionForKind(res.type))) return { status: 403, body: { error: `not permitted to reconcile "${sn}" (${res.type})` } };
     }
 
     // Plan (pure). A dependency cycle has no apply order → 400.
@@ -2080,7 +2099,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     try {
       plan = planStack({ spec, prevSpec: existing?.spec ?? null, mapping, live, prune });
     } catch (e) {
-      if (e instanceof StackCycleError) return c.json({ error: e.message }, 400);
+      if (e instanceof StackCycleError) return { status: 400, body: { error: e.message } };
       throw e;
     }
 
@@ -2091,7 +2110,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       const sn = siteNameForKey(spec, mapping, key);
       if (res.type === "app") {
         outputs[key] = { url: siteUrl(sn) };
-        const image = body.resolved?.[key]?.image ?? res.image;
+        const image = resolved?.[key]?.image ?? res.image;
         if (res.dir && !image) needs.push({ key, kind: "app-image", siteName: sn });
       } else if (res.type === "site") {
         outputs[key] = { url: siteUrl(sn) };
@@ -2100,32 +2119,34 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
 
     if (dryRun) {
-      return c.json({ stack: name, org: org.slug, specVersion: existing?.specVersion ?? 0, plan, needs, outputs, dryRun: true });
+      return { status: 200, body: { stack: name, org: org.slug, specVersion: existing?.specVersion ?? 0, plan, needs, outputs, dryRun: true } };
     }
-    // Compute is only required for steps that actually touch the cluster: databases, apps with a
-    // known image (an imageless app step just claims the row — the CLI's image push follows), and
-    // pruned app/db deletes. A site-only stack must reconcile fine on a static-only instance.
+    // Compute is only required for steps that actually touch the cluster: databases, apps with a known
+    // image (an imageless app step just claims the row — the CLI's image push follows), and pruned
+    // app/db deletes. A site-only stack must reconcile fine on a static-only instance.
     const touchesCluster = (s: PlanStep): boolean => {
       if (s.kind === "site" || s.action === "noop") return false;
       if (s.action === "delete") return prune;
       if (s.kind === "database") return true;
-      return !!(body.resolved?.[s.key]?.image ?? spec.resources[s.key]?.image);
+      return !!(resolved?.[s.key]?.image ?? spec.resources[s.key]?.image);
     };
     if (!d.kube && plan.some(touchesCluster)) {
-      return c.json({ error: "compute is not enabled on this instance (the stack has app/database changes)" }, 501);
+      return { status: 501, body: { error: "compute is not enabled on this instance (the stack has app/database changes)" } };
     }
 
     // Per-org workload cap: a stack `up` can create several resources at once — count them up front.
     const createCount = plan.filter((s) => s.action === "create").length;
     if (d.cfg.maxWorkloadsPerOrg > 0 && (await d.meta.countSitesInOrg(org.id)) + createCount > d.cfg.maxWorkloadsPerOrg) {
-      return c.json({ error: `workload cap reached for this org (${d.cfg.maxWorkloadsPerOrg}) — a stack of ${createCount} new resources would exceed it` }, 429);
+      return { status: 429, body: { error: `workload cap reached for this org (${d.cfg.maxWorkloadsPerOrg}) — a stack of ${createCount} new resources would exceed it` } };
     }
 
     const stackId = existing?.id ?? stacks.stackId(org.id, name);
     let outcome: { applied: PlanStep[]; failure: { step: PlanStep; error: string } | null; newVersion: number };
     try {
       outcome = await locks.withLock(`stack:${stackId}`, STACK_LOCK_TTL_MS, async () => {
-        const stackRow = existing ?? (await stacks.create({ name, orgId: org.id, spec, createdBy: email }));
+        const stackRow =
+          existing ??
+          (await stacks.create({ name, orgId: org.id, spec, createdBy: email, fromTemplate: args.provenance?.fromTemplate ?? null, fromTemplateVersion: args.provenance?.fromTemplateVersion ?? null }));
         const applied: PlanStep[] = [];
         let failure: { step: PlanStep; error: string } | null = null;
         for (const step of plan) {
@@ -2148,7 +2169,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
             if (res.type === "database") {
               await applyDbResource(res, step.siteName, site.namespace, step.action === "create");
             } else if (res.type === "app") {
-              const image = body.resolved?.[step.key]?.image ?? res.image;
+              const image = resolved?.[step.key]?.image ?? res.image;
               if (image) await applyAppResource(spec, mapping, res, site, image); // else: row claimed, awaits CLI image (in `needs`)
             } else if (res.type === "bucket") {
               await buckets.provision({ name: step.siteName, namespace: site.namespace, org: org.id }); // (I1) idempotent — ensures the prefix/creds exist for binders
@@ -2170,25 +2191,57 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         return { applied, failure, newVersion };
       });
     } catch (e) {
-      if (e instanceof LockHeldError) return c.json({ error: `a stack up is already in progress for ${name}` }, 409);
+      if (e instanceof LockHeldError) return { status: 409, body: { error: `a stack up is already in progress for ${name}` } };
       throw e;
     }
 
     await audit({
       actor: email,
-      action: "stack.up",
+      action: args.auditAction ?? "stack.up",
       target: name,
       targetType: "stack",
       orgId: org.id,
-      detail: { applied: outcome.applied.map((s) => ({ action: s.action, key: s.key })), prune, failed: outcome.failure?.step.key ?? null },
+      detail: { applied: outcome.applied.map((s) => ({ action: s.action, key: s.key })), prune, failed: outcome.failure?.step.key ?? null, ...(args.auditDetail ?? {}) },
     });
     if (outcome.failure) {
-      return c.json(
-        { error: `stack up halted at "${outcome.failure.step.key}": ${outcome.failure.error}`, stack: name, applied: outcome.applied, failedStep: outcome.failure.step, plan, needs, outputs },
-        500,
-      );
+      return {
+        status: 500,
+        body: { error: `stack up halted at "${outcome.failure.step.key}": ${outcome.failure.error}`, stack: name, applied: outcome.applied, failedStep: outcome.failure.step, plan, needs, outputs },
+      };
     }
-    return c.json({ stack: name, org: org.slug, specVersion: outcome.newVersion, plan, applied: outcome.applied, needs, outputs });
+    return { status: 200, body: { stack: name, org: org.slug, specVersion: outcome.newVersion, plan, applied: outcome.applied, needs, outputs } };
+  };
+
+  // ---- POST /v1/stacks/:name/up : reconcile the desired spec (plan + execute; ?dry_run=1 = plan) ----
+  app.post("/v1/stacks/:name/up", async (c) => {
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const nameErr = validateName(name);
+    if (nameErr) return c.json({ error: nameErr }, 400);
+
+    await ensureUser(email); // provision the user + personal org (org membership FKs to users)
+    const orgRes = await resolveStackOrg(c, email);
+    if ("err" in orgRes) return orgRes.err;
+
+    let body: { spec?: unknown; resolved?: Record<string, { image?: string }>; prune?: boolean; spec_version?: number };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const spec = sanitizeStackConfig(body.spec);
+    if (!spec) return c.json({ error: "invalid stack spec (needs a name and at least one resource)" }, 400);
+    const dryRun = c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true";
+    const r = await reconcileStack(c.get("identity"), {
+      name,
+      org: orgRes.org,
+      spec,
+      resolved: body.resolved,
+      prune: body.prune === true,
+      dryRun,
+      specVersion: body.spec_version,
+    });
+    return c.json(r.body as Record<string, unknown>, r.status as 200);
   });
 
   // ---- GET /v1/stacks : org-scoped list (optional ?org=<slug>) ----
@@ -2350,6 +2403,205 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await stacks.delete(stack.id); // cascades stack_resources
     await audit({ actor: email, action: "stack.delete", target: stack.name, targetType: "stack", orgId: org.id, detail: { cascade, resources: resources.map((r) => r.siteName) } });
     return c.json({ deleted: stack.name, cascade, resources });
+  });
+
+  // ============================ Templates (D1): the golden-path registry ============================
+  // A template is a published, sanitized stack spec + variable declarations. Publishing is org-scoped and
+  // runs the strip pass (fail-closed on credential-looking values). Instantiating resolves + substitutes
+  // and runs the SAME reconcile as a stack `up`, recording provenance + returning the secrets the CLI owes.
+
+  // ---- POST /v1/templates : publish (from a spec OR an existing stack; strip-pass FAIL-CLOSED) ----
+  app.post("/v1/templates", async (c) => {
+    const email = c.get("identity").email;
+    await ensureUser(email);
+    let body: { slug?: unknown; name?: unknown; description?: unknown; visibility?: unknown; spec?: unknown; from_stack?: unknown; variables?: unknown; readme?: unknown; allow?: unknown };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+
+    const slug = typeof body.slug === "string" ? body.slug : "";
+    const slugErr = validateTemplateSlug(slug);
+    if (slugErr) return c.json({ error: slugErr }, 400);
+
+    // Org (create-capable): ?org or personal. Publishing is org-scoped.
+    const orgRes = await resolveStackOrg(c, email);
+    if ("err" in orgRes) return orgRes.err;
+    const org = orgRes.org;
+
+    // A slug is instance-wide unique — if it already exists it must belong to THIS org.
+    const existingTpl = await templates.getBySlug(slug);
+    if (existingTpl && existingTpl.orgId !== org.id) return c.json({ error: `template slug "${slug}" is already taken by another organisation` }, 409);
+
+    const visibility: TemplateVisibility = body.visibility === "public" ? "public" : "org";
+    const variables = sanitizeVariables(body.variables);
+    if (typeof variables === "string") return c.json({ error: variables }, 400); // a validation error message
+    const allow = Array.isArray(body.allow) ? (body.allow as unknown[]).filter((x): x is string => typeof x === "string") : [];
+    const readme = typeof body.readme === "string" ? body.readme.slice(0, 64 * 1024) : null;
+    const name = typeof body.name === "string" && body.name.length ? body.name.slice(0, 200) : slug;
+    const description = typeof body.description === "string" ? body.description.slice(0, 2000) : null;
+
+    // Build the source spec: a supplied spec, or an export of an existing stack (apps' DEPLOYED images
+    // filled in so the template is instantiable without source; each resource's registered secret keys
+    // collected for the strip pass).
+    let sourceSpec: StackSpec;
+    const secretKeyNames: Record<string, string[]> = {};
+    if (typeof body.from_stack === "string" && body.from_stack) {
+      const found = await findStack(c, email, body.from_stack);
+      if ("err" in found) return found.err;
+      const { stack } = found;
+      const mapping = await stacks.mapping(stack.id);
+      const filled = JSON.parse(JSON.stringify(stack.spec)) as StackSpec;
+      for (const [key, res] of Object.entries(filled.resources)) {
+        const siteName = mapping[key] ?? resolveResourceName(stack.spec.name, key, res);
+        secretKeyNames[key] = (await d.meta.listSecretKeys(siteName)).map((k) => k.key);
+        if (res.type === "app" && !res.image) {
+          const img = await deployedImageOf(siteName);
+          if (img) {
+            res.image = img; // pin the deployed (mutable-tag) image
+            delete res.dir; // template instantiates from the image, not the original build context
+          }
+        }
+      }
+      sourceSpec = filled;
+    } else {
+      // A directly-supplied template spec MAY carry `${var.…}` / `${stack}` placeholders in TYPED fields
+      // (e.g. a database `storage: "${var.db_storage}"`). The full sanitizer would clobber those (a
+      // placeholder isn't a valid k8s quantity → reset to the default), so we use it only as a STRUCTURE
+      // GATE (a valid skeleton must exist), then keep the raw, placeholder-bearing fields for the resource
+      // keys it accepted (junk keys are dropped). The concrete spec is fully sanitized at instantiate,
+      // AFTER substitution — so no un-sanitized value ever reaches the cluster.
+      const skeleton = sanitizeStackConfig(body.spec);
+      if (!skeleton || !body.spec || typeof body.spec !== "object") return c.json({ error: "invalid template spec (needs a name and at least one resource), or set from_stack" }, 400);
+      const raw = body.spec as StackSpec;
+      const kept: Record<string, StackResource> = {};
+      for (const key of Object.keys(skeleton.resources)) if (raw.resources?.[key]) kept[key] = raw.resources[key]!;
+      sourceSpec = { name: skeleton.name, resources: kept };
+    }
+
+    // Strip pass (pure). FAIL CLOSED while credential-looking values remain (unless --allow'd).
+    const stripped = stripStackSpec({ spec: sourceSpec, stackName: sourceSpec.name, secretKeyNames, allow });
+    if (stripped.flags.length) {
+      return c.json(
+        {
+          error: `refusing to publish: ${stripped.flags.length} credential-looking value(s) still in the spec — variable-ize them as \${var.…} or pass --allow <key> after confirming they are not secrets`,
+          flags: stripped.flags,
+        },
+        400,
+      );
+    }
+
+    const { template, version } = await templates.publish({ slug, orgId: org.id, name, description, visibility, spec: stripped.spec, variables, readme, createdBy: email });
+    await audit({
+      actor: email,
+      action: "template.publish",
+      target: slug,
+      targetType: "template",
+      orgId: org.id,
+      detail: { version: version.version, visibility, fromStack: typeof body.from_stack === "string" ? body.from_stack : null, allow, removed: stripped.removed.map((r) => `${r.resourceKey}.${r.envKey}`) },
+    });
+    return c.json({ slug, name: template.name, visibility, version: version.version, resources: Object.keys(stripped.spec.resources).length, notes: stripped.notes, removed: stripped.removed });
+  });
+
+  // ---- GET /v1/templates : visibility-aware catalog list ----
+  app.get("/v1/templates", async (c) => {
+    const email = c.get("identity").email;
+    const memberOrgIds = (await d.orgs.listUserOrgs(email)).map((o) => o.id);
+    const items = await templates.listVisible(memberOrgIds);
+    const out = [];
+    for (const t of items) out.push({ slug: t.slug, name: t.name, description: t.description, visibility: t.visibility, org: await orgOf(t.orgId), latestVersion: t.latestVersion, resources: t.resources, createdAt: t.createdAt });
+    return c.json({ templates: out });
+  });
+
+  // ---- GET /v1/templates/:slug (+?version=) : readme + variables + spec ----
+  app.get("/v1/templates/:slug", async (c) => {
+    const email = c.get("identity").email;
+    const slug = c.req.param("slug");
+    const version = c.req.query("version") || undefined;
+    const resolved = await templates.resolve(slug, version);
+    if (!resolved) return c.json({ error: `no such template: ${slug}${version ? `@${version}` : ""}` }, 404);
+    const memberOrgIds = (await d.orgs.listUserOrgs(email)).map((o) => o.id);
+    if (!templates.canView(resolved.template, memberOrgIds)) return c.json({ error: `no such template: ${slug}` }, 404); // org template → 404 for outsiders
+    const all = await templates.versions(resolved.template.id);
+    return c.json({
+      slug,
+      name: resolved.template.name,
+      description: resolved.template.description,
+      visibility: resolved.template.visibility,
+      org: await orgOf(resolved.template.orgId),
+      version: resolved.version.version,
+      versions: all.map((v) => v.version),
+      variables: resolved.version.variables,
+      readme: resolved.version.readme,
+      spec: resolved.version.spec,
+    });
+  });
+
+  // ---- POST /v1/templates/:slug/instantiate : resolve+substitute → same up path → provenance + secrets ----
+  app.post("/v1/templates/:slug/instantiate", async (c) => {
+    const email = c.get("identity").email;
+    const slug = c.req.param("slug");
+    await ensureUser(email);
+
+    let body: { name?: unknown; org?: unknown; vars?: unknown; version?: unknown };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const name = typeof body.name === "string" ? body.name : "";
+    const nameErr = validateName(name);
+    if (nameErr) return c.json({ error: `stack name: ${nameErr}` }, 400);
+
+    // Org (create-capable): body.org / ?org, else the caller's personal org.
+    const orgSlug = (typeof body.org === "string" && body.org) || c.req.query("org");
+    let org: Org;
+    if (!orgSlug) {
+      org = await d.orgs.ensurePersonalOrg(email);
+    } else {
+      const found = await d.orgs.getOrgBySlug(String(orgSlug));
+      if (!found) return c.json({ error: `no such org: ${orgSlug}` }, 404);
+      const role = await d.orgs.roleOf(found.id, email);
+      const platformRole = (await d.users.getUser(email))?.role ?? "member";
+      if (!canCreateInOrg(role, platformRole)) return c.json({ error: `not a member of org ${orgSlug} with create rights` }, 403);
+      org = found;
+    }
+
+    // Resolve the template (visibility-gated) + version.
+    const version = typeof body.version === "string" ? body.version : undefined;
+    const resolvedTpl = await templates.resolve(slug, version);
+    if (!resolvedTpl) return c.json({ error: `no such template: ${slug}${version ? `@${version}` : ""}` }, 404);
+    const memberOrgIds = (await d.orgs.listUserOrgs(email)).map((o) => o.id);
+    if (!templates.canView(resolvedTpl.template, memberOrgIds)) return c.json({ error: `no such template: ${slug}` }, 404);
+
+    // Substitute variables → concrete spec + the secretsToSet plan (secrets never land in the spec).
+    const values: Record<string, string> = {};
+    if (body.vars && typeof body.vars === "object" && !Array.isArray(body.vars)) {
+      for (const [k, v] of Object.entries(body.vars as Record<string, unknown>)) if (typeof v === "string") values[k] = v;
+    }
+    const sub = substituteTemplate(resolvedTpl.version.spec, resolvedTpl.version.variables, values, name);
+    if (sub.missing.length) return c.json({ error: `missing required variable(s): ${sub.missing.join(", ")}`, missing: sub.missing }, 400);
+    if (sub.errors.length) return c.json({ error: sub.errors.join("; "), errors: sub.errors }, 400);
+
+    const dryRun = c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true";
+    // Resolve each lifted secret to its materialized app site name (the CLI just setSecret(app,key,value)).
+    const secretsToSet = sub.secretsToSet.map((s) => ({ app: siteNameForKey(sub.spec, {}, s.resourceKey), resourceKey: s.resourceKey, key: s.envKey, value: s.value }));
+
+    const r = await reconcileStack(c.get("identity"), {
+      name,
+      org,
+      spec: sub.spec,
+      prune: false,
+      dryRun,
+      provenance: { fromTemplate: slug, fromTemplateVersion: resolvedTpl.version.version },
+      auditAction: "stack.instantiate",
+      auditDetail: { template: slug, version: resolvedTpl.version.version, secretKeys: secretsToSet.map((s) => ({ app: s.app, key: s.key })) },
+    });
+    // Merge the up response with the secrets the CLI still owes. Only key NAMES were audited — the values
+    // ride the response (the caller supplied them; this is not a stored-secret read).
+    const respBody = { ...r.body, template: slug, version: resolvedTpl.version.version, secretsToSet };
+    return c.json(respBody as Record<string, unknown>, r.status as 200);
   });
 
   return app;
