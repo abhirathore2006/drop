@@ -90,3 +90,19 @@ test("publish carries --preview/--expire-days (E1); `preview` is a group with ls
   // ls/rm identify a globally-unique resource name → no --org (mirrors share/rm/rollback etc.)
   expect(preview.commands.find((c) => c.name() === "ls")!.options.some((o) => o.long === "--org")).toBe(false);
 });
+
+test("(L4) `config` carries the app runtime-config subcommands set/ls/rm alongside set-api/show", () => {
+  const p = buildProgram();
+  const config = p.commands.find((c) => c.name() === "config")!;
+  const subs = config.commands.map((c) => c.name());
+  for (const s of ["set-api", "show", "set", "ls", "rm"]) expect(subs).toContain(s);
+});
+
+test("(L4) `config set` refuses credential-looking keys/values client-side (never hits the network)", async () => {
+  // secret-y key name → rejected before any client() call
+  await expect(buildProgram().parseAsync(["node", "drop", "config", "set", "myapp", "API_KEY=whatever"])).rejects.toThrow(/secret/i);
+  // opaque high-entropy value under a benign key → rejected too
+  await expect(buildProgram().parseAsync(["node", "drop", "config", "set", "myapp", "BLOB=9aF3kQ2mZ7pL1xR8vT4wYbN6cD0eG5hJ7tWq"])).rejects.toThrow(/secret/i);
+  // a malformed pair (no '=') is a clear error
+  await expect(buildProgram().parseAsync(["node", "drop", "config", "set", "myapp", "novalue"])).rejects.toThrow(/KEY=value/);
+});
