@@ -1,26 +1,243 @@
+// Live logs (G1 → M3): a fetch-stream reader over `GET /v1/sites/:name/logs?follow=1` rendered into a
+// virtualized, greppable, auto-following log view. ONE component across the surfaces that share the
+// follow endpoint:
+//   • app   (type="app")      — process selector (web + workers) + a --release one-shot toggle.
+//   • database (type="database") — follow only (no processes, no release Jobs).
+// A release Job (?release=1) runs once and exits, so follow+release is a 400 server-side; the release
+// toggle switches to a one-shot fetch instead of streaming. All streaming state rides the shared
+// StreamHeader (live / reconnecting / closed) and a mid-stream 401 routes through the M0 session-expiry
+// interceptor (the same store the query layer flips), so an expired session surfaces the login gate.
 import { useQuery } from "@tanstack/react-query";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "../../components/Button.tsx";
-import { api } from "../../lib/api.ts";
+import { StreamHeader, type StreamState } from "../../components/StreamHeader.tsx";
+import { ApiError, api, followLogs, type WorkloadType } from "../../lib/api.ts";
+import { rememberLocation, sessionExpiry } from "../../lib/query.ts";
+import { computeWindow, dumpLines, grepLines, LOG_BUFFER_CAP, type LogLine, splitStreamChunk } from "../../lib/log-view.ts";
 
-/** On-demand logs (apps + databases): fetched only when asked, never polled. */
-export function LogsPanel({ name }: { name: string }) {
-  const q = useQuery({
-    queryKey: ["/v1/sites", name, "logs"],
-    queryFn: () => api.logs(name),
-    enabled: false, // manual: the button drives refetch()
-    staleTime: Infinity,
+const LINE_H = 18; // px — must match `.logline` height in components.css for correct virtualization
+const TAIL = 500; // initial backlog requested on connect
+const RECONNECT_MS = 2000; // backoff before re-opening a dropped follow stream
+
+export function LogsPanel({ name, type }: { name: string; type: WorkloadType }) {
+  const isApp = type === "app";
+  const [lines, setLines] = useState<LogLine[]>([]);
+  const [follow, setFollow] = useState(true);
+  const [query, setQuery] = useState("");
+  const [process, setProcess] = useState("web");
+  const [release, setRelease] = useState(false);
+  const [state, setState] = useState<StreamState>("connecting");
+  const [error, setError] = useState<string | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportH, setViewportH] = useState(360);
+
+  const idRef = useRef(0);
+  const carryRef = useRef("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // App process list (web + workers) — populates the selector. Databases have no processes.
+  const procs = useQuery({
+    queryKey: ["/v1/apps", name, "processes"],
+    queryFn: () => api.processes(name),
+    enabled: isApp,
+    staleTime: 30_000,
   });
-  const loaded = q.data !== undefined || q.isError;
+  const workerProcs = procs.data?.processes ?? [];
+
+  const reset = useCallback(() => {
+    idRef.current = 0;
+    carryRef.current = "";
+    setLines([]);
+    setError(null);
+  }, []);
+
+  const push = useCallback((newLines: string[]) => {
+    if (!newLines.length) return;
+    setLines((prev) => {
+      const next = prev.concat(newLines.map((text) => ({ id: idRef.current++, text })));
+      return next.length > LOG_BUFFER_CAP ? next.slice(next.length - LOG_BUFFER_CAP) : next;
+    });
+  }, []);
+
+  // The stream / one-shot lifecycle. Re-runs when the target (name / process / release) changes.
+  useEffect(() => {
+    let aborted = false;
+    let controller: AbortController | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    reset();
+
+    const route401 = (e: unknown) => {
+      if (e instanceof ApiError && e.status === 401) {
+        rememberLocation();
+        sessionExpiry.set(true);
+        return true;
+      }
+      return false;
+    };
+
+    // Release Jobs run once and exit → a one-shot tail, never a stream.
+    if (release) {
+      setState("connecting");
+      api
+        .releaseLogs(name)
+        .then((r) => {
+          if (aborted) return;
+          const parts = r.logs ? r.logs.split("\n") : [];
+          if (parts.length && parts[parts.length - 1] === "") parts.pop();
+          push(parts);
+          setState("closed");
+        })
+        .catch((e) => {
+          if (aborted) return;
+          if (!route401(e)) setError((e as Error).message);
+          setState("closed");
+        });
+      return () => {
+        aborted = true;
+      };
+    }
+
+    const connect = async () => {
+      if (aborted) return;
+      setState("connecting");
+      controller = new AbortController();
+      try {
+        const res = await followLogs(name, { tail: TAIL, process, signal: controller.signal });
+        if (aborted) return;
+        const body = res.body;
+        if (!body) {
+          setState("closed");
+          return;
+        }
+        setState("live");
+        const reader = body.getReader();
+        const decoder = new TextDecoder();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (aborted) return;
+          if (done) break;
+          const { lines: complete, carry } = splitStreamChunk(carryRef.current, decoder.decode(value, { stream: true }));
+          carryRef.current = carry;
+          push(complete);
+        }
+        // Stream ended (pod gone / rotated): flush any partial line, then reconnect.
+        if (carryRef.current) {
+          push([carryRef.current]);
+          carryRef.current = "";
+        }
+        if (!aborted) {
+          setState("reconnecting");
+          retry = setTimeout(connect, RECONNECT_MS);
+        }
+      } catch (e) {
+        if (aborted || (e as Error).name === "AbortError") return;
+        if (route401(e)) {
+          setState("closed");
+          return;
+        }
+        setError((e as Error).message);
+        setState("reconnecting");
+        retry = setTimeout(connect, RECONNECT_MS);
+      }
+    };
+    void connect();
+
+    return () => {
+      aborted = true;
+      if (retry) clearTimeout(retry);
+      controller?.abort();
+    };
+  }, [name, process, release, reset, push]);
+
+  // Auto-follow: when following, keep the viewport pinned to the newest line as it arrives.
+  useLayoutEffect(() => {
+    if (!follow) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [lines, follow]);
+
+  // Measure the viewport once mounted (fixed-height container, but read it honestly).
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) setViewportH(el.clientHeight || 360);
+  }, []);
+
+  const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    setScrollTop(el.scrollTop);
+    setViewportH(el.clientHeight || 360);
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < LINE_H * 2;
+    // Pause-on-scroll-up; re-arm follow when the user returns to the bottom.
+    if (follow && !atBottom) setFollow(false);
+    else if (!follow && atBottom) setFollow(true);
+  };
+
+  const filtered = grepLines(lines, query);
+  const total = filtered.length;
+  // When following, window onto the tail regardless of the last scroll position (new lines shift it).
+  const st = follow ? Math.max(0, total * LINE_H - viewportH) : scrollTop;
+  const win = computeWindow(total, st, viewportH, LINE_H);
+  const visible = filtered.slice(win.start, win.end);
+
+  const download = () => {
+    const blob = new Blob([dumpLines(lines)], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${name}-logs.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const actions = (
+    <div className="stream-actions">
+      {isApp && (
+        <label className="stream-toggle" title="tail the latest release Job's output (one-shot)">
+          <input type="checkbox" checked={release} onChange={(e) => setRelease(e.target.checked)} />
+          release
+        </label>
+      )}
+      {isApp && workerProcs.length > 1 && (
+        <select className="stream-select" value={process} disabled={release} aria-label="process" onChange={(e) => setProcess(e.target.value)}>
+          {workerProcs.map((p) => (
+            <option key={p.process} value={p.process}>
+              {p.process}
+            </option>
+          ))}
+        </select>
+      )}
+      <Button size="sm" variant={follow ? "primary" : "default"} disabled={release} onClick={() => setFollow((f) => !f)} title={follow ? "auto-scrolling — click to pause" : "paused — click to follow the tail"}>
+        {follow ? "following" : "paused"}
+      </Button>
+      <Button size="sm" disabled={!lines.length} onClick={download} title="download the buffered lines">
+        download
+      </Button>
+    </div>
+  );
+
   return (
     <div className="sec">
-      <div className="sec-h">
-        <h3>logs</h3>
-        <Button size="sm" loading={q.isFetching} onClick={() => void q.refetch()}>
-          {loaded ? "refresh" : "load"}
-        </Button>
+      <StreamHeader title="logs" state={state} label={release ? "release job" : undefined} actions={actions} />
+      <input className="stream-grep" placeholder="filter (grep)…" value={query} onChange={(e) => setQuery(e.target.value)} spellCheck={false} aria-label="filter logs" />
+      {error && <div className="err" style={{ marginTop: 8 }}>{error}</div>}
+      <div className="logstream" ref={scrollRef} onScroll={onScroll} role="log" aria-label="logs">
+        {total === 0 ? (
+          <div className="logline muted">{query ? "(no matching lines)" : "(no logs)"}</div>
+        ) : (
+          <div style={{ paddingTop: win.padTop, paddingBottom: win.padBottom }}>
+            {visible.map((l) => (
+              <div className="logline" key={l.id}>
+                {l.text || " "}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-      {q.isError && <div className="err">error: {q.error.message}</div>}
-      {q.data !== undefined && <pre className="logs">{q.data.logs || "(no logs)"}</pre>}
+      <div className="sub" style={{ marginTop: 6 }}>
+        {total.toLocaleString()} line{total === 1 ? "" : "s"}
+        {query && total !== lines.length ? ` of ${lines.length.toLocaleString()}` : ""}
+        {lines.length >= LOG_BUFFER_CAP ? ` · buffer capped at ${LOG_BUFFER_CAP.toLocaleString()}` : ""}
+      </div>
     </div>
   );
 }

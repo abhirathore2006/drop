@@ -8,6 +8,7 @@ import { api, type Detail } from "../../lib/api.ts";
 import { cap, denyReason } from "../../lib/caps.ts";
 import { deriveStatus } from "../../lib/status.ts";
 import { LogsPanel } from "./LogsPanel.tsx";
+import { TerminalPanel } from "./TerminalPanel.tsx";
 import { ExposurePanel } from "./ExposurePanel.tsx";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
 
@@ -18,8 +19,11 @@ export function AppPanels({ d }: { d: Detail }) {
       <ExposurePanel d={d} />
       {/* Secrets list reads behind `configure` (server-gated) — hide the whole surface without it. */}
       {cap(d, "configure") && <SecretsPanel name={d.name} />}
+      {/* (M3/J3) Interactive shell — gated on `exec` (editor+). A shell can read the app's env, so the
+          panel carries a one-time-per-app secrets ack before the first session. */}
+      {cap(d, "exec") && <TerminalPanel d={d} />}
       {/* Logs read behind `logs` (above viewer) — hide rather than 403 on load. */}
-      {cap(d, "logs") && <LogsPanel name={d.name} />}
+      {cap(d, "logs") && <LogsPanel name={d.name} type="app" />}
     </>
   );
 }
@@ -80,9 +84,8 @@ function AppInfoPanel({ d }: { d: Detail }) {
           </Button>
         )}
       </KV>
-      {/* M3: an "open shell" button goes HERE — gated on cap(d, "exec") (the J3 verb), it opens the
-          xterm.js terminal panel that bridges to `GET /v1/apps/:name/exec` over a WebSocket. The API
-          + CLI transport already exist (J3); only the browser terminal UI is deferred to M3. */}
+      {/* (M3) The exec terminal lives in its own panel below (TerminalPanel, gated on cap(d,"exec")) —
+          it carries the shared StreamHeader + secrets ack, so it isn't crammed into this info row. */}
     </div>
   );
 }

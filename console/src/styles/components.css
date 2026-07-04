@@ -1493,3 +1493,140 @@ code.reveal {
     max-height: none;
   }
 }
+
+/* ---- M3 streaming surfaces: shared connection-state header + logs / terminal / SQL ---- */
+.stream-h {
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.stream-h-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.stream-h-title h3 {
+  margin: 0;
+}
+.stream-h-actions,
+.stream-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.stream-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: lowercase;
+  letter-spacing: 0;
+}
+.stream-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+.stream-dot.live {
+  opacity: 1;
+  animation: stream-pulse 1.4s ease-in-out infinite;
+}
+@keyframes stream-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+.stream-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.stream-select {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 4px 8px;
+  color: inherit;
+  font-size: 12px;
+  font-family: inherit;
+}
+.stream-grep {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 7px 11px;
+  color: inherit;
+  font-size: 13px;
+  font-family: inherit;
+  margin-bottom: 8px;
+}
+/* The virtualized log well: fixed height + one row per line (no wrap) so windowing math stays exact;
+   long lines scroll horizontally rather than reflowing. */
+.logstream {
+  background: var(--surface-inset);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  height: 360px;
+  overflow: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--logs-fg);
+  padding: 8px 0;
+}
+.logline {
+  height: 18px;
+  line-height: 18px;
+  padding: 0 12px;
+  white-space: pre;
+  min-width: max-content;
+}
+.stream-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-fg);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+/* xterm mounts here. xterm writes element styles via the CSSOM (CSP-ok); its base stylesheet is
+   imported (Vite extracts it to a hashed .css) so `style-src 'self'` holds. */
+.terminal {
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  height: 380px;
+  padding: 8px;
+  overflow: hidden;
+}
+.terminal .xterm {
+  height: 100%;
+}
+.sql-editor {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: inherit;
+  resize: vertical;
+}

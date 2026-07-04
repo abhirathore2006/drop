@@ -15,6 +15,7 @@ export type Capability =
   | "db:create"
   | "connect"
   | "query" // (I4) run a read-only SQL query — editor+ (above viewer); gates the DB SQL-console panel
+  | "exec" // (J3) open an interactive shell into an app pod — editor+; gates the M3 terminal panel
   | "rollback"
   | "configure"
   | "expose"
@@ -189,6 +190,25 @@ export interface Version {
   createdAt: string;
   fileCount: number;
   bytes: number;
+}
+/** (drop ps) One process Deployment's live status — mirrors src/kube/types.ts ProcessStatus. Drives the
+ *  M3 logs process selector (web + workers). */
+export interface ProcessInfo {
+  name: string; // Deployment name: `<app>` (web) or `<app>-<process>` (worker)
+  process: string; // the process key: "web" for the implicit web process
+  web: boolean;
+  replicas: number;
+  ready: number;
+  restarts: number;
+  reason: string;
+}
+/** (J3) A minted single-use exec ticket — the credential for a browser WebSocket upgrade to `wsPath`. */
+export interface ExecTicket {
+  app: string;
+  ticket: string; // single-use, 60s TTL — spent by the upgrade
+  expiresAt: string;
+  command: string[]; // bound at issuance; the upgrade cannot change it
+  wsPath: string; // e.g. /v1/apps/:name/exec
 }
 /** (E1) A labeled, expiring preview of a specific version, served at <site>--<label>.<baseDomain>. */
 export interface PreviewInfo {
@@ -408,6 +428,13 @@ export const api = {
   metrics: (name: string, range: "1h" | "24h" | "7d" = "1h") => req<SiteMetrics>("GET", `/v1/sites/${name}/metrics?range=${range}`),
   uptime: (name: string) => req<{ range: string; checks: UptimeLastCheck[]; summary: UptimeSummary }>("GET", `/v1/sites/${name}/uptime`),
   logs: (name: string) => req<{ logs: string }>("GET", `/v1/sites/${name}/logs?tail=200`),
+  // (G1) one-shot tail of the LATEST release Job's pod. follow+release is a 400 (a release runs once and
+  // exits), so the M3 logs panel fetches release logs one-shot instead of streaming them.
+  releaseLogs: (name: string) => req<{ logs: string }>("GET", `/v1/sites/${name}/logs?release=1&tail=500`),
+  // (drop ps) an app's process Deployments (web + workers) — populates the M3 logs process selector.
+  processes: (name: string) => req<{ name: string; runtimeState: string; processes: ProcessInfo[] }>("GET", `/v1/apps/${name}/processes`),
+  // (J3) mint a single-use exec ticket bound to `command` (default /bin/sh) for the browser terminal.
+  execTicket: (name: string, command?: string[]) => req<ExecTicket>("POST", `/v1/apps/${name}/exec-ticket`, command && command.length ? { command } : {}),
   rollback: (name: string, to: string) => req("POST", `/v1/sites/${name}/rollback`, { to }),
   setVisibility: (name: string, visibility: string, password?: string) =>
     req("POST", `/v1/sites/${name}/visibility`, { visibility, password }),
@@ -469,6 +496,35 @@ export const api = {
   instantiate: (slug: string, body: { name: string; org?: string; vars: Record<string, string>; version?: string }) =>
     req<InstantiateResult>("POST", `/v1/templates/${encodeURIComponent(slug)}/instantiate`, body),
 };
+
+// ---- streaming surfaces (M3) ----
+// These sit OUTSIDE the `api` object because they don't return JSON: `followLogs` hands back the raw
+// streaming Response (the caller reads response.body incrementally), and `execSocketUrl` builds a
+// WebSocket URL. Both still throw/route ApiError the same way so the M0 session-expiry interceptor fires.
+
+/** (G1/M3) Open the live-logs follow stream (chunked `text/plain`). Returns the raw Response so the
+ *  caller reads `response.body` as a stream; throws ApiError on a non-ok status. A 401 here is routed
+ *  through the session-expiry store by the calling surface, exactly as the query layer does for polls. */
+export async function followLogs(name: string, opts: { tail?: number; process?: string; signal?: AbortSignal } = {}): Promise<Response> {
+  const params = new URLSearchParams({ follow: "1" });
+  if (opts.tail) params.set("tail", String(opts.tail));
+  // G1 follows the FIRST READY pod; `process` is forwarded for L3 (per-process routing) and harmlessly
+  // ignored today. "web" is the default pod, so it's omitted rather than sent redundantly.
+  if (opts.process && opts.process !== "web") params.set("process", opts.process);
+  const res = await fetch(`/v1/sites/${encodeURIComponent(name)}/logs?${params.toString()}`, { signal: opts.signal });
+  if (!res.ok) {
+    const j = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new ApiError(j.error ?? `logs: ${res.status}`, res.status);
+  }
+  return res;
+}
+
+/** (J3/M3) Same-origin WebSocket URL for an exec session — cookie-authed, the single-use ticket in the
+ *  query string is the credential. ws/wss mirrors the page protocol; `connect-src 'self'` permits it. */
+export function execSocketUrl(wsPath: string, ticket: string): string {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${location.host}${wsPath}?ticket=${encodeURIComponent(ticket)}`;
+}
 
 /**
  * Build a read-only C1 StackGraph from a template spec — NODES ONLY, no live status (a preview never

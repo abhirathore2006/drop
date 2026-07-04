@@ -8,6 +8,7 @@ import { ConfirmDialog } from "../../components/ConfirmDialog.tsx";
 import { CopyField } from "../../components/CopyField.tsx";
 import { KV } from "../../components/Field.tsx";
 import { RevealOnce } from "../../components/RevealOnce.tsx";
+import { StreamHeader } from "../../components/StreamHeader.tsx";
 import { Table } from "../../components/Table.tsx";
 import { PhasePill, Pill } from "../../components/badges.tsx";
 import { api, fmtStamp, type Detail, type SqlQueryResult } from "../../lib/api.ts";
@@ -28,15 +29,17 @@ export function DbPanels({ d }: { d: Detail }) {
       {/* backups: trigger is `db:create`-gated; list is `read`, so the panel always shows. */}
       {d.database && <BackupsPanel name={d.name} canManage={cap(d, "db:create")} />}
       {/* Logs read behind `logs` (above viewer) — hide rather than 403 on load. */}
-      {cap(d, "logs") && <LogsPanel name={d.name} />}
+      {cap(d, "logs") && <LogsPanel name={d.name} type="database" />}
     </>
   );
 }
 
-/** (I4) Read-only SQL console: a plain textarea (no Monaco/CodeMirror v1), a Run button (⌘/Ctrl+Enter),
- *  and results in the shared Table primitive. A PERMANENT banner states the guarantees up front
- *  (read-only · audited · 5s timeout · 500 rows); errors show inline. Writes are refused at the engine —
- *  the panel makes no attempt to allow them (no `--unsafe-write`; use `drop db proxy` for writes). */
+/** (I4 → M3) Read-only SQL console, folded into the shared streaming shell: a plain textarea (no
+ *  Monaco/CodeMirror v1), a Run action in the connection-state header (⌘/Ctrl+Enter), results in the
+ *  shared Table primitive. The PERMANENT banner states the guarantees up front (read-only · audited ·
+ *  5s timeout · 500 rows); the row/time caps + truncation flag surface after each run; errors show
+ *  inline. The API contract is unchanged — writes are still refused at the engine (use `drop db proxy`).
+ *  Not a persistent stream, so the header reuses the shell's neutral states (ready / running). */
 function SqlConsolePanel({ name }: { name: string }) {
   const [sql, setSql] = useState("");
   const [result, setResult] = useState<SqlQueryResult | null>(null);
@@ -70,9 +73,15 @@ function SqlConsolePanel({ name }: { name: string }) {
     : [];
   const rows = result ? result.rows.map((cells, i) => ({ i, cells })) : [];
 
+  const runBtn = (
+    <Button size="sm" variant="primary" loading={running} disabled={!sql.trim()} onClick={() => void run()}>
+      Run (⌘/Ctrl+Enter)
+    </Button>
+  );
+
   return (
     <div className="sec">
-      <h3>SQL console</h3>
+      <StreamHeader title="SQL console" state={running ? "connecting" : "idle"} label={running ? "running" : "ready"} actions={runBtn} />
       {/* PERMANENT banner — the guarantees are stated up front, not just on hover. */}
       <div className="sub" style={{ marginBottom: 8 }}>read-only · audited · 5s timeout · 500 rows</div>
       <textarea
@@ -83,25 +92,8 @@ function SqlConsolePanel({ name }: { name: string }) {
         rows={4}
         spellCheck={false}
         aria-label="SQL query"
-        style={{
-          width: "100%",
-          boxSizing: "border-box",
-          fontFamily: "ui-monospace, monospace",
-          fontSize: 12.5,
-          lineHeight: 1.5,
-          padding: 10,
-          borderRadius: 8,
-          border: "1px solid var(--border-strong)",
-          background: "var(--surface)",
-          color: "inherit",
-          resize: "vertical",
-        }}
+        className="sql-editor"
       />
-      <div style={{ marginTop: 8 }}>
-        <Button size="sm" loading={running} disabled={!sql.trim()} onClick={() => void run()}>
-          Run (⌘/Ctrl+Enter)
-        </Button>
-      </div>
       {error && (
         <div className="err" style={{ marginTop: 10 }}>
           {error}
@@ -112,9 +104,12 @@ function SqlConsolePanel({ name }: { name: string }) {
           <div style={{ overflowX: "auto" }}>
             <Table columns={columns} rows={rows} rowKey={(row) => String(row.i)} empty="no rows" />
           </div>
-          <div className="sub" style={{ marginTop: 6 }}>
-            {result.rowCount} row{result.rowCount === 1 ? "" : "s"}
-            {result.truncated ? " · truncated at 500" : ""} · {result.elapsedMs}ms
+          <div className="sub" style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+            <span>
+              {result.rowCount} row{result.rowCount === 1 ? "" : "s"} · {result.elapsedMs}ms
+            </span>
+            {/* truncation flag — surfaced distinctly (the 500-row / ~1MB cap clipped the result). */}
+            {result.truncated && <span className="pill pill-warn">truncated at 500</span>}
           </div>
         </div>
       )}
