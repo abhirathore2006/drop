@@ -31,12 +31,23 @@ function AppInfoPanel({ d }: { d: Detail }) {
   const st = app.status
     ? deriveStatus({ type: "app", status: d.status, runtimeState: app.runtimeState, appStatus: app.status })
     : null;
+  // (I5) `stateful` isn't on the typed `app` detail shape (console/lib/api.ts is coordinated elsewhere
+  // this slice) — the server already returns it for free on `versions[].config` (the raw stored
+  // AppConfig, verbatim), so read it from there defensively instead of widening the Detail/Version
+  // types here. Absent for every non-stateful app (the common case).
+  const stateful = (d.versions.find((v) => v.id === d.current) as { config?: { stateful?: { volume: string; mount: string } } } | undefined)?.config
+    ?.stateful;
   return (
     <div className="sec">
       <h3>container app</h3>
       <KV label="image">{app.image ?? "—"}</KV>
       <KV label="scale">{app.scale ? `min ${app.scale.min} · max ${app.scale.max}` : "—"}</KV>
       <KV label="resources">{app.resources ? `${app.resources.cpu ?? "—"} cpu · ${app.resources.memory ?? "—"}` : "—"}</KV>
+      {stateful && (
+        <KV label="stateful volume">
+          {stateful.volume} at {stateful.mount} — always-on, single replica (no snapshots v1; delete requires --force)
+        </KV>
+      )}
       <KV label="status">
         {app.status && st ? (
           <>

@@ -449,3 +449,93 @@ test("assertProcesses: schedule + release is fine (release is unaffected by H2)"
   const app = sanitizeAppConfig({ image: "x:1", schedule: "0 3 * * *", release: "npm run migrate" })!;
   expect(() => assertProcesses(app)).not.toThrow();
 });
+
+// ---- I5: stateful (constrained volumes) ----
+
+test("sanitizeAppConfig stateful: parses the object form, defaults absent fields", () => {
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { volume: "2Gi", mount: "/data" } })!.stateful).toEqual({ volume: "2Gi", mount: "/data" });
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/var/lib/app" } })!.stateful).toEqual({ volume: "2Gi", mount: "/var/lib/app" }); // volume defaults
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { volume: "5Gi" } })!.stateful).toEqual({ volume: "5Gi", mount: "/data" }); // mount defaults
+  expect(sanitizeAppConfig({ image: "x:1", stateful: {} })!.stateful).toEqual({ volume: "2Gi", mount: "/data" }); // both default
+});
+
+test("sanitizeAppConfig stateful: the boolean shorthand `stateful: true` takes both defaults", () => {
+  expect(sanitizeAppConfig({ image: "x:1", stateful: true })!.stateful).toEqual({ volume: "2Gi", mount: "/data" });
+});
+
+test("sanitizeAppConfig stateful: volume is clamped to [64Mi,10Gi]; junk/absent falls back to the 2Gi default", () => {
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/data", volume: "1Mi" } })!.stateful!.volume).toBe("64Mi"); // below floor
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/data", volume: "50Gi" } })!.stateful!.volume).toBe("10Gi"); // above ceiling
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/data", volume: "64Mi" } })!.stateful!.volume).toBe("64Mi"); // exactly the floor — kept
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/data", volume: "10Gi" } })!.stateful!.volume).toBe("10Gi"); // exactly the ceiling — kept
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/data", volume: "3Gi" } })!.stateful!.volume).toBe("3Gi"); // within bounds — unchanged
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/data", volume: "5 gallons" } })!.stateful!.volume).toBe("2Gi"); // bad unit → default
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/data", volume: 5 } })!.stateful!.volume).toBe("2Gi"); // wrong type → default
+});
+
+test("sanitizeAppConfig stateful: mount must be absolute with no traversal; an explicit invalid mount drops the WHOLE block", () => {
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "data" } })!.stateful).toBeUndefined(); // relative
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/../etc" } })!.stateful).toBeUndefined(); // traversal
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/data/../x" } })!.stateful).toBeUndefined(); // traversal mid-path
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/" } })!.stateful).toBeUndefined(); // bare root
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/data/" } })!.stateful).toBeUndefined(); // trailing slash
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: 42 } })!.stateful).toBeUndefined(); // wrong type
+  // nested + multi-segment paths are fine
+  expect(sanitizeAppConfig({ image: "x:1", stateful: { mount: "/var/lib/app-data" } })!.stateful).toEqual({ volume: "2Gi", mount: "/var/lib/app-data" });
+});
+
+test("sanitizeAppConfig stateful: junk (wrong type / not an object) is dropped entirely", () => {
+  expect(sanitizeAppConfig({ image: "x:1", stateful: "nope" })!.stateful).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", stateful: 123 })!.stateful).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", stateful: [] })!.stateful).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1", stateful: false })!.stateful).toBeUndefined();
+  expect(sanitizeAppConfig({ image: "x:1" })!.stateful).toBeUndefined();
+});
+
+test("sanitizeAppConfig stateful is round-trip safe (CLI sanitizes -> JSON -> API re-sanitizes)", () => {
+  const once = sanitizeAppConfig({ image: "x:1", stateful: { volume: "4Gi", mount: "/data" } })!;
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!;
+  expect(twice.stateful).toEqual({ volume: "4Gi", mount: "/data" });
+  // the boolean shorthand's resolved defaults also round-trip unchanged
+  const shorthand = sanitizeAppConfig({ image: "x:1", stateful: true })!;
+  expect(sanitizeAppConfig(JSON.parse(JSON.stringify(shorthand)))!.stateful).toEqual(shorthand.stateful);
+});
+
+test("assertProcesses: stateful is mutually exclusive with schedule", () => {
+  const app = sanitizeAppConfig({ image: "x:1", stateful: true, schedule: "0 3 * * *" })!;
+  expect(() => assertProcesses(app)).toThrow(/stateful.*schedule|schedule.*stateful/i);
+});
+
+test("assertProcesses: stateful is mutually exclusive with processes (a stateful worker map is out of scope v1)", () => {
+  const app = sanitizeAppConfig({ image: "x:1", stateful: true, processes: { worker: { command: "w" } } })!;
+  expect(() => assertProcesses(app)).toThrow(/stateful.*processes|processes.*stateful/i);
+  // a single explicit web process is STILL rejected here — `processes` is present at all, same as the
+  // schedule+processes rule (see the module doc comment); the "single web process is fine" case is the
+  // IMPLICIT one (no processes: key at all), covered below.
+  const singleWeb = sanitizeAppConfig({ image: "x:1", stateful: true, processes: { web: { command: "a" } } })!;
+  expect(() => assertProcesses(singleWeb)).toThrow(/stateful.*processes|processes.*stateful/i);
+});
+
+test("assertProcesses: stateful + an implicit single web process (no processes: key) is fine", () => {
+  const app = sanitizeAppConfig({ image: "x:1", stateful: true })!;
+  expect(() => assertProcesses(app)).not.toThrow();
+});
+
+test("assertProcesses: stateful forces scale {min:1,max:1} — an EXPLICIT mismatch 400s", () => {
+  const mismatch = sanitizeAppConfig({ image: "x:1", stateful: true, scale: { min: 0, max: 3 } })!;
+  expect(() => assertProcesses(mismatch)).toThrow(/stateful.*scale|forces an always-on/i);
+  // the exact forced shape, explicitly declared, is accepted
+  const exact = sanitizeAppConfig({ image: "x:1", stateful: true, scale: { min: 1, max: 1 } })!;
+  expect(() => assertProcesses(exact)).not.toThrow();
+});
+
+test("expandProcesses: stateful + no scale declared anywhere is silently clamped to {min:1,max:1}", () => {
+  const app = sanitizeAppConfig({ image: "x:1", stateful: true })!;
+  const procs = expandProcesses(app, "notes");
+  expect(procs).toEqual([{ name: "notes", process: "web", web: true, scale: { min: 1, max: 1 }, resources: { cpu: "0.5", memory: "512Mi" } }]);
+});
+
+test("expandProcesses: a non-stateful app is unaffected (still defaults to {min:0,max:3})", () => {
+  const app = sanitizeAppConfig({ image: "x:1" })!;
+  expect(expandProcesses(app, "app")[0]!.scale).toEqual({ min: 0, max: 3 });
+});

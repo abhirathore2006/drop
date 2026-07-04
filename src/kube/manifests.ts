@@ -46,6 +46,9 @@ export interface AppManifests {
   ingressPolicy?: Record<string, unknown>; // let the KEDA interceptor reach the web pods
   secret?: Record<string, unknown>; // env (omitted when the app has no env) — shared by every process
   workers?: WorkerManifests[]; // extra worker Deployments (omitted when the app is web-only)
+  // (I5) One PersistentVolumeClaim (`<name>-data`, RWO) — present only when `app.stateful` is set.
+  // assertProcesses guarantees a stateful app has no workers, so this is always the WEB process's volume.
+  pvc?: Record<string, unknown>;
   // (H2) `schedule` → a CronJob instead of everything above: when set, deployment/service/
   // httpScaledObject/ingressPolicy/workers are ALL absent (a cron app has no web/worker processes —
   // assertProcesses refuses schedule alongside processes/an explicit services/healthcheck before we
@@ -111,18 +114,39 @@ const DEFAULT_BLOCKED_EGRESS_CIDRS = ["10.0.0.0/8"];
 const QUOTA = { "limits.cpu": "4", "limits.memory": "8Gi", "count/pods": "20", "count/services": "10" };
 const LIMITRANGE_DEFAULT = { cpu: "0.5", memory: "512Mi" };
 const LIMITRANGE_DEFAULT_REQUEST = { cpu: "100m", memory: "128Mi" };
+// (I5 / Future.md item 10 parts 1-2) The tenant ResourceQuota previously had NO storage dimension at
+// all — an org could stack unlimited per-database PVCs (each capped individually at MAX_DB_STORAGE) or
+// stateful-app volumes with no TOTAL ceiling. These are static platform defaults (same posture as QUOTA
+// above — nothing in tenantManifests is org-aware yet); a per-org override (the `storage_budget_bytes`
+// admin override already resolved by QuotaStore for the control-plane budget check) would fold in here
+// via `opts.storageBudget`/`opts.maxPvcs` the same way max_workloads/max_db_storage already resolve
+// elsewhere — that server.ts wiring is a follow-up (see Future.md item 10), not done in this slice.
+const DEFAULT_STORAGE_BUDGET = "20Gi"; // generous headroom for several 1Gi DB PVCs + one 10Gi stateful volume
+const DEFAULT_MAX_PVCS = 10;
 
 /** Per-tenant isolation objects: a PSA-labeled Namespace, a default-deny
  *  NetworkPolicy (intra-ns + DNS + an HTTPS egress allowlist that excludes the
  *  metadata IP + the in-cluster/control-plane CIDRs), a ResourceQuota, and a
  *  default LimitRange. `opts.blockedEgressCidrs` MUST cover the live cluster's
  *  pod+service CIDRs (sourced from config) — they're what keeps cross-tenant and
- *  platform-DB traffic off the 443 allowlist on clusters whose CIDRs aren't in 10/8. */
+ *  platform-DB traffic off the 443 allowlist on clusters whose CIDRs aren't in 10/8.
+ *  `opts.storageBudget`/`opts.maxPvcs` (I5) size the ResourceQuota's `requests.storage` +
+ *  `count/persistentvolumeclaims` dims — static platform defaults when omitted (see above). */
 export function tenantManifests(
   namespace: string,
-  opts: { blockedEgressCidrs?: string[]; edgeTcp?: { namespace: string; workloads: ExposedWorkload[] } } = {},
+  opts: {
+    blockedEgressCidrs?: string[];
+    edgeTcp?: { namespace: string; workloads: ExposedWorkload[] };
+    storageBudget?: string;
+    maxPvcs?: number;
+  } = {},
 ): TenantManifests {
   const blocked = opts.blockedEgressCidrs && opts.blockedEgressCidrs.length > 0 ? opts.blockedEgressCidrs : DEFAULT_BLOCKED_EGRESS_CIDRS;
+  // (I5) Folds Future.md item 10's parts 1-2 into the namespace ResourceQuota: a TOTAL `requests.storage`
+  // budget across every PVC in the tenant namespace (every managed database + any stateful app volumes)
+  // and a cap on the PVC COUNT — so k8s itself rejects a create that would blow past either, on top of
+  // the control-plane's own storage_budget_bytes check (server.ts, item 10) that runs earlier.
+  const quota = { ...QUOTA, "requests.storage": opts.storageBudget ?? DEFAULT_STORAGE_BUDGET, "count/persistentvolumeclaims": String(opts.maxPvcs ?? DEFAULT_MAX_PVCS) };
   const labels = {
     "app.kubernetes.io/managed-by": "drop",
     "pod-security.kubernetes.io/enforce": "baseline",
@@ -156,7 +180,7 @@ export function tenantManifests(
         ],
       },
     },
-    resourceQuota: { apiVersion: "v1", kind: "ResourceQuota", metadata: { name: "drop-quota", namespace }, spec: { hard: QUOTA } },
+    resourceQuota: { apiVersion: "v1", kind: "ResourceQuota", metadata: { name: "drop-quota", namespace }, spec: { hard: quota } },
     limitRange: {
       apiVersion: "v1",
       kind: "LimitRange",
@@ -406,10 +430,27 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
     // The web labels/selector are UNCHANGED from before processes existed (no new selector labels),
     // so redeploying an existing app never trips the immutable-selector guard.
     const labels = { "app.kubernetes.io/name": ctx.name, "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name };
+    // (I5) The Deployment's OWN metadata + its pod-template labels may carry MORE than the selector
+    // (k8s only requires the selector to be a SUBSET of the template's labels) — so the "stateful"
+    // marker (teardown sweeps + the console/CLI badge) is added here, never folded into `labels` itself,
+    // which keeps the immutable `spec.selector` unchanged even if an app toggles `stateful` on later.
+    const podLabels = app.stateful ? { ...labels, "drop.dev/stateful": "true" } : labels;
+    const pvcName = `${ctx.name}-data`;
+    // (I5) One RWO volume mounted at `stateful.mount`, appended to a WEB-ONLY copy of the shared
+    // binding (never mutating `binding` itself — irrelevant in practice since assertProcesses already
+    // refuses `processes` alongside `stateful`, i.e. a stateful app has no worker to leak it to, but
+    // this keeps the function correct regardless of that invariant holding elsewhere).
+    const webBinding: AppBinding = app.stateful
+      ? {
+          ...binding,
+          volumes: [...binding.volumes, { name: "data", persistentVolumeClaim: { claimName: pvcName } }],
+          volumeMounts: [...binding.volumeMounts, { name: "data", mountPath: app.stateful.mount }],
+        }
+      : binding;
     const container = buildContainer({
       name: ctx.name,
       image: app.image,
-      binding,
+      binding: webBinding,
       command: web.command,
       containerPort,
       resources: web.resources,
@@ -418,9 +459,16 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
     out.deployment = {
       apiVersion: "apps/v1",
       kind: "Deployment",
-      metadata: { name: ctx.name, namespace: ctx.namespace, labels },
-      // no `replicas`: the HTTPScaledObject owns the replica count (0..max)
-      spec: { selector: { matchLabels: labels }, template: { metadata: podTemplateMeta(labels, ctx), spec: podSpec(ctx, container, binding) } },
+      metadata: { name: ctx.name, namespace: ctx.namespace, labels: podLabels },
+      spec: {
+        selector: { matchLabels: labels },
+        // (I5) A stateful app has NO HTTPScaledObject to own the replica count (see below), so
+        // `replicas` is explicit here — unlike the normal web Deployment, which omits it deliberately —
+        // and `strategy: Recreate` guarantees the OLD pod fully releases the RWO PVC attachment before
+        // the new one starts (a rolling update would try to attach it from two pods at once and fail).
+        ...(app.stateful ? { replicas: web.scale.min, strategy: { type: "Recreate" } } : {}),
+        template: { metadata: podTemplateMeta(podLabels, ctx), spec: podSpec(ctx, container, webBinding) },
+      },
     };
     out.service = {
       apiVersion: "v1",
@@ -428,19 +476,37 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
       metadata: { name: ctx.name, namespace: ctx.namespace, labels },
       spec: { selector: labels, ports: [{ name: "http", port: SERVICE_PORT, targetPort: containerPort }] },
     };
-    out.httpScaledObject = {
-      apiVersion: "http.keda.sh/v1alpha1",
-      kind: "HTTPScaledObject",
-      metadata: { name: ctx.name, namespace: ctx.namespace, labels },
-      spec: {
-        hosts: [ctx.host],
-        scaleTargetRef: { name: ctx.name, kind: "Deployment", apiVersion: "apps/v1", service: ctx.name, port: SERVICE_PORT },
-        replicas: { min: web.scale.min, max: web.scale.max },
-        scaledownPeriod: 300,
-      },
-    };
+    // (I5) `stateful` forces scale {min:1,max:1} (assertProcesses) — an always-on app that can never
+    // scale to zero, so there is nothing for KEDA to own here: NO HTTPScaledObject is emitted at all.
+    if (!app.stateful) {
+      out.httpScaledObject = {
+        apiVersion: "http.keda.sh/v1alpha1",
+        kind: "HTTPScaledObject",
+        metadata: { name: ctx.name, namespace: ctx.namespace, labels },
+        spec: {
+          hosts: [ctx.host],
+          scaleTargetRef: { name: ctx.name, kind: "Deployment", apiVersion: "apps/v1", service: ctx.name, port: SERVICE_PORT },
+          replicas: { min: web.scale.min, max: web.scale.max },
+          scaledownPeriod: 300,
+        },
+      };
+    }
+    // (I5) The PVC itself: RWO, sized to `stateful.volume`, no `storageClassName` (the namespace's
+    // default StorageClass applies). Labeled like the Deployment (incl. the stateful marker) so
+    // teardown + the console/CLI badge can find it without a stored-config lookup.
+    if (app.stateful) {
+      out.pvc = {
+        apiVersion: "v1",
+        kind: "PersistentVolumeClaim",
+        metadata: { name: pvcName, namespace: ctx.namespace, labels: podLabels },
+        spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: app.stateful.volume } } },
+      };
+    }
     // Allow the KEDA interceptor (in the keda namespace) to reach the web pods on the CONTAINER
-    // port. The keda namespace is matched by its immutable, control-plane-injected label.
+    // port. The keda namespace is matched by its immutable, control-plane-injected label. (I5) Kept
+    // unconditionally even for a stateful app (which has no HTTPScaledObject to route through it) —
+    // it's inert without one, and leaving it out is not a meaningfully smaller attack surface (the
+    // default-deny NetworkPolicy already blocks everything else), so there's no reason to special-case it.
     out.ingressPolicy = {
       apiVersion: "networking.k8s.io/v1",
       kind: "NetworkPolicy",

@@ -232,9 +232,20 @@ is the foundation). Heavier than a flag — sequence after item 1 so the app re-
 > and reject over-budget requests (429). `GET /v1/orgs/:slug/usage` gained a `storage` section
 > (`{ databases: {count, requestedBytes}, buckets: {count, bytes}, budget }`) — an approximate,
 > eventually-consistent computation (database PVC *requests* + a bucket object-size sweep). Admin API:
-> `GET/PUT /v1/admin/orgs/:slug/quotas` (admin-only, audited `quota.set`). **Not yet done:** the
-> per-app ephemeral-storage `LimitRange` dim and folding storage/`count/persistentvolumeclaims` into the
-> tenant `ResourceQuota` (the item's parts 1–2 at the manifest level), and the admin console editor (M2).
+> `GET/PUT /v1/admin/orgs/:slug/quotas` (admin-only, audited `quota.set`).
+>
+> **Update (I5, constrained volumes):** part of the item's parts 1-2 now shipped at the manifest level —
+> `kube/manifests.ts` `tenantManifests` folds `requests.storage` + `count/persistentvolumeclaims` into
+> the tenant `ResourceQuota` (static platform defaults `20Gi`/`10` via new `opts.storageBudget`/
+> `opts.maxPvcs`, since nothing else in `tenantManifests` is org-aware yet either — see the QUOTA
+> constant). This is the k8s-level backstop for BOTH per-database PVCs and I5's new stateful-app
+> volumes (`<app>-data`, one per `stateful` app, RWO, size = `app.stateful.volume`, clamped to
+> [64Mi,10Gi] in `app-config.ts` — a static, pure ceiling; the org's `storage_budget_bytes` remains the
+> real, usage-aware budget, enforced earlier in `server.ts`). **Still not yet done:** wiring an org's
+> `storage_budget_bytes`/a PVC-count override THROUGH to `tenantManifests`'s new opts (the resolver
+> already exists in `quotas/store.ts` — `applyTenantWithExposed`'s call site just needs to pass it,
+> deferred to avoid a second server.ts collision this slice), the per-app ephemeral-storage `LimitRange`
+> dim, and the admin console editor (M2).
 
 > **Interim shipped:** a **hard per-database storage cap of `1Gi`** (`MAX_DB_STORAGE` in
 > `db-config.ts`), enforced at the control plane — `POST /v1/databases/:name` returns `400` when the

@@ -77,6 +77,69 @@ test("appManifests rejects raw-TCP / multi-service (v1 443-only)", () => {
   ).toThrow();
 });
 
+// ---- I5: stateful (constrained volumes) ----
+
+test("appManifests: stateful emits a Recreate-strategy Deployment (explicit replicas, no HTTPScaledObject) + a PVC + a volumeMount", () => {
+  const app = sanitizeAppConfig({ image: "ecr/notes:v1", stateful: { volume: "3Gi", mount: "/data" } })!;
+  const m = appManifests(app, { name: "notes", namespace: "drop-acme", host: "notes.example.com", versionId: "v1" });
+
+  expect(m.httpScaledObject).toBeUndefined(); // can't scale to zero — no KEDA target at all
+
+  const dm = m.deployment as any;
+  expect(dm.spec.strategy).toEqual({ type: "Recreate" }); // the RWO PVC never double-attaches
+  expect(dm.spec.replicas).toBe(1); // explicit — nothing else owns the replica count
+  expect(dm.metadata.labels["drop.dev/stateful"]).toBe("true"); // teardown + console badge marker
+  expect(dm.spec.template.metadata.labels["drop.dev/stateful"]).toBe("true"); // on the pod template too
+  expect(dm.spec.selector.matchLabels["drop.dev/stateful"]).toBeUndefined(); // selector stays immutable-safe (unchanged shape)
+  expect(dm.spec.template.metadata.annotations["drop.dev/version"]).toBe("v1"); // (H1) version annotation preserved
+
+  const ctr = dm.spec.template.spec.containers[0];
+  const mount = ctr.volumeMounts.find((v: any) => v.mountPath === "/data");
+  expect(mount).toBeDefined();
+  const vol = dm.spec.template.spec.volumes.find((v: any) => v.name === mount.name);
+  expect(vol.persistentVolumeClaim.claimName).toBe("notes-data");
+
+  const pvc = m.pvc as any;
+  expect(pvc.kind).toBe("PersistentVolumeClaim");
+  expect(pvc.metadata.name).toBe("notes-data");
+  expect(pvc.metadata.namespace).toBe("drop-acme");
+  expect(pvc.metadata.labels["drop.dev/stateful"]).toBe("true");
+  expect(pvc.spec.accessModes).toEqual(["ReadWriteOnce"]);
+  expect(pvc.spec.resources.requests.storage).toBe("3Gi");
+  expect(pvc.spec.storageClassName).toBeUndefined(); // namespace default StorageClass
+
+  // Service + ingressPolicy are unaffected — still emitted normally.
+  expect(m.service).toBeDefined();
+  expect(m.ingressPolicy).toBeDefined();
+});
+
+test("appManifests: stateful keeps envFrom/uses-bindings, probes, and resources on the container", () => {
+  const app = sanitizeAppConfig({
+    image: "ecr/notes:v1",
+    resources: { cpu: "1", memory: "1Gi" },
+    uses: [{ database: "notesdb" }],
+    healthcheck: { path: "/healthz" },
+    stateful: { volume: "2Gi", mount: "/data" },
+  })!;
+  const m = appManifests(app, { name: "notes", namespace: "ns", host: "notes.example.com" });
+  const ctr = (m.deployment as any).spec.template.spec.containers[0];
+  expect(ctr.envFrom[0].secretRef.name).toBe("notesdb-app"); // DB binding preserved
+  expect(ctr.readinessProbe.httpGet.path).toBe("/healthz"); // healthcheck preserved
+  expect(ctr.resources.limits).toEqual({ cpu: "1", memory: "1Gi" }); // resources preserved
+  // both the DB-CA volume mount AND the stateful data mount are present
+  expect(ctr.volumeMounts.some((v: any) => v.mountPath === "/data")).toBe(true);
+  expect(ctr.volumeMounts.some((v: any) => v.mountPath.includes("notesdb"))).toBe(true);
+});
+
+test("appManifests: a non-stateful app is completely unaffected (no pvc, normal HTTPScaledObject, no stateful label)", () => {
+  const m = appManifests(base, { name: "x", namespace: "ns", host: "x.example.com" });
+  expect(m.pvc).toBeUndefined();
+  expect(m.httpScaledObject).toBeDefined();
+  expect((m.deployment as any).metadata.labels["drop.dev/stateful"]).toBeUndefined();
+  expect((m.deployment as any).spec.strategy).toBeUndefined();
+  expect((m.deployment as any).spec.replicas).toBeUndefined(); // KEDA still owns it
+});
+
 test("tenantManifests: PSA-labeled namespace + default-deny NetworkPolicy + quota + limitrange", () => {
   const m = tenantManifests("drop-t-alice-1234");
   expect((m.namespace as any).metadata.labels["pod-security.kubernetes.io/enforce"]).toBe("baseline");
@@ -89,6 +152,21 @@ test("tenantManifests: PSA-labeled namespace + default-deny NetworkPolicy + quot
   expect(https.to[0].ipBlock.except).toContain("10.0.0.0/8"); // default when no CIDRs configured (local k3s)
   expect((m.resourceQuota as any).spec.hard["count/pods"]).toBeDefined();
   expect((m.limitRange as any).spec.limits[0].default.cpu).toBeDefined();
+});
+
+test("tenantManifests: ResourceQuota gains requests.storage + a PVC-count dim (I5 / Future.md item 10)", () => {
+  const m = tenantManifests("drop-t-x");
+  const hard = (m.resourceQuota as any).spec.hard;
+  expect(hard["requests.storage"]).toBe("20Gi"); // static platform default
+  expect(hard["count/persistentvolumeclaims"]).toBe("10");
+  // an explicit override (future org-aware wiring) is honored
+  const overridden = tenantManifests("drop-t-x", { storageBudget: "100Gi", maxPvcs: 25 });
+  const hard2 = (overridden.resourceQuota as any).spec.hard;
+  expect(hard2["requests.storage"]).toBe("100Gi");
+  expect(hard2["count/persistentvolumeclaims"]).toBe("25");
+  // the pre-existing cpu/memory/pods/services dims are untouched
+  expect(hard2["limits.cpu"]).toBe("4");
+  expect(hard2["count/pods"]).toBe("20");
 });
 
 test("tenantManifests: the edge-tcp allow rule appears ONLY for exposed workloads (A2b)", () => {

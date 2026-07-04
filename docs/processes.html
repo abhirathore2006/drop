@@ -37,7 +37,7 @@
   <main class="content"><article>
 <p class="crumbs">Guides</p>
 <h1>Processes, health &amp; releases</h1>
-<p class="lead">Additions to the <a href="configuration.html#app"><code>app:</code></a> section of <code>drop.yaml</code>, designed together: <code>healthcheck:</code> (readiness/liveness probes), <code>release:</code> (a migration Job that gates the rollout), <code>processes:</code> (a web process plus long-running workers), and <code>schedule:</code> (a CronJob instead of a web app). All are optional — an app that declares none behaves exactly as before.</p>
+<p class="lead">Additions to the <a href="configuration.html#app"><code>app:</code></a> section of <code>drop.yaml</code>, designed together: <code>healthcheck:</code> (readiness/liveness probes), <code>release:</code> (a migration Job that gates the rollout), <code>processes:</code> (a web process plus long-running workers), <code>schedule:</code> (a CronJob instead of a web app), and <code>stateful:</code> (an opt-in, boxed persistent volume). All are optional — an app that declares none behaves exactly as before.</p>
 
 <h2>How they fit together</h2>
 <p>At <code>drop deploy</code> the API, in order: runs the <code>release</code> Job (if any) and <strong>halts on failure</strong>, then applies the Deployment(s) with the <code>healthcheck</code> probes attached to the web container, wiring one Service + KEDA <code>HTTPScaledObject</code> for the <code>web</code> process and a plain Deployment for each worker. The release + rollout are serialized per app under an advisory lock, so two overlapping deploys can't interleave migrations — the second returns <code>409</code>.</p>
@@ -152,6 +152,39 @@
   <li><strong>Stop/start.</strong> <code>drop stop &lt;app&gt;</code> suspends the CronJob (<code>spec.suspend: true</code>) — no new runs fire, though one already in flight finishes; <code>drop start</code> unsuspends it.</li>
 </ul>
 <div class="note tip"><span class="lbl">Tip</span><p>Before <code>schedule:</code> existed, the only way to run something on a timer was a worker process that polled forever — sometimes fronted by a dummy HTTP server just to satisfy the "must be a web app" assumption. <code>schedule:</code> ends that workaround: declare the cron expression and let Kubernetes own the timing.</p></div>
+
+<h3 id="stateful">stateful:</h3>
+<p>Opt-in, deliberately boxed: a single <strong>persistent volume</strong> for workloads that genuinely need a filesystem — a SQLite-based tool, a small on-disk index — without turning Drop into a general volume-orchestration platform. Setting it <strong>forces</strong> the app to an always-on, single-replica Deployment: no scale-to-zero, no horizontal scaling, ever.</p>
+<pre><code><span class="tok-k">app</span>:
+  <span class="tok-k">image</span>: <span class="tok-s">notes:1</span>
+  <span class="tok-k">stateful</span>:
+    <span class="tok-k">volume</span>: <span class="tok-s">2Gi</span>       <span class="tok-c"># PVC size — clamped to 64Mi–10Gi</span>
+    <span class="tok-k">mount</span>: <span class="tok-s">/data</span>     <span class="tok-c"># where it's mounted in the container</span></code></pre>
+<p>The shorthand <code>stateful: true</code> takes the defaults (<code>2Gi</code> at <code>/data</code>).</p>
+<table class="tbl">
+<thead><tr><th>Key</th><th>Type</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>volume</code></td><td>string</td><td>PVC size, a k8s quantity (e.g. <code>512Mi</code>, <code>2Gi</code>). Clamped to <strong>64Mi–10Gi</strong>; defaults to <code>2Gi</code>. This is Drop's own static ceiling — an org's real storage budget is enforced separately (the tenant's <code>ResourceQuota</code> and, for databases, the per-org <code>storage_budget_bytes</code> override) and may be lower.</td></tr>
+<tr><td><code>mount</code></td><td>string</td><td>Absolute container path (e.g. <code>/data</code>). Must be absolute, no <code>..</code> traversal, no trailing slash, and can't be bare <code>/</code>. Defaults to <code>/data</code>; an explicitly-invalid mount drops the whole block (the app deploys as an ordinary — non-stateful — app instead).</td></tr>
+</tbody>
+</table>
+<div class="note warn"><span class="lbl">What it forces</span><ul>
+  <li><strong>Always-on, single replica.</strong> <code>scale</code> is forced to <code>{min: 1, max: 1}</code> — omit <code>scale</code> and Drop applies it silently; declare a <em>different</em> <code>scale</code> and deploy returns a <code>400</code> (fix the mismatch, or drop the key to accept the default).</li>
+  <li><strong>No <code>HTTPScaledObject</code>.</strong> An always-on app has nothing for KEDA to scale — the Deployment uses a plain, explicit replica count and a <code>Recreate</code> rollout strategy instead, so the one RWO volume is fully released by the old pod before the new one starts (a rolling update would otherwise try to attach it from two pods at once and fail).</li>
+  <li><strong>Mutually exclusive with <code>schedule</code> and <code>processes</code>.</strong> A CronJob has no long-lived volume to keep between runs, and a stateful <em>worker map</em> is out of scope v1 — <code>stateful</code> is single-web-process only. Combining either returns a <code>400</code>.</li>
+</ul></div>
+<div class="note tip"><span class="lbl">This is the escape hatch, not the path</span><p>There are <strong>no snapshots or backups</strong> v1 — a stateful app's volume is exactly as durable as the underlying PVC and nothing more. If your data matters, reach for an <a href="buckets.html#bind">I1 bucket</a> or the <a href="configuration.html#compute-config">managed database</a> instead — both get real backup/restore. <code>stateful</code> exists for the workloads that genuinely can't use either (a SQLite file, a local cache/index), and is deliberately boxed so it never becomes the default way to persist data.</p></div>
+<p>Deleting a stateful app refuses without confirmation — its volume is real data:</p>
+<pre><code><span class="tok-c">$ drop rm notes</span>
+  Error: "notes" is stateful — it has a volume at /data; pass ?force=1 to delete it and its data
+
+<span class="tok-c">$ drop rm notes --force</span>
+  { "deleted": "notes" }</code></pre>
+<p><code>drop ps</code> flags a stateful app so its always-on, single-replica shape isn't mistaken for a stuck deploy:</p>
+<pre><code><span class="tok-c">$ drop ps notes</span>
+  stateful — always-on, single replica; volume 2Gi at /data (no snapshots v1; delete needs --force)
+  PROCESS   READY   RESTARTS   STATE
+  web       1/1     0          Running</code></pre>
 
 <h2>Observing it</h2>
 <p><code>drop ps &lt;app&gt;</code> shows one row per process — its <code>ready/replicas</code>, restart count, and state — aggregated across the web + worker Deployments:</p>

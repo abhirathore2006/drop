@@ -170,6 +170,11 @@ function DangerPanel({ d }: { d: Detail }) {
   };
   const transfer = useWorkloadAction({ onSuccess: () => leave(`${d.name} transferred`) });
   const del = useWorkloadAction({ onSuccess: () => leave(`${d.name} deleted`) });
+  // (I5) A stateful app's DELETE 409s without `?force=1` (its PVC is real data). `versions[].config` is
+  // the raw stored AppConfig (not yet in the `Version` type — read defensively rather than widen it
+  // here); the ConfirmDialog + typeToConfirm below is treated as sufficient confirmation to always pass
+  // force for this case, same posture as the existing bucket-objects check.
+  const isStatefulApp = d.type === "app" && !!(d.versions.find((v) => v.id === d.current) as { config?: { stateful?: unknown } } | undefined)?.config?.stateful;
 
   return (
     <div className="sec">
@@ -202,6 +207,8 @@ function DangerPanel({ d }: { d: Detail }) {
         body={
           d.type === "bucket" ? (
             <>This permanently deletes the bucket{d.bucket && d.bucket.objects > 0 ? ` and its ${d.bucket.objects} object(s)` : ""}.</>
+          ) : isStatefulApp ? (
+            <>This permanently tears down its workload AND its stateful volume — the data cannot be recovered (no snapshots v1).</>
           ) : (
             <>This permanently tears down its workload{d.type === "database" || d.type === "cache" ? " and data" : ""}.</>
           )
@@ -211,7 +218,7 @@ function DangerPanel({ d }: { d: Detail }) {
         typeToConfirm={d.name}
         busy={del.isPending}
         onCancel={() => setConfirmDelete(false)}
-        onConfirm={() => del.mutate(() => api.remove(d.name, d.type === "bucket"))}
+        onConfirm={() => del.mutate(() => api.remove(d.name, d.type === "bucket" || isStatefulApp))}
       />
     </div>
   );

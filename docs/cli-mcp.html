@@ -90,7 +90,7 @@ drop publish ./dist myapp</code></pre>
 <tr><td><code>info &lt;name&gt;</code></td><td>Show site metadata</td><td><code>drop info myapp</code></td></tr>
 <tr><td><code>members &lt;name&gt;</code></td><td>Show owner + collaborators</td><td><code>drop members myapp</code></td></tr>
 <tr><td><code>ls [--org &lt;slug&gt;]</code></td><td>List your workloads (sites · apps · databases); <code>--org</code> filters to one organisation</td><td><code>drop ls --org acme</code></td></tr>
-<tr><td><code>rm &lt;name&gt;</code></td><td>Unpublish a site</td><td><code>drop rm myapp</code></td></tr>
+<tr><td><code>rm &lt;name&gt;</code></td><td>Unpublish a site / delete an app or database. A <a href="processes.html#stateful">stateful</a> app's volume (or a non-empty bucket's contents) refuses deletion with a <code>409</code> unless you pass <code>--force</code></td><td><code>drop rm myapp --force</code></td></tr>
 <tr><td><code>share &lt;name&gt; &lt;email&gt;</code></td><td>Add a collaborator</td><td><code>drop share myapp bob@example.com</code></td></tr>
 <tr><td><code>unshare &lt;name&gt; &lt;email&gt;</code></td><td>Remove a collaborator</td><td><code>drop unshare myapp bob@example.com</code></td></tr>
 <tr><td><code>transfer &lt;name&gt; [email]</code></td><td>Transfer to a <strong>user</strong> (their personal org), or move the resource into a <strong>team org</strong> with <code>--org &lt;slug&gt;</code> (an app's workload is torn down — redeploy + re-set secrets in the new org; databases are stateful and blocked)</td><td><code>drop transfer myapp --org acme</code></td></tr>

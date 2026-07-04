@@ -83,6 +83,22 @@ export interface AppConfig {
   // entrypoint. Only meaningful when `schedule` is set; sanitized unconditionally regardless (a
   // harmless no-op field otherwise).
   command?: string | string[];
+  // (I5) Opt-in constrained volume: `stateful: { volume: "2Gi", mount: "/data" }` (or the shorthand
+  // `stateful: true` for the defaults). Forces the web process to an always-on, single-replica
+  // Deployment (scale: {min:1,max:1} — validated/clamped in assertProcesses/expandProcesses) with
+  // strategy: Recreate and ONE RWO PVC mounted at `mount` — no HTTPScaledObject (a stateful app can't
+  // scale to zero). Mutually exclusive with `schedule` and `processes` (a stateful worker map is out of
+  // scope v1) — enforced in assertProcesses, not here. No snapshots/backups v1: steer real persistence
+  // needs at I1 buckets or the managed DB (this is the escape hatch, not the path).
+  stateful?: AppStateful;
+}
+export interface AppStateful {
+  volume: string; // PVC size, a k8s binary-SI quantity (e.g. "2Gi"); clamped to [64Mi,10Gi] here — see
+  // clampStatefulVolume. This is app-config's OWN static, pure ceiling (no DB/org lookup) — the REAL
+  // per-org storage budget (Future.md item 10 `storage_budget_bytes`) is enforced server-side against
+  // live usage, and may be lower; this bound just guarantees a malformed/huge request never reaches
+  // the manifest layer.
+  mount: string; // absolute container mount path (e.g. "/data"); validated — see validStatefulMount.
 }
 
 const DEFAULT_SERVICE: AppService = { internalPort: 8080, protocol: "http" };
@@ -90,6 +106,61 @@ const DEFAULT_RESOURCES: AppResources = { cpu: "0.5", memory: "512Mi" };
 const DEFAULT_APP_SCALE: AppScale = { min: 0, max: 3 }; // web default (matches the manifest layer)
 const RELEASE_DEFAULT_TIMEOUT_S = 300; // 5m
 const RELEASE_MAX_TIMEOUT_S = 900; // 15m cap
+
+// (I5) Constrained volumes. `STATEFUL_SCALE` is what `stateful` forces the web process to (see
+// expandProcesses/assertProcesses); the storage bounds/default below are app-config's own static,
+// pure ceiling — see the AppStateful.volume doc comment.
+export const STATEFUL_SCALE: AppScale = { min: 1, max: 1 };
+const STATEFUL_MIN_BYTES = 64 * 2 ** 20; // 64Mi floor — small enough to bound blast radius, big enough to be useful
+const STATEFUL_MAX_BYTES = 10 * 2 ** 30; // 10Gi ceiling
+const STATEFUL_MIN_LABEL = "64Mi";
+const STATEFUL_MAX_LABEL = "10Gi";
+const DEFAULT_STATEFUL_VOLUME = "2Gi";
+const DEFAULT_STATEFUL_MOUNT = "/data";
+const STATEFUL_STORAGE_RE = /^\d+(\.\d+)?(Mi|Gi|Ti)$/;
+const STATEFUL_STORAGE_UNIT: Record<string, number> = { Mi: 2 ** 20, Gi: 2 ** 30, Ti: 2 ** 40 };
+
+/** Parse a k8s binary-SI storage quantity (Mi/Gi/Ti only) to bytes, or null if malformed. Kept local
+ *  (not imported from db-config.ts) so app-config stays a leaf module with no cross-config coupling —
+ *  the two `storageToBytes`-shaped helpers are trivial and intentionally duplicated. */
+function statefulStorageToBytes(s: string): number | null {
+  const m = /^(\d+(?:\.\d+)?)(Mi|Gi|Ti)$/.exec(s);
+  return m ? parseFloat(m[1]!) * STATEFUL_STORAGE_UNIT[m[2]!]! : null;
+}
+
+/** Clamp a requested volume size into [64Mi,10Gi]; junk/absent → the 2Gi default. Never throws — same
+ *  defensive posture as `boundedSeconds` (durations), just for a k8s storage quantity. */
+function clampStatefulVolume(v: unknown): string {
+  const s = str(v, 32);
+  if (!s || !STATEFUL_STORAGE_RE.test(s)) return DEFAULT_STATEFUL_VOLUME;
+  const bytes = statefulStorageToBytes(s);
+  if (bytes == null) return DEFAULT_STATEFUL_VOLUME;
+  if (bytes < STATEFUL_MIN_BYTES) return STATEFUL_MIN_LABEL;
+  if (bytes > STATEFUL_MAX_BYTES) return STATEFUL_MAX_LABEL;
+  return s;
+}
+
+/** A stateful mount path: absolute, no ".." traversal, no trailing slash, never bare "/" (mounting over
+ *  the whole container filesystem is never sane). Segment charset matches a sane filesystem path (wider
+ *  than a DNS name, but no shell metacharacters/whitespace). */
+function validStatefulMount(p: string): boolean {
+  if (!p.startsWith("/") || p === "/" || p.endsWith("/")) return false;
+  const segs = p.split("/").filter(Boolean);
+  return segs.length > 0 && segs.every((s) => s !== ".." && s !== "." && /^[A-Za-z0-9._-]+$/.test(s));
+}
+
+/** Sanitize `app.stateful`: the object form `{volume?, mount?}` OR the boolean shorthand `stateful:
+ *  true` (all defaults). `mount` absent → defaults to "/data" (always valid); an EXPLICIT but invalid
+ *  mount (relative, "..", trailing slash, bare "/") drops the WHOLE block — a stateful declaration with
+ *  no safe mount point is meaningless, unlike `volume` which always has a sane clamped fallback. */
+function sanitizeStateful(raw: unknown): AppStateful | undefined {
+  const v = raw === true ? {} : raw;
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const s = v as Record<string, unknown>;
+  const mount = s.mount === undefined ? DEFAULT_STATEFUL_MOUNT : str(s.mount, 256);
+  if (!mount || !validStatefulMount(mount)) return undefined;
+  return { volume: clampStatefulVolume(s.volume), mount };
+}
 
 function str(v: unknown, max = 2048): string | undefined {
   return typeof v === "string" && v.length > 0 && v.length <= max ? v : undefined;
@@ -343,6 +414,12 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
   const command = sanitizeCommand(raw.command);
   if (command !== undefined) cfg.command = command;
 
+  // `stateful` (I5) → a constrained volume. Junk (wrong type, or an explicit-but-invalid mount) drops
+  // the whole block; exclusivity with `schedule`/`processes` and the forced scale are enforced at
+  // deploy via assertProcesses/expandProcesses, not here — sanitizing is purely syntactic.
+  const stateful = sanitizeStateful(raw.stateful);
+  if (stateful) cfg.stateful = stateful;
+
   return cfg;
 }
 
@@ -380,8 +457,23 @@ export function isWebProcess(key: string, p: AppProcess): boolean {
  * the KEDA HTTP add-on, not a Valkey list — so a `scale_on` there is rejected outright; (b) it
  * requires at least one `{cache}` binding in `uses`, since the queue it watches lives in that bound
  * Valkey — without one the manifest layer would have no address to point the KEDA trigger at.
+ *
+ * (I5) `stateful` is boxed hard, three loud 400s: mutually exclusive with `schedule` (a CronJob has no
+ * long-lived volume to keep across runs) and with `processes` (a stateful worker map is out of scope
+ * v1 — a single implicit web process only); and an EXPLICIT `scale` that isn't exactly {min:1,max:1} is
+ * rejected outright (the loud option — an absent `scale` is silently clamped to {1,1} instead, in
+ * expandProcesses, since there's nothing explicit to contradict).
  */
 export function assertProcesses(app: AppConfig): void {
+  if (app.stateful) {
+    if (app.schedule) throw new Error(`"stateful" and "schedule" are mutually exclusive — a CronJob has no long-lived volume to keep across runs`);
+    if (app.processes) throw new Error(`"stateful" and "processes" are mutually exclusive — a stateful worker map is out of scope v1 (a single web process only)`);
+    if (app.scale && (app.scale.min !== STATEFUL_SCALE.min || app.scale.max !== STATEFUL_SCALE.max)) {
+      throw new Error(
+        `"stateful" forces an always-on, single-replica Deployment (scale: {min:${STATEFUL_SCALE.min},max:${STATEFUL_SCALE.max}}) — got {min:${app.scale.min},max:${app.scale.max}}; drop "scale" to accept the default, or set it to {min:1,max:1} explicitly`,
+      );
+    }
+  }
   if (app.schedule) {
     if (app.processes) throw new Error(`"schedule" and "processes" are mutually exclusive — a CronJob has no web/worker processes`);
     if (app.healthcheck) throw new Error(`"schedule" and "healthcheck" are mutually exclusive — probes are meaningless on a CronJob`);
@@ -423,8 +515,15 @@ export interface ExpandedProcess {
  *  such a worker is expected to actually scale. Per-process resources/scale override the app-level
  *  defaults; command is per-process only. */
 export function expandProcesses(app: AppConfig, appName: string): ExpandedProcess[] {
+  // (I5) A stateful app's web process defaults to an always-on single replica ({min:1,max:1}) instead
+  // of the normal 0..3 KEDA range, whenever no explicit `scale` is declared anywhere (app- or
+  // process-level) — the "clamp when absent" half of the forced-scale rule (assertProcesses 400s an
+  // EXPLICIT mismatch instead). assertProcesses rejects `processes` alongside `stateful` outright, so
+  // only the implicit-web branch below is reachable for a stateful app in practice — the fallback is
+  // still computed for both so this function stays correct standalone (never assumes the caller validated).
+  const defaultScale = app.stateful ? STATEFUL_SCALE : DEFAULT_APP_SCALE;
   if (!app.processes) {
-    return [{ name: appName, process: "web", web: true, scale: app.scale ?? { ...DEFAULT_APP_SCALE }, resources: app.resources }];
+    return [{ name: appName, process: "web", web: true, scale: app.scale ?? { ...defaultScale }, resources: app.resources }];
   }
   const out: ExpandedProcess[] = [];
   for (const [key, p] of Object.entries(app.processes)) {
@@ -434,7 +533,7 @@ export function expandProcesses(app: AppConfig, appName: string): ExpandedProces
         process: key,
         web: true,
         command: p.command,
-        scale: p.scale ?? app.scale ?? { ...DEFAULT_APP_SCALE },
+        scale: p.scale ?? app.scale ?? { ...defaultScale },
         resources: p.resources ?? app.resources,
         scaleOn: p.scaleOn,
       });

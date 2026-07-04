@@ -42,8 +42,8 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 20 | M2 Permission-aware UI + capabilities | done | see log | capabilitiesFor one-pass; fixed pooler+rollback gating drift |
 | 21 | K1 Managed auth resource | done | 095496e | HS256 v1 (no OSS JWKS); edge exemption module; gotrue v2.170.0 pinned |
 | 22 | C2 Canvas editing | done | a2a864a | pure ops+rebase model; legal-edge lockstep caught auth kind mid-flight |
-| 23 | J3 `drop exec` | todo | | |
-| 24 | K2 App RBAC + SDK | todo | | |
+| 23 | J3 `drop exec` | done | fa46e79 | v4.channel exec; tunnel_tickets kind column; console terminal → M3 |
+| 24 | K2 App RBAC + SDK | done | d16c906 | HS256 verifyRequest (no JWKS); rbac-seed printed not auto-run; packages/auth workspace |
 | 25 | M4 Data-heavy views | todo | | |
 | 26 | H3 App→app edges | todo | | |
 | 27 | E2 App previews | todo | | |
