@@ -43,7 +43,7 @@
   <main class="content"><article>
 <p class="crumbs">Guides</p>
 <h1>Previews</h1>
-<p class="lead">A <strong>preview</strong> is a labeled, expiring extra version of a static site, served at its own hostname alongside — never instead of — the site's normal live version. Publish a build under a label (a branch name, a PR number, anything DNS-safe) and it's reachable at <code>&lt;name&gt;--&lt;label&gt;.drop.example.com</code> immediately, without touching what <code>&lt;name&gt;.drop.example.com</code> is currently serving. This is the "static previews" slice (E1) — app previews (a full parallel deployment, not just bytes) are a separate, later piece.</p>
+<p class="lead">A <strong>preview</strong> is a labeled, expiring extra instance of a workload, served at its own hostname alongside — never instead of — the live version. For a <strong>static site</strong> (E1) it's an extra published build; for a <strong>container app</strong> (E2) it's a full parallel deployment. Either way it's reachable at <code>&lt;name&gt;--&lt;label&gt;.drop.example.com</code> immediately, without touching what <code>&lt;name&gt;.drop.example.com</code> is currently serving. Both kinds share the same hostname scheme, expiry, never-indexed rule, and <code>drop preview ls/rm</code> commands — jump to <a href="#app-previews">App previews</a> for the container-specific parts.</p>
 
 <h2 id="flow">The flow</h2>
 <pre><code><span class="tok-c"># publish a preview under a label (defaults to a short random suffix if you omit one)</span>
@@ -77,6 +77,35 @@ $ drop preview rm myapp pr-42</code></pre>
 
 <h2 id="visibility">Visibility &amp; access inheritance</h2>
 <p>A preview is <strong>not</strong> a separate resource with its own access settings — it inherits the parent site's visibility and password gate <strong>verbatim</strong>. If <code>myapp</code> is <code>private</code>, <code>myapp--pr-42</code> is private too, with the identical 403. If it's password-protected, the same credentials that unlock <code>myapp.drop.example.com</code> unlock the preview. There is no way to make a preview more or less visible than its parent — one gate, applied consistently, is easier to reason about (and to audit) than a second one that could quietly drift.</p>
+
+<h2 id="app-previews">App previews</h2>
+<p>Everything above is about <strong>static-site</strong> previews. A <strong>container app</strong> preview (E2) is the same idea — a labeled, expiring instance at <code>&lt;name&gt;--&lt;label&gt;</code> that leaves the live app untouched — but instead of pointing at some published bytes it stands up a <strong>parallel deployment</strong>:</p>
+<pre><code><span class="tok-c"># deploy a preview of an already-deployed app (build + push the image the usual way, then preview it)</span>
+$ drop deploy ./app myapp --build --preview pr-42
+  ▸ deploying myapp  (drop.local/myapp:abc123) (preview: pr-42)…
+  <span class="tok-s">✓ preview live at https://myapp--pr-42.drop.example.com  (expires 2026-07-11T00:00:00.000Z)</span>
+
+$ drop preview ls myapp          <span class="tok-c"># lists site AND app previews (URL, expiry, "own db")</span>
+$ drop preview rm myapp pr-42     <span class="tok-c"># tears the parallel workload down (and any --with-db clone)</span></code></pre>
+<p>Under the hood, <code>drop deploy myapp --preview pr-42</code> applies a <strong>parallel manifest set</strong> named <code>myapp-p-pr-42</code> — its own Deployment, Service and HTTPScaledObject — at host <code>myapp--pr-42.&lt;base&gt;</code>. The edge's <code>--</code> split resolves that host to the suffixed workload, and the KEDA interceptor wakes and routes it exactly like any other app. The parent app's manifests and current version are never touched.</p>
+<ul>
+  <li><strong>Scale is forced to <code>{min:0, max:1}</code></strong> — a preview is cheap and ephemeral. It scales to zero when idle and wakes on the first request, so an open PR costs nothing while nobody's looking at it.</li>
+  <li><strong>Secrets &amp; bindings are the parent's, read-only.</strong> The preview's pods <code>envFrom</code> the <em>parent's</em> <code>&lt;name&gt;-env</code> and <code>&lt;name&gt;-secret</code> — it never gets its own secret set — and each <code>uses:</code> binding (database, cache, bucket, auth, app→app) resolves to the same underlying resource the parent points at. A preview is a view of your app against its real dependencies, not a fresh sandbox.</li>
+  <li><strong>The image is the freshly-resolved ref</strong> — the same image-stream path a normal deploy takes (the CLI sends the built ref). The preview registry row stores that image ref in place of a static version id.</li>
+  <li><strong>No release Job runs</strong> for a preview: it shares the parent's already-migrated database, and re-running the release command against it could mutate production data.</li>
+</ul>
+<div class="note"><span class="lbl">An app preview's bytes are the image</span><p>Unlike a site preview (whose bytes are an ordinary version), an app preview stores nothing of its own — its image is the shared, content-addressed layer set the parent already pulls, GC'd with everything else. Only the <strong>manifests</strong> (a scale-to-zero Deployment + Service + HTTPScaledObject) and, if you opt into <code>--with-db</code>, one database cost anything. Teardown — at expiry or via <code>drop preview rm</code> — deletes exactly those, idempotently, through the same code path as <code>drop</code> app delete.</p></div>
+
+<h3 id="with-db">--with-db: an isolated database per preview</h3>
+<p>By default a preview shares the parent app's database — fine for read-heavy previews, dangerous if the preview writes. Pass <code>--with-db</code> and Drop instead clones a <strong>fresh, empty</strong> database from the parent's bound-db spec (same storage size, engine and extensions), named <code>myapp-p-pr-42-db</code>, and rewires just this preview's database binding to point at it:</p>
+<pre><code>$ drop deploy ./app myapp --build --preview pr-42 --with-db
+  ✓ preview live at https://myapp--pr-42.drop.example.com  (expires …)
+     own empty database: myapp-p-pr-42-db</code></pre>
+<p>The clone is an <strong>empty</strong> CloudNativePG cluster — a fresh schema, not a copy of the parent's data. It's created same-org, audited (<code>preview.create</code> records <code>withDb</code>), and torn down at expiry alongside the workload. Seeding it from the parent's data (a from-backup clone) is a later slice; for now a <code>--with-db</code> preview starts blank, so pair it with your app's own migrations/seeding if it needs a schema.</p>
+
+<h3 id="app-quota">Quota</h3>
+<p>An app preview is a real running workload, so it <strong>counts against your org's workload cap</strong> — a preview that would exceed the cap is refused with a <code>429</code> (remove a preview or app, or ask an admin to raise the limit). Re-deploying the <em>same</em> label re-points the existing preview and doesn't count again. With <code>--with-db</code>, the clone's storage additionally counts against the org's storage budget. Delete previews you're done with (or let them expire) to free the slot.</p>
+<div class="note"><span class="lbl">Console</span><p>The app detail page lists active previews (label, URL, expiry, an "own db" marker) with a remove button, gated on the <code>deploy</code> capability — the same verb that creates one. Creating a preview is a CLI/CI action; the console manages the ones that exist.</p></div>
 
 <h2 id="ci">GitHub Action recipe: a URL per pull request</h2>
 <p>This extends the CI recipe from <a href="tokens.html">CI tokens</a> — same <code>DROP_TOKEN</code> service token, same install step, one more publish flag and a comment step:</p>

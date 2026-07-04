@@ -96,8 +96,48 @@ test("deleteExpired (the housekeeping sweep) removes only rows past `now`, retur
   await store.upsert("myapp", "old", "v1", "alice@x.com", new Date("2026-01-01T00:00:00Z")); // already expired
   await store.upsert("myapp", "fresh", "v2", "alice@x.com", new Date("2026-06-01T00:00:00Z")); // not yet
   const removed = await store.deleteExpired(new Date("2026-02-01T00:00:00Z"));
-  expect(removed).toEqual([{ siteName: "myapp", label: "old" }]);
+  expect(removed).toEqual([{ siteName: "myapp", label: "old", kind: "site", hasDb: false }]);
   expect(await store.get("myapp", "old")).toBeNull();
   expect(await store.get("myapp", "fresh")).not.toBeNull();
+  await db.destroy();
+});
+
+// (E2) App previews reuse the store with kind='app' + a has_db flag; listExpired reads without deleting
+// (the sweep's tear-down-then-delete ordering); countAppPreviewsForOrg feeds the workload-cap check.
+test("upsert kind='app' + hasDb round-trips; defaults are 'site'/false", async () => {
+  const { db } = await fix();
+  const store = new PreviewStore(db);
+  const site = await store.upsert("myapp", "s1", "v1", "alice@x.com", new Date("2026-06-01T00:00:00Z"));
+  expect(site.kind).toBe("site");
+  expect(site.hasDb).toBe(false);
+  const appP = await store.upsert("myapp", "pr", "img:1", "alice@x.com", new Date("2026-06-01T00:00:00Z"), { kind: "app", hasDb: true });
+  expect(appP.kind).toBe("app");
+  expect(appP.hasDb).toBe(true);
+  expect((await store.get("myapp", "pr"))!.versionId).toBe("img:1"); // app preview stores the image ref
+  await db.destroy();
+});
+
+test("listExpired reads expired rows WITHOUT deleting; deleteExpired returns kind/hasDb", async () => {
+  const { db } = await fix();
+  const store = new PreviewStore(db);
+  await store.upsert("myapp", "app-old", "img:1", "alice@x.com", new Date("2026-01-01T00:00:00Z"), { kind: "app", hasDb: true });
+  const cut = new Date("2026-02-01T00:00:00Z");
+  const listed = await store.listExpired(cut);
+  expect(listed.map((p) => ({ label: p.label, kind: p.kind, hasDb: p.hasDb }))).toEqual([{ label: "app-old", kind: "app", hasDb: true }]);
+  expect(await store.get("myapp", "app-old")).not.toBeNull(); // listExpired does NOT delete
+  const removed = await store.deleteExpired(cut);
+  expect(removed).toEqual([{ siteName: "myapp", label: "app-old", kind: "app", hasDb: true }]);
+  await db.destroy();
+});
+
+test("countAppPreviewsForOrg counts only app previews in the org", async () => {
+  const { db } = await fix();
+  const orgs = new OrgStore(db);
+  const org = await orgs.ensurePersonalOrg("alice@x.com");
+  const store = new PreviewStore(db);
+  await store.upsert("myapp", "s1", "v1", "alice@x.com", new Date("2026-06-01T00:00:00Z")); // site preview → not counted
+  await store.upsert("myapp", "a1", "img:1", "alice@x.com", new Date("2026-06-01T00:00:00Z"), { kind: "app" });
+  await store.upsert("myapp", "a2", "img:2", "alice@x.com", new Date("2026-06-01T00:00:00Z"), { kind: "app" });
+  expect(await store.countAppPreviewsForOrg(org.id)).toBe(2);
   await db.destroy();
 });

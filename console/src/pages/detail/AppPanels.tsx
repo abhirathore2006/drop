@@ -4,9 +4,10 @@ import { useState } from "react";
 import { Button } from "../../components/Button.tsx";
 import { Field, KV } from "../../components/Field.tsx";
 import { Pill } from "../../components/badges.tsx";
-import { api, type Detail } from "../../lib/api.ts";
+import { api, fmtStamp, type Detail } from "../../lib/api.ts";
 import { cap, denyReason } from "../../lib/caps.ts";
 import { deriveStatus } from "../../lib/status.ts";
+import { ConfirmDialog } from "../../components/ConfirmDialog.tsx";
 import { LogsPanel } from "./LogsPanel.tsx";
 import { TerminalPanel } from "./TerminalPanel.tsx";
 import { ExposurePanel } from "./ExposurePanel.tsx";
@@ -17,6 +18,8 @@ export function AppPanels({ d }: { d: Detail }) {
     <>
       {d.app && <AppInfoPanel d={d} />}
       <ExposurePanel d={d} />
+      {/* (E2) App previews (`drop deploy --preview`) — parallel scale-0/1 workloads at <name>--<label>. */}
+      <AppPreviewsPanel d={d} />
       {/* Secrets list reads behind `configure` (server-gated) — hide the whole surface without it. */}
       {cap(d, "configure") && <SecretsPanel name={d.name} />}
       {/* (M3/J3) Interactive shell — gated on `exec` (editor+). A shell can read the app's env, so the
@@ -25,6 +28,57 @@ export function AppPanels({ d }: { d: Detail }) {
       {/* Logs read behind `logs` (above viewer) — hide rather than 403 on load. */}
       {cap(d, "logs") && <LogsPanel name={d.name} type="app" />}
     </>
+  );
+}
+
+// (E2) Active app previews (label, URL, expiry, an "own db" badge) with a remove button. Mirrors the
+// E1 SitePanels previews list. Previews are created via `drop deploy --preview` / CI (docs/previews.html);
+// removing one is `deploy`-gated (the same verb that created it) and tears down the parallel workload.
+function AppPreviewsPanel({ d }: { d: Detail }) {
+  const previews = d.previews ?? [];
+  const canManage = cap(d, "deploy"); // removing a preview is `deploy`-gated (same as creating one)
+  const rm = useWorkloadAction({ success: "preview removed" });
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
+  if (previews.length === 0) return null; // nothing to show — keep the panel list uncluttered
+  return (
+    <div className="sec">
+      <h3>previews ({previews.length})</h3>
+      {previews.map((p) => (
+        <div className="item" key={p.label}>
+          <div className="meta">
+            <b>{p.label}</b>
+            <div className="sub">
+              <a href={p.url} target="_blank" rel="noreferrer">
+                {p.url.replace(/^https?:\/\//, "")}
+              </a>
+              {" · expires "}
+              {fmtStamp(p.expiresAt)}
+              {p.hasDb && " · own db"}
+            </div>
+          </div>
+          {canManage && (
+            <Button size="sm" variant="danger" loading={rm.isPending} onClick={() => setConfirmRemove(p.label)}>
+              remove
+            </Button>
+          )}
+        </div>
+      ))}
+      <ConfirmDialog
+        open={confirmRemove !== null}
+        title={`Remove preview ${confirmRemove ?? ""}`}
+        body={
+          <>
+            Remove the preview <b>{confirmRemove}</b> on <b>{d.name}</b>? Its workload
+            {previews.find((p) => p.label === confirmRemove)?.hasDb ? " and its --with-db clone" : ""} are torn down and its URL stops resolving immediately.
+          </>
+        }
+        confirmLabel="remove"
+        danger
+        busy={rm.isPending}
+        onCancel={() => setConfirmRemove(null)}
+        onConfirm={() => rm.mutate(() => api.removePreview(d.name, confirmRemove!), { onSuccess: () => setConfirmRemove(null) })}
+      />
+    </div>
   );
 }
 

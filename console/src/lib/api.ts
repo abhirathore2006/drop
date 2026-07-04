@@ -210,14 +210,18 @@ export interface ExecTicket {
   command: string[]; // bound at issuance; the upgrade cannot change it
   wsPath: string; // e.g. /v1/apps/:name/exec
 }
-/** (E1) A labeled, expiring preview of a specific version, served at <site>--<label>.<baseDomain>. */
+/** (E1/E2) A labeled, expiring preview served at <site>--<label>.<baseDomain>. A site preview (E1)
+ *  points at a static version; an app preview (E2, `kind:"app"`) is a parallel container workload and
+ *  `hasDb` is true when it owns a --with-db database clone. */
 export interface PreviewInfo {
   label: string;
-  versionId: string;
+  versionId: string; // (site) a static version id; (app) the deployed image ref
   url: string;
   createdBy: string;
   createdAt: string;
   expiresAt: string;
+  kind?: "site" | "app"; // (E2) omitted on an older API → treat as "site"
+  hasDb?: boolean; // (E2) app preview owns a --with-db clone
 }
 export interface SecretMeta {
   key: string;
@@ -281,7 +285,7 @@ export interface Detail {
   url: string;
   versions: Version[];
   capabilities?: Capability[]; // (M2) the caller's resolved verbs on this resource — the console gates on this
-  previews?: PreviewInfo[]; // (E1) active previews — present for type=site only
+  previews?: PreviewInfo[]; // (E1/E2) active previews — present for type=site (E1) and type=app (E2)
   status?: ServerStatus | null;
   uptime?: UptimeSummary; // (G2b) present for site/app/database
   tcp?: TcpExposure; // (A2b) present when the app/database is TCP-exposed

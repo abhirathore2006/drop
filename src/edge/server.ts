@@ -168,9 +168,17 @@ export function createEdge(d: EdgeDeps) {
     let type = ptr?.type ?? "site";
     let version = ptr?.currentVersion ?? null;
     if (preview) {
-      type = "site"; // E1 previews are static-site only; a non-site parent resolves to a miss below
-      const row = ptr && ptr.type === "site" && d.previews ? await d.previews.get(preview.site, preview.label) : null;
+      // A preview resolves through the registry to its OWN pointer (never current_version). The parent's
+      // type decides the shape: a `site` parent (E1) resolves to a SPECIFIC static version; an `app`
+      // parent (E2) resolves to the SUFFIXED workload `<site>--<label>` — the handler proxies there
+      // exactly like a normal app, and the interceptor keys on that host's own HTTPScaledObject. Any
+      // other parent type (or no parent) falls through to a miss (version null → 404).
+      const parentType = ptr?.type;
+      const row = ptr && (parentType === "site" || parentType === "app") && d.previews ? await d.previews.get(preview.site, preview.label) : null;
       const expired = !row || new Date(row.expiresAt).getTime() <= now();
+      type = parentType === "app" ? "app" : "site";
+      // For an app preview `versionId` is the deployed IMAGE ref — used here only as a liveness flag that
+      // gates the proxy; the interceptor owns the actual routing to the suffixed workload.
       version = row && !expired ? row.versionId : null;
     }
     const entry: CacheEntry = {
@@ -299,8 +307,10 @@ export function createEdge(d: EdgeDeps) {
     // type=app: reverse-proxy to the interceptor (KEDA wakes + routes by Host). Apps
     // don't use the static-site machinery below (S3 bytes, redirects, SPA fallback).
     if (type === "app") {
-      if (!version) return notFound("app not found or not deployed");
-      return proxyToApp(c, siteName);
+      if (!version) return notFound(preview ? `preview "${preview.label}" not found or expired` : "app not found or not deployed");
+      // (E2) An app preview proxies to the SUFFIXED host `<site>--<label>` (rawLabel) — the preview
+      // workload's own HTTPScaledObject host. A normal app proxies to its plain siteName.
+      return proxyToApp(c, preview ? rawLabel : siteName);
     }
     if (!version) {
       return notFound(preview ? `preview "${preview.label}" not found or expired` : "site not found or nothing published");

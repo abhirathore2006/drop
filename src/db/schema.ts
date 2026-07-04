@@ -228,11 +228,17 @@ export interface TemplateVersionsTable {
 export interface PreviewsTable {
   site_name: string;
   label: string;
-  version_id: string;
+  version_id: string; // (E1 site) a real static version id; (E2 app) the deployed image ref — never FK-bound
   created_by: string;
   created_at: Ts; // set from the store's injectable clock (the column also has a now() default)
   expires_at: Ts;
+  kind: ColumnType<PreviewKind, PreviewKind | undefined, PreviewKind>; // (E2) 'site' (E1) | 'app' (E2); db-default 'site'
+  has_db: ColumnType<boolean, boolean | undefined, boolean>; // (E2) app preview owns a --with-db CNPG clone; db-default false
 }
+
+/** A preview's kind (E2): `site` is the E1 static-version preview; `app` is a parallel container manifest
+ *  set (`<name>-p-<label>`) that the sweep must tear down (deleteApp) at expiry. */
+export type PreviewKind = "site" | "app";
 
 /** A short-lived, single-use tunnel ticket (A3, `db:proxy`). Issued by `POST
  *  /v1/databases/:name/tunnel-ticket` (authz `connect`) and redeemed ONCE by the WebSocket tunnel

@@ -162,10 +162,30 @@ server.on("upgrade", (req, socket, head) => {
 // with pruneVersions, which is likewise unaudited). Errors are logged, never thrown — a transient DB
 // hiccup on one tick must not crash the process; the next tick just tries again.
 setInterval(() => {
+  // (E1/E2) Two-phase for app previews (E2): LIST the expired rows → tear down each app preview's
+  // parallel `<name>-p-<label>` manifest set (+ its --with-db CNPG clone) idempotently — the SAME code
+  // path as app delete — → then DELETE the rows. Reading before deleting keeps a crash mid-sweep from
+  // orphaning a preview workload: the row survives, so the next tick re-tears-down and re-deletes. Both
+  // calls share one `sweepNow` so the delete removes EXACTLY the set we tore down (min 1d expiry means no
+  // row can newly qualify in the millisecond gap). App-preview BYTES are the shared image (GC'd with the
+  // parent) — only the manifests + optional db cost anything; a SITE preview is still just a pointer row.
+  const sweepNow = new Date();
   previews
-    .deleteExpired(new Date())
-    .then((removed) => {
-      if (removed.length) console.log(`preview sweep: removed ${removed.length} expired preview(s)`);
+    .listExpired(sweepNow)
+    .then(async (expired) => {
+      let appN = 0;
+      for (const p of expired) {
+        if (p.kind !== "app" || !kube) continue; // site previews are pointer-only; app previews need kube to tear down
+        const parent = await meta.getSitePlain(p.siteName).catch(() => null); // parent still exists (FK cascade would have removed the row otherwise)
+        const ns = parent?.namespace;
+        if (!ns) continue;
+        appN++;
+        const previewName = `${p.siteName}-p-${p.label}`;
+        await kube.deleteApp(ns, previewName).catch((e) => console.error(`preview sweep: deleteApp ${previewName}:`, (e as Error).message));
+        if (p.hasDb) await kube.deleteDatabase(ns, `${previewName}-db`).catch((e) => console.error(`preview sweep: deleteDatabase ${previewName}-db:`, (e as Error).message));
+      }
+      const removed = await previews.deleteExpired(sweepNow);
+      if (removed.length) console.log(`preview sweep: removed ${removed.length} expired preview(s)${appN ? ` (${appN} app)` : ""}`);
     })
     .catch((e) => console.error("preview sweep failed:", (e as Error).message));
   // (A3) Reap spent/expired tunnel tickets on the same tick — they're tiny + 60s-lived, but unredeemed

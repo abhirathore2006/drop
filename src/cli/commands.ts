@@ -13,7 +13,7 @@ import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
 import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate, loadAuthCreate } from "./resolve-name.ts";
 import { buildAndPushImage } from "./build-push.ts";
-import { runStackUp } from "./stack.ts";
+import { runStackUp, runStackOutdated, runStackUpgrade } from "./stack.ts";
 import { runDetect, serializeDetectedStack, writeDetectedStack } from "./detect.ts";
 import { parseStackConfig } from "../stack-config.ts";
 import { rbacSeedSql } from "../auth-resource/rbac-seed.ts";
@@ -245,15 +245,17 @@ export function buildProgram(): Command {
       }
     });
 
-  // ---- previews (E1): labeled, expiring extra versions served at <name>--<label> ----
-  const previewCmd = program.command("preview").description("Manage static-site previews (drop publish --preview creates one)");
+  // ---- previews (E1/E2): labeled, expiring extras served at <name>--<label> ----
+  // Sites (drop publish --preview) AND container apps (drop deploy --preview) share this registry; `ls`
+  // shows both (an app preview reports `kind:"app"` + `hasDb`), and `rm` tears down whichever it is.
+  const previewCmd = program.command("preview").description("Manage previews (drop publish --preview for a site, drop deploy --preview for an app)");
   previewCmd
     .command("ls <name>")
-    .description("List a site's active previews")
+    .description("List a site's or app's active previews (URL, expiry, and whether an app preview has its own db)")
     .action(async (name: string) => show(await (await client()).previewList(name)));
   previewCmd
     .command("rm <name> <label>")
-    .description("Remove a preview (audited)")
+    .description("Remove a preview (audited); for an app preview this also tears down its parallel workload + any --with-db clone")
     .action(async (name: string, label: string) => show(await (await client()).previewRemove(name, label)));
 
   program
@@ -263,23 +265,30 @@ export function buildProgram(): Command {
     .option("--build", "build the image from dir's Dockerfile and push it through Drop (no registry needed)")
     .option("-f, --dockerfile <path>", "build from a specific Dockerfile (e.g. Dockerfile.prod); implies --build")
     .option("--no-start", "deploy without starting the pod (set secrets/config first, then `drop start <app>`) — avoids a broken first boot")
-    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; build?: boolean; dockerfile?: string; start?: boolean }) => {
+    .option("--preview [label]", "deploy as a PREVIEW at <name>--<label> (parallel, scale 0/1, leaves the live app untouched); label defaults to a short random suffix")
+    .option("--with-db", "with --preview: clone a FRESH EMPTY database from the parent's bound-db spec (torn down at expiry) instead of sharing the parent's")
+    .option("--expire-days <n>", "preview expiry in days, 1-30 (default 7); only with --preview", (v) => parseInt(v, 10))
+    .action(async (dir: string, nameArg: string | undefined, opts: { org?: string; build?: boolean; dockerfile?: string; start?: boolean; preview?: string | boolean; withDb?: boolean; expireDays?: number }) => {
       const { name, source, app } = await loadAppDeploy(dir, nameArg);
       if (opts.build || opts.dockerfile) {
         const { image } = await buildAndPushImage(await client(), dir, name, { org: opts.org, dockerfile: opts.dockerfile });
         app.image = image; // deploy the just-pushed image instead of the drop.yaml ref
       }
-      // commander maps `--no-start` to opts.start === false
+      // commander maps `--no-start` to opts.start === false; `[label]` (optional value) gives `true` for a bare --preview.
       const noStart = opts.start === false;
-      console.log(`  ▸ deploying ${name}  (${app.image})${noStart ? " — not starting yet" : ""}…`);
-      const res = await (await client()).deploy(name, app, opts.org, noStart);
-      if (res.started === false) {
+      const preview = opts.preview === undefined ? undefined : { label: typeof opts.preview === "string" ? opts.preview : randomPreviewLabel(), withDb: opts.withDb, expireDays: opts.expireDays };
+      console.log(`  ▸ deploying ${name}  (${app.image})${preview ? ` (preview: ${preview.label}${preview.withDb ? ", own db" : ""})` : ""}${noStart ? " — not starting yet" : ""}…`);
+      const res = await (await client()).deploy(name, app, opts.org, noStart, preview);
+      if (res.preview) {
+        console.log(`  ✓ preview live at ${res.preview.url}  (expires ${res.preview.expiresAt})`);
+        if (res.preview.db) console.log(`     own empty database: ${res.preview.db}`);
+      } else if (res.started === false) {
         console.log(`  ✓ deployed ${name} (stopped). Set its secrets/config, then start it:`);
         console.log(`      drop start ${name}`);
       } else {
         console.log(`  ✓ live at ${res.url}`);
       }
-      if (source === "generated") {
+      if (source === "generated" && !preview) {
         console.log(`  tip: add  name: ${name}  under app: in drop.yaml to keep this URL across deploys.`);
       }
     });
@@ -331,6 +340,56 @@ export function buildProgram(): Command {
     .option("--org <slug>", "the stack's organisation")
     .option("--cascade", "also delete the stack's resources (destructive)")
     .action(async (name: string, opts: { org?: string; cascade?: boolean }) => show(await (await client()).stackDelete(name, { org: opts.org, cascade: opts.cascade })));
+  // D2: template upstream diff — "outdated" (three-way diff) + "upgrade" (merge → standard reconcile)
+  stack
+    .command("outdated [name]")
+    .description("Compare a template-derived stack to the template's latest (three-way diff: upstream vs local drift vs conflict); with no name, list all derived stacks with an update-available flag")
+    .option("--org <slug>", "the stack's organisation")
+    .action(async (name: string | undefined, opts: { org?: string }) => {
+      await runStackOutdated(await client(), name, { org: opts.org, log: (s) => console.log(s) });
+    });
+  stack
+    .command("upgrade <name>")
+    .description("Apply upstream template changes; conflicts with local drift need --take-upstream/--keep-local per key")
+    .option("--org <slug>", "the stack's organisation")
+    .option("--to <version>", "upgrade to a specific template version (default: latest)")
+    .option("--take-upstream <key>", "resolve a conflicted resource by taking the template's version (repeatable)", collect, [])
+    .option("--keep-local <key>", "resolve a conflicted resource by keeping your local version (repeatable)", collect, [])
+    .option("--prune", "actually tear down resources the template dropped (default: flagged only)")
+    .option("--dry-run", "print the plan without applying it")
+    .action(async (name: string, opts: { org?: string; to?: string; takeUpstream: string[]; keepLocal: string[]; prune?: boolean; dryRun?: boolean }) => {
+      const resolutions: Record<string, "take-upstream" | "keep-local"> = {};
+      for (const k of opts.takeUpstream) resolutions[k] = "take-upstream";
+      for (const k of opts.keepLocal) {
+        if (resolutions[k] === "take-upstream") throw new Error(`resource "${k}" was given both --take-upstream and --keep-local — pick one`);
+        resolutions[k] = "keep-local";
+      }
+      try {
+        await runStackUpgrade(await client(), name, {
+          to: opts.to,
+          resolutions: Object.keys(resolutions).length ? resolutions : undefined,
+          org: opts.org,
+          prune: opts.prune,
+          dryRun: opts.dryRun,
+          log: (s) => console.log(s),
+          confirm: async () => {
+            if (!process.stdin.isTTY) return true; // non-interactive (CI): proceed
+            const rl = createInterface({ input: process.stdin, output: process.stdout });
+            try {
+              return /^y(es)?$/i.test((await rl.question("  apply this upgrade? [y/N] ")).trim());
+            } finally {
+              rl.close();
+            }
+          },
+        });
+      } catch (e) {
+        // A 409 (unresolved conflicts) surfaces here with the conflict keys in the message.
+        const msg = (e as Error).message;
+        console.error(`  ✗ ${msg}`);
+        if (/conflict/i.test(msg)) console.error(`  resolve each conflicted key with  --take-upstream <key>  or  --keep-local <key>, then re-run.`);
+        process.exitCode = 1;
+      }
+    });
 
   // ---- repo detection (F1): propose a stack: section from local heuristics — no server call ----
   program

@@ -477,6 +477,30 @@ const m0015_exec_tickets: Migration = {
   },
 };
 
+// (E2) App previews reuse the E1 `previews` table (a labeled, expiring pointer under a parent
+// workload). Two additive columns generalize it from static-site-only to a KINDED preview:
+//  - `kind` discriminates a `site` preview (E1: `version_id` is a real static version) from an
+//    `app` preview (E2: `version_id` holds the deployed IMAGE ref, and a parallel `<name>-p-<label>`
+//    manifest set runs alongside the parent). The sweep (bin/api.ts) reads `kind` to decide whether an
+//    expired row also needs a kube teardown (`deleteApp`) vs. just dropping the row.
+//  - `has_db` records whether an `app` preview owns a `--with-db` empty CNPG clone (`<name>-p-<label>-db`)
+//    that must ALSO be torn down at expiry. This CANNOT be inferred from the parent (it's a per-preview
+//    property), so it is persisted here.
+// `kind` defaults to 'site' so every pre-existing E1 row keeps its meaning with no backfill; `has_db`
+// defaults false (a site preview never has one).
+const m0016_app_previews: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .alterTable("previews")
+      .addColumn("kind", "text", (c) => c.notNull().defaultTo("site")) // 'site' (E1) | 'app' (E2)
+      .addColumn("has_db", "boolean", (c) => c.notNull().defaultTo(sql`false`)) // (E2) app preview owns a --with-db clone
+      .execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -496,6 +520,7 @@ export class InlineMigrations implements MigrationProvider {
       "0013_tunnel_tickets": m0013_tunnel_tickets,
       "0014_edge_metrics": m0014_edge_metrics,
       "0015_exec_tickets": m0015_exec_tickets,
+      "0016_app_previews": m0016_app_previews,
     };
   }
 }

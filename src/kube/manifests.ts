@@ -27,6 +27,13 @@ export interface ManifestContext {
   // appUseUrl). The reconciler resolves these (it knows each target's namespace + live scale) and hands
   // them in; the manifest layer just appends them as PLAIN container env (a Service URL is not a secret).
   appUrlEnv?: { name: string; value: string }[];
+  // (E2) App preview read-only secret reuse: when set, the pod's `envFrom` references the PARENT's
+  // `<sharedSecretName>-env` (config) + `<sharedSecretName>-secret` (write-only app secrets: REDIS_URL /
+  // S3_* / AUTH_*) instead of the preview's own `<name>-…` copies — so a preview NEVER gets its own
+  // secret set, it reads the parent's. It ALSO suppresses emitting a per-preview `-env` Secret (the
+  // preview shares the parent's), which keeps applyApp(`<name>-p-<label>`) from ever writing the parent's
+  // `<parent>-env`. Absent for a normal deploy (secrets keyed on the workload's own name).
+  sharedSecretName?: string;
 }
 export interface WorkerManifests {
   name: string; // Deployment name: `<app>-<process>`
@@ -432,7 +439,7 @@ function cronAppManifests(app: AppConfig, ctx: ManifestContext, binding: AppBind
       },
     },
   };
-  if (hasEnv) {
+  if (hasEnv && !ctx.sharedSecretName) {
     const envLabels = { "app.kubernetes.io/name": ctx.name, "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name };
     out.secret = { apiVersion: "v1", kind: "Secret", metadata: { name: `${ctx.name}-env`, namespace: ctx.namespace, labels: envLabels }, stringData: app.env };
   }
@@ -442,7 +449,10 @@ function cronAppManifests(app: AppConfig, ctx: ManifestContext, binding: AppBind
 export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests {
   if (!ctx.tcpExposed) assertHttpOnly(app); // v1 guard: exactly one HTTP service (retired for TCP-exposed apps, A2b)
   assertProcesses(app); // at most one web process; schedule's exclusivity with processes/services/healthcheck (H2)
-  const binding = appBinding(app, ctx.name);
+  // (E2) A preview envFroms the PARENT's `<parent>-env`/`<parent>-secret` (ctx.sharedSecretName) — never
+  // its own — so it reuses the parent's config + write-only secrets read-only. A normal deploy keys them
+  // on its own workload name.
+  const binding = appBinding(app, ctx.sharedSecretName ?? ctx.name);
   // (H3) app→app URLs: plain, non-secret container env resolved by the reconciler. Appended to the
   // shared binding so EVERY process (web + workers, and a cron app) carries identical env (SEC-5).
   // Container `env` (last) so it wins over any same-named config/secret value, same as PGSSLMODE.
@@ -628,8 +638,9 @@ export function appManifests(app: AppConfig, ctx: ManifestContext): AppManifests
   }
   if (workers.length) out.workers = workers;
 
-  // Shared config Secret (`<name>-env`) — one for the whole app, referenced by every process.
-  if (hasEnv) {
+  // Shared config Secret (`<name>-env`) — one for the whole app, referenced by every process. (E2) A
+  // preview (ctx.sharedSecretName) reads the PARENT's `<parent>-env` instead, so it emits none of its own.
+  if (hasEnv && !ctx.sharedSecretName) {
     const labels = { "app.kubernetes.io/name": ctx.name, "app.kubernetes.io/managed-by": "drop", "drop.dev/workload": ctx.name };
     out.secret = { apiVersion: "v1", kind: "Secret", metadata: { name: `${ctx.name}-env`, namespace: ctx.namespace, labels }, stringData: app.env };
   }

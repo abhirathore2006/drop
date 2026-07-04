@@ -31,7 +31,8 @@ import { makeBucketStore } from "../buckets/factory.ts";
 import { QuotaStore, validateQuota, QUOTA_KEYS } from "../quotas/store.ts";
 import { sanitizeStackConfig, validateStackEdges, resolveResourceName, type StackSpec, type StackResource, type StackResourceKind } from "../stack-config.ts";
 import { planStack, StackCycleError, type LivePresence, type PlanStep } from "../stacks/plan.ts";
-import { StackStore } from "../stacks/store.ts";
+import { diffStack, mergeUpgrade, type Resolution } from "../stacks/diff.ts";
+import { StackStore, type StackRow } from "../stacks/store.ts";
 import { TemplateStore, validateTemplateSlug } from "../templates/store.ts";
 import type { TemplateVisibility } from "../db/schema.ts";
 import { substituteTemplate, sanitizeVariables } from "../templates/vars.ts";
@@ -141,7 +142,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // AND embedded into the site detail response (console panel), so the two can never drift.
   const previewsFor = async (name: string) => {
     const rows = await previews.listForSite(name);
-    return rows.map((p) => ({ label: p.label, versionId: p.versionId, url: previewUrl(name, p.label), createdBy: p.createdBy, createdAt: p.createdAt, expiresAt: p.expiresAt }));
+    // (E2) `hasDb` (a --with-db clone) is surfaced so `drop preview ls` + the console can badge it; `kind`
+    // lets a client tell an app preview from a site one. Both default sensibly for E1 site rows.
+    return rows.map((p) => ({ label: p.label, versionId: p.versionId, url: previewUrl(name, p.label), createdBy: p.createdBy, createdAt: p.createdAt, expiresAt: p.expiresAt, kind: p.kind, hasDb: p.hasDb }));
   };
   const app = new Hono<AuthEnv>();
   // In-flight DB password rotations, keyed by name. Serializes per database so two concurrent
@@ -884,17 +887,29 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return c.json({ name, previews: await previewsFor(name) });
   });
 
-  // Remove one preview by label (idempotent 404 on unknown; same authz tier as creating one).
+  // Remove one preview by label (idempotent 404 on unknown; same authz tier as creating one). (E2) An
+  // APP preview (kind='app') ALSO tears down its parallel `<name>-p-<label>` manifest set (+ its
+  // --with-db clone), idempotently — the SAME code path the expiry sweep uses.
   app.delete("/v1/sites/:name/previews/:label", async (c) => {
     const email = c.get("identity").email;
     const name = c.req.param("name");
     const label = c.req.param("label");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(c.get("identity"), site), "publish")) return c.json({ error: "not permitted" }, 403);
+    // A site preview is `publish`-gated (E1); an app preview is `deploy`-gated (E2) — the same verb that
+    // created it (so a `deploy:<app>`-scoped CI token can remove one it made).
+    const rmCap = site.type === "app" ? "deploy" : "publish";
+    if (!can(await actorFor(c.get("identity"), site), rmCap)) return c.json({ error: "not permitted" }, 403);
+    // Read the row BEFORE deleting it — we need kind/hasDb to know what to tear down.
+    const row = await previews.get(name, label);
     const removed = await previews.remove(name, label);
     if (!removed) return c.json({ error: `no such preview "${label}" on ${name}` }, 404);
-    await audit({ actor: email, action: "preview.delete", target: name, targetType: site.type, orgId: site.orgId, detail: { label } });
+    if (row?.kind === "app" && d.kube) {
+      const previewName = `${name}-p-${label}`;
+      await d.kube.deleteApp(site.namespace, previewName); // idempotent (404-safe), same path as app delete
+      if (row.hasDb) await d.kube.deleteDatabase(site.namespace, `${previewName}-db`); // its empty --with-db clone
+    }
+    await audit({ actor: email, action: "preview.delete", target: name, targetType: site.type, orgId: site.orgId, detail: { label, kind: row?.kind ?? "site", ...(row?.hasDb ? { hadDb: true } : {}) } });
     return c.json({ removed: true, name, label });
   });
 
@@ -914,6 +929,15 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     const appCfg = sanitizeAppConfig(body);
     if (!appCfg) return c.json({ error: "app config requires an image" }, 400);
+    // (E2) ?preview=<label> deploys a PARALLEL, ephemeral manifest set instead of touching the live app —
+    // validate the label up front (before any claim/apply) so a bad one 400s cheaply. `--with-db` clones
+    // a fresh EMPTY database from the parent's bound-db spec; else the preview reuses the parent's DB.
+    const previewLabel = c.req.query("preview");
+    const isPreview = previewLabel !== undefined;
+    if (isPreview) {
+      const labelErr = validatePreviewLabel(previewLabel!);
+      if (labelErr) return c.json({ error: labelErr }, 400);
+    }
     // (A2b) A `services[].protocol: tcp` app is rejected by assertHttpOnly UNLESS it has an expose
     // row (the documented order is: expose first, then deploy the tcp service). A TCP-exposed app must
     // also run with scale.min >= 1 (a TCP SYN can't wake a scaled-to-zero pod). Pure-HTTP is unchanged.
@@ -936,6 +960,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
     // resolve or claim — apps share the one name namespace with sites
     let site = await d.meta.getSitePlain(name);
+    // (E2) A preview is a branch OF an existing app — it reuses the parent's secrets/bindings, so the
+    // parent must already exist. Never claim-create a bare app just to preview it.
+    if (isPreview && !site) return c.json({ error: `cannot preview "${name}": deploy the app first (a preview reuses the parent's secrets/bindings)` }, 404);
     if (!site) {
       await ensureUser(email);
       const orgRes = await resolveCreateOrg(c, email);
@@ -1001,6 +1028,100 @@ export function createApp(d: Deps): Hono<AuthEnv> {
           return c.json({ error: `app "${u.app}" is in a different namespace and cannot be bound (cross-namespace service discovery is refused)` }, 400);
         }
       }
+    }
+
+    // (E2) ?preview=<label>: deploy a PARALLEL, ephemeral manifest set `<name>-p-<label>` (Deployment +
+    // Service + HTTPScaledObject) at host `<name>--<label>.<baseDomain>`, scale FORCED {min:0,max:1},
+    // running the freshly-resolved image. It reuses the parent's write-only secrets + config + bindings
+    // READ-ONLY (sharedSecretName) and NEVER touches the parent's current_version or manifests. A
+    // preview counts against the org workload cap; --with-db additionally clones an EMPTY database from
+    // the parent's bound-db spec (torn down at expiry) and counts against the storage budget.
+    if (isPreview) {
+      const kube = d.kube;
+      const ns = site.namespace;
+      const orgId = site.orgId;
+      const withDb = c.req.query("with_db") === "true" || c.req.query("with_db") === "1";
+      const previewName = `${name}-p-${previewLabel}`;
+      const existing = await previews.get(name, previewLabel!); // a re-deploy of the SAME label reuses its workload/db slot
+      // Quota: an app preview is a live workload. Previews live OUTSIDE the `sites` table, so add the
+      // org's existing app-preview count to its site count explicitly before comparing to the cap. A
+      // re-deploy of an existing label isn't a NEW workload, so it's exempt.
+      if (orgId && !existing) {
+        const cap = await quotas.resolvedMaxWorkloads(orgId, d.cfg.maxWorkloadsPerOrg);
+        if (cap > 0) {
+          const used = (await d.meta.countSitesInOrg(orgId)) + (await previews.countAppPreviewsForOrg(orgId));
+          if (used >= cap) return c.json({ error: `workload cap reached for this org (${cap}) — remove a preview/app or ask an admin to raise the limit` }, 429);
+        }
+      }
+      await applyTenantWithExposed(kube, ns); // namespace + NetworkPolicy + quota + LimitRange
+      // --with-db: clone the parent's FIRST bound database SPEC (storage/extensions/hibernation) into a
+      // fresh, EMPTY CNPG cluster `<name>-p-<label>-db`. Same-org (the parent's db was org-validated in the
+      // uses loop above). L2: seed it from the parent db (from-backup / data copy) — v1 ships an EMPTY db.
+      const dbUse = (appCfg.uses ?? []).find((u) => u.database);
+      let previewDbName: string | undefined;
+      if (withDb) {
+        if (!dbUse?.database) return c.json({ error: "--with-db needs the app to bind a database (uses: [{ database }]) to clone its spec from" }, 400);
+        const local = !!d.cfg.s3Endpoint;
+        if (!local && !d.cfg.dbBackupRoleArn) return c.json({ error: "database backups not configured: set DROP_DB_BACKUP_ROLE_ARN (IRSA role)" }, 501);
+        previewDbName = `${previewName}-db`;
+        const dbExists = !!existing?.hasDb; // a re-deploy keeps the SAME empty clone — never re-rotate its creds
+        const dbVersions = await d.meta.listVersions(dbUse.database);
+        const parentDbCfg = dbVersions.find((v) => v.config)?.config as { storage?: string; hibernation?: "none" | "scheduled"; extensions?: string[] } | undefined;
+        const dsCap = await quotas.resolvedMaxDbStorage(orgId ?? "");
+        const cloneCfg = sanitizeDatabaseConfig({ storage: parentDbCfg?.storage, hibernation: parentDbCfg?.hibernation, extensions: parentDbCfg?.extensions }, dsCap.bytes, d.cfg.dbExtensionAllowlist)!;
+        if (!dbExists) {
+          const budgetErr = await checkStorageBudget(orgId ?? "", ns, storageToBytes(cloneCfg.storage) ?? 0);
+          if (budgetErr) return c.json({ error: budgetErr }, 429);
+        }
+        const backupEndpoint = d.cfg.dbBackupEndpoint ?? d.cfg.s3Endpoint;
+        const storeEgress = local && d.cfg.dbBackupEgressCidr && backupEndpoint ? { cidr: d.cfg.dbBackupEgressCidr, port: Number(new URL(backupEndpoint).port) || 443 } : undefined;
+        const dbManifests = databaseManifests(cloneCfg, {
+          name: previewDbName,
+          namespace: ns,
+          destinationPath: `s3://${d.cfg.s3Bucket}/databases/${ns}/${previewDbName}`,
+          ...(dbExists ? {} : { appPassword: generateDbPassword() }), // creds set once, at first clone
+          apiServerCidrs: d.cfg.blockedEgressCidrs,
+          ...(local ? { s3: { endpointURL: backupEndpoint, accessKeyId: d.cfg.s3KeyId, secretAccessKey: d.cfg.s3Secret }, objectStoreEgress: storeEgress } : { iamRoleArn: d.cfg.dbBackupRoleArn }),
+        });
+        await kube.applyDatabase(ns, previewDbName, dbManifests);
+      }
+      // The preview's uses point at the SAME resources as the parent (read-only reuse), except a
+      // --with-db preview's database use is redirected to its OWN empty clone.
+      const previewUses = withDb && dbUse ? (appCfg.uses ?? []).map((u) => (u === dbUse ? { ...u, database: previewDbName } : u)) : appCfg.uses;
+      const previewSandbox = !appCfg.trusted;
+      const previewPullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
+      const previewVerId = newVersionId(now());
+      const previewAppUrlEnv = await resolveAppUsesEnv(previewUses, ns);
+      const previewCfg = { ...appCfg, scale: { min: 0, max: 1 }, uses: previewUses }; // scale FORCED {0,1} — a preview is cheap
+      const manifests = appManifests(previewCfg, {
+        name: previewName,
+        namespace: ns,
+        host: `${name}--${previewLabel}.${d.cfg.baseDomain}`, // the E1 `--` convention; the interceptor keys on this
+        sandbox: previewSandbox,
+        imagePullSecret: previewPullSecret,
+        versionId: previewVerId,
+        sharedSecretName: name, // envFrom the PARENT's <name>-env + <name>-secret (read-only reuse — no per-preview secret set)
+        ...(previewAppUrlEnv.length ? { appUrlEnv: previewAppUrlEnv } : {}),
+      });
+      try {
+        await locks.withLock(`deploy:${previewName}`, DEPLOY_LOCK_TTL_MS, async () => {
+          // No release Job for a preview: it shares the parent's already-migrated DB (running the release
+          // against it could mutate prod). A --with-db clone is empty — schema seeding is a documented L2.
+          await kube.applyApp(ns, previewName, manifests);
+        });
+      } catch (e) {
+        if (e instanceof LockHeldError) return c.json({ error: `a deploy is already in progress for ${previewName}` }, 409);
+        throw e;
+      }
+      const expiresAt = new Date(now().getTime() + clampExpireDays(c.req.query("expire_days")) * 24 * 60 * 60 * 1000);
+      // version_id holds the deployed IMAGE ref (an app preview has no static version row — it never
+      // writes to the parent's version history); kind='app' + has_db drive the sweep + rm teardown.
+      await previews.upsert(name, previewLabel!, appCfg.image, email, expiresAt, { kind: "app", hasDb: withDb });
+      await audit({ actor: email, action: "preview.create", target: name, targetType: "app", orgId, detail: { label: previewLabel, image: appCfg.image, withDb, ...(previewDbName ? { db: previewDbName } : {}), expiresAt: expiresAt.toISOString() } });
+      return c.json({
+        name,
+        preview: { label: previewLabel, url: previewUrl(name, previewLabel!), image: appCfg.image, withDb, ...(previewDbName ? { db: previewDbName } : {}), expiresAt: expiresAt.toISOString() },
+      });
     }
 
     const verId = newVersionId(now());
@@ -2209,10 +2330,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       }
       out.bucket = b;
     } else if (site.type === "site") {
-      // (E1) Active previews — static sites only (a preview is created via publish?preview=, never
-      // deploy/db:create). Same shape as the dedicated GET .../previews route (previewsFor).
+      // (E1) Active site previews (created via publish?preview=). Same shape as the dedicated
+      // GET .../previews route (previewsFor). (E2) app previews are read separately below — the app
+      // case of this mutually-exclusive type chain is already claimed by the `out.app` block above.
       out.previews = await previewsFor(name);
     }
+    // (E2) App previews — a standalone read (the `if (…type === "app")` branch above owns `out.app`, so
+    // this can't ride the type chain). The console panel reads `d.previews` for both sites and apps.
+    if (site.type === "app") out.previews = await previewsFor(name);
     // (A2b) TCP exposure state — surfaced on apps + databases so the console/CLI can show the connect
     // string. Registry-only (no cluster read): present iff the workload has an expose row.
     if (site.type === "app" || site.type === "database") {
@@ -3378,6 +3503,122 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await stacks.delete(stack.id); // cascades stack_resources
     await audit({ actor: email, action: "stack.delete", target: stack.name, targetType: "stack", orgId: org.id, detail: { cascade, resources: resources.map((r) => r.siteName) } });
     return c.json({ deleted: stack.name, cascade, resources });
+  });
+
+  // ---- Template upstream diff (D2): resolve a template-derived stack's pinned + latest versions into
+  // CONCRETE specs (substituting ${stack}/${var.…} + lifting secrets so they compare like the stored
+  // stack spec), then run the pure three-way diff. Because the instantiate-time variable values are not
+  // persisted (secrets never are), a variable-driven field is substituted with the version's DEFAULT — so
+  // an instantiate-time override reads as LOCAL drift (which it accurately is: a divergence from the
+  // template default). Returns the resolved pinned + latest concrete specs so the console builds a union
+  // canvas without re-resolving.
+  const resolveTemplateForStack = async (
+    stack: StackRow,
+    targetVersion?: string,
+  ): Promise<{ err?: { status: number; body: Record<string, unknown> }; pinnedSpec?: StackSpec; latestSpec?: StackSpec; latestVersion?: string; targetVersion?: string }> => {
+    if (!stack.fromTemplate || !stack.fromTemplateVersion) {
+      return { err: { status: 404, body: { upToDate: true, templateDerived: false, error: "stack is not template-derived (it has no from_template provenance)" } } };
+    }
+    const tplId = templates.templateId(stack.fromTemplate);
+    const tpl = await templates.getBySlug(stack.fromTemplate);
+    const pinnedV = tpl ? await templates.getVersion(tplId, stack.fromTemplateVersion) : null;
+    const latestV = tpl ? await templates.latestVersion(tplId) : null;
+    const wanted = targetVersion ?? latestV?.version;
+    const targetV = tpl && wanted ? await templates.getVersion(tplId, wanted) : null;
+    if (!tpl || !pinnedV || !latestV || !targetV) {
+      return {
+        err: {
+          status: 404,
+          body: { upToDate: true, templateDerived: true, latestVersion: latestV?.version ?? null, error: `template "${stack.fromTemplate}"@${wanted ?? "?"} (or its pinned version ${stack.fromTemplateVersion}) is no longer available to diff against` },
+        },
+      };
+    }
+    return {
+      pinnedSpec: substituteTemplate(pinnedV.spec, pinnedV.variables, {}, stack.name).spec,
+      latestSpec: substituteTemplate(targetV.spec, targetV.variables, {}, stack.name).spec,
+      latestVersion: latestV.version,
+      targetVersion: targetV.version,
+    };
+  };
+
+  // ---- GET /v1/stacks/:name/outdated : three-way diff of pinned → latest vs pinned → current ----
+  // Authz: stack read (org membership, via findStack). 404 (templateDerived:false) when the stack is not
+  // template-derived — a clear "not template-derived" response, not an error the console must special-case.
+  app.get("/v1/stacks/:name/outdated", async (c) => {
+    const email = c.get("identity").email;
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack } = found;
+    const r = await resolveTemplateForStack(stack);
+    if (r.err) return c.json(r.err.body, r.err.status as 404);
+    const diff = diffStack(r.pinnedSpec!, r.latestSpec!, stack.spec);
+    const upToDate = stack.fromTemplateVersion === r.latestVersion || !diff.upstreamChanged;
+    return c.json({
+      upToDate,
+      templateDerived: true,
+      template: stack.fromTemplate,
+      fromVersion: stack.fromTemplateVersion,
+      latestVersion: r.latestVersion,
+      diff,
+      // the resolved concrete specs (console builds a union canvas + the CLI can render values)
+      current: stack.spec,
+      latest: r.latestSpec,
+    });
+  });
+
+  // ---- POST /v1/stacks/:name/upgrade {to?, resolutions?} : merge non-conflicting upstream changes,
+  // require a per-key resolution for conflicts (409 if any is missing), feed the merged spec to the
+  // STANDARD reconcile (?dry_run=1 → plan only), then bump from_template_version. Audited stack.upgrade.
+  app.post("/v1/stacks/:name/upgrade", async (c) => {
+    const email = c.get("identity").email;
+    await ensureUser(email);
+    const found = await findStack(c, email, c.req.param("name"));
+    if ("err" in found) return found.err;
+    const { stack, org } = found;
+
+    let body: { to?: unknown; resolutions?: unknown } = {};
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      /* an upgrade with no body is fine (take-latest, no conflicts) */
+    }
+    const to = typeof body.to === "string" && body.to ? body.to : undefined;
+    const r = await resolveTemplateForStack(stack, to);
+    if (r.err) return c.json(r.err.body, r.err.status as 404);
+
+    // Parse resolutions { key: "take-upstream" | "keep-local" } (ignore junk values).
+    const resolutions: Record<string, Resolution> = {};
+    if (body.resolutions && typeof body.resolutions === "object" && !Array.isArray(body.resolutions)) {
+      for (const [k, v] of Object.entries(body.resolutions as Record<string, unknown>)) {
+        if (v === "take-upstream" || v === "keep-local") resolutions[k] = v;
+      }
+    }
+
+    const diff = diffStack(r.pinnedSpec!, r.latestSpec!, stack.spec);
+    const merge = mergeUpgrade(diff, r.latestSpec!, stack.spec, resolutions);
+    if (merge.unresolved.length) {
+      return c.json(
+        { error: `unresolved conflict(s): ${merge.unresolved.join(", ")} — resolve each with "take-upstream" or "keep-local"`, conflicts: merge.unresolved, diff },
+        409,
+      );
+    }
+
+    const dryRun = c.req.query("dry_run") === "1" || c.req.query("dry_run") === "true";
+    const prune = c.req.query("prune") === "1" || c.req.query("prune") === "true"; // actually tear down upstream-removed resources
+    const rec = await reconcileStack(c.get("identity"), {
+      name: stack.name,
+      org,
+      spec: merge.spec,
+      prune,
+      dryRun,
+      specVersion: stack.specVersion,
+      auditAction: "stack.upgrade",
+      auditDetail: { template: stack.fromTemplate, from: stack.fromTemplateVersion, to: r.targetVersion, autoApplied: merge.autoApplied, resolved: merge.resolved },
+    });
+    // Re-pin provenance to the target ONLY on a successful execute (not a dry-run, not a failed reconcile).
+    if (!dryRun && rec.status === 200) await stacks.setProvenanceVersion(stack.id, r.targetVersion!);
+    const respBody = { ...rec.body, template: stack.fromTemplate, fromVersion: stack.fromTemplateVersion, toVersion: r.targetVersion, autoApplied: merge.autoApplied, resolved: merge.resolved };
+    return c.json(respBody as Record<string, unknown>, rec.status as 200);
   });
 
   // ============================ Templates (D1): the golden-path registry ============================

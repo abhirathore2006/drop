@@ -331,6 +331,46 @@ test("X-Robots-Tag: noindex is present on EVERY preview response (200 and 404); 
   expect(main.headers.get("x-robots-tag")).toBeNull();
 });
 
+// ---- app previews (E2): a type=app parent's <app>--<label> proxies to the SUFFIXED workload --------
+
+/** appmain (type=app, deployed) + an app preview "pr1" registered in the store (kind='app'). */
+async function setupAppPreview(expiresAt = new Date(Date.now() + 60_000)) {
+  const { db, meta, blob, orgs } = await base();
+  await claim(meta, orgs, "appmain", "alice@example.com", "app");
+  await meta.updateSite("appmain", (s) => ({ ...s, currentVersion: "v1" }));
+  const previews = new PreviewStore(db);
+  await previews.upsert("appmain", "pr1", "img:sha", "alice@example.com", expiresAt, { kind: "app" });
+  return { db, meta, blob, previews };
+}
+
+test("(E2) app preview host proxies to the SUFFIXED workload host (<app>--<label>), noindex", async () => {
+  const { meta, blob, previews } = await setupAppPreview();
+  let seenHost: string | undefined;
+  const icept = await fakeInterceptor((req, res) => {
+    seenHost = req.headers.host;
+    res.writeHead(200);
+    res.end("preview-app");
+  });
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", interceptorUrl: icept.url, previews });
+  const res = await edge.request("/x?q=1", { headers: { host: "appmain--pr1.drop.example.com" } });
+  expect(res.status).toBe(200);
+  expect(await res.text()).toBe("preview-app");
+  // the interceptor keys on the SUFFIXED HSO host — the preview workload's own host, not the parent's.
+  expect(seenHost).toBe("appmain--pr1.drop.example.com");
+  expect(res.headers.get("x-robots-tag")).toBe("noindex"); // a preview is never indexed
+  await icept.close();
+});
+
+test("(E2) unknown / expired app preview label -> 404 (no proxy), still noindex", async () => {
+  const { meta, blob, previews } = await setupAppPreview(new Date(Date.now() - 1000)); // expired
+  const edge = createEdge({ meta, blob, baseDomain: "drop.example.com", interceptorUrl: "http://127.0.0.1:9", previews });
+  const expired = await edge.request("/", { headers: { host: "appmain--pr1.drop.example.com" } });
+  expect(expired.status).toBe(404);
+  expect(expired.headers.get("x-robots-tag")).toBe("noindex");
+  const unknown = await edge.request("/", { headers: { host: "appmain--nope.drop.example.com" } });
+  expect(unknown.status).toBe(404);
+});
+
 test("preview inherits the PARENT site's visibility/password gate (never its own)", async () => {
   const { meta, blob, previews } = await setupPreview();
   const { hashPassword } = await import("../site-config.ts");

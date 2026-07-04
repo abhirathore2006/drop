@@ -2085,6 +2085,144 @@ test("template publish preserves ${var} placeholders in TYPED fields; instantiat
   await db.destroy();
 });
 
+// ============================ D2: template upstream diff (outdated / upgrade) ============================
+// A simple, placeholder-free template so the route's default-substitution produces a concrete spec that
+// matches the instantiated stack exactly (no phantom drift): a db + an app that uses it.
+// Storage values stay within the test config's 1Gi per-database cap so sanitize doesn't clamp them equal.
+const kitV1 = { name: "kit", resources: { db: { type: "database", storage: "1Gi" }, web: { type: "app", image: "web:1", uses: [{ database: "db" }] } } };
+const kitV2 = { name: "kit", resources: { db: { type: "database", storage: "512Mi" }, web: { type: "app", image: "web:2", uses: [{ database: "db" }] } } };
+
+// Publish kit v1, instantiate it into `stackName`. Returns the harness for further calls.
+async function seedKit(app: any, stackName: string) {
+  await call(app, "POST", "/v1/templates", "alice", { slug: "kit", spec: kitV1, variables: [] });
+  const inst = await call(app, "POST", "/v1/templates/kit/instantiate", "alice", { name: stackName });
+  expect(inst.status).toBe(200);
+}
+
+test("outdated: a template-derived stack on the latest version is upToDate; a non-derived stack 404s", async () => {
+  const { app, db } = await mk();
+  await seedKit(app, "myapp");
+  const up = await call(app, "GET", "/v1/stacks/myapp/outdated", "alice");
+  expect(up.status).toBe(200);
+  const body = await up.json();
+  expect(body.upToDate).toBe(true);
+  expect(body.templateDerived).toBe(true);
+  expect(body.latestVersion).toBe("1");
+
+  // a hand-written (non-template) stack → 404 templateDerived:false
+  await call(app, "POST", "/v1/stacks/plain/up", "alice", { spec: { name: "plain", resources: { db: { type: "database" } } } });
+  const nd = await call(app, "GET", "/v1/stacks/plain/outdated", "alice");
+  expect(nd.status).toBe(404);
+  expect((await nd.json()).templateDerived).toBe(false);
+  await db.destroy();
+});
+
+test("outdated: a new template version surfaces upstream-only field changes (no local drift → no conflict)", async () => {
+  const { app, db } = await mk();
+  await seedKit(app, "myapp");
+  // publish kit v2 (db 1Gi→2Gi, web web:1→web:2)
+  await call(app, "POST", "/v1/templates", "alice", { slug: "kit", spec: kitV2, variables: [] });
+
+  const res = await call(app, "GET", "/v1/stacks/myapp/outdated", "alice");
+  expect(res.status).toBe(200);
+  const b = await res.json();
+  expect(b.upToDate).toBe(false);
+  expect(b.fromVersion).toBe("1");
+  expect(b.latestVersion).toBe("2");
+  expect(b.diff.upstreamChanged).toBe(true);
+  expect(b.diff.hasLocalDrift).toBe(false);
+  expect(b.diff.conflicts).toEqual([]);
+  const byKey = Object.fromEntries(b.diff.resources.map((r: any) => [r.key, r]));
+  expect(byKey.db.class).toBe("upstream-only");
+  expect(byKey.db.fields.find((f: any) => f.field === "storage")).toMatchObject({ class: "upstream-only", pinned: "1Gi", latest: "512Mi" });
+  expect(byKey.web.class).toBe("upstream-only");
+  await db.destroy();
+});
+
+test("upgrade dry-run returns the reconcile plan (update steps) and applies nothing", async () => {
+  const { app, kube, db } = await mk();
+  await seedKit(app, "myapp");
+  await call(app, "POST", "/v1/templates", "alice", { slug: "kit", spec: kitV2, variables: [] });
+  const kubeBefore = kube.dbApplies.length + kube.applies.length;
+
+  const dry = await call(app, "POST", "/v1/stacks/myapp/upgrade?dry_run=1", "alice", {});
+  expect(dry.status).toBe(200);
+  const b = await dry.json();
+  expect(b.dryRun).toBe(true);
+  expect(b.toVersion).toBe("2");
+  expect(b.autoApplied.sort()).toEqual(["db", "web"]);
+  expect(b.plan.filter((s: any) => s.action === "update").map((s: any) => s.key).sort()).toEqual(["db", "web"]);
+  // nothing hit the cluster and provenance is unchanged
+  expect(kube.dbApplies.length + kube.applies.length).toBe(kubeBefore);
+  expect((await (await call(app, "GET", "/v1/stacks/myapp", "alice")).json()).fromTemplateVersion).toBe("1");
+  await db.destroy();
+});
+
+test("upgrade: a local-drift + upstream change on the SAME key is a conflict → 409 until resolved", async () => {
+  const { app, db } = await mk();
+  await seedKit(app, "myapp");
+  // local drift: change db storage to 256Mi via a plain up (web unchanged, still web:1)
+  const drift = await call(app, "POST", "/v1/stacks/myapp/up", "alice", {
+    spec: { name: "myapp", resources: { db: { type: "database", storage: "256Mi" }, web: { type: "app", image: "web:1", uses: [{ database: "db" }] } } },
+    resolved: { web: { image: "web:1" } },
+    spec_version: 1,
+  });
+  expect(drift.status).toBe(200);
+  // upstream v2 changes db (→512Mi) AND web (→web:2)
+  await call(app, "POST", "/v1/templates", "alice", { slug: "kit", spec: kitV2, variables: [] });
+
+  // db is a conflict (pinned 1Gi / latest 512Mi / local 256Mi); web is a clean upstream-only change
+  const outdated = await (await call(app, "GET", "/v1/stacks/myapp/outdated", "alice")).json();
+  expect(outdated.diff.conflicts).toEqual(["db"]);
+
+  // upgrade with no resolution → 409 listing the unresolved conflict
+  const blocked = await call(app, "POST", "/v1/stacks/myapp/upgrade", "alice", {});
+  expect(blocked.status).toBe(409);
+  expect((await blocked.json()).conflicts).toEqual(["db"]);
+
+  // resolve db=keep-local → 200; db stays 256Mi, web still auto-upgrades to web:2
+  const resolved = await call(app, "POST", "/v1/stacks/myapp/upgrade", "alice", { resolutions: { db: "keep-local" } });
+  expect(resolved.status).toBe(200);
+  const stack = await (await call(app, "GET", "/v1/stacks/myapp", "alice")).json();
+  expect(stack.spec.resources.db.storage).toBe("256Mi"); // kept local
+  expect(stack.spec.resources.web.image).toBe("web:2"); // auto-applied upstream
+  await db.destroy();
+});
+
+test("upgrade execute bumps from_template_version to the target and audits stack.upgrade", async () => {
+  const { app, audit, db } = await mk();
+  await seedKit(app, "myapp");
+  await call(app, "POST", "/v1/templates", "alice", { slug: "kit", spec: kitV2, variables: [] });
+
+  const res = await call(app, "POST", "/v1/stacks/myapp/upgrade", "alice", { resolved: { web: { image: "web:2" } } });
+  expect(res.status).toBe(200);
+  const b = await res.json();
+  expect(b.toVersion).toBe("2");
+
+  // provenance re-pinned to the target
+  const stack = await (await call(app, "GET", "/v1/stacks/myapp", "alice")).json();
+  expect(stack.fromTemplateVersion).toBe("2");
+  expect(stack.spec.resources.db.storage).toBe("512Mi");
+
+  // a follow-up outdated is now upToDate
+  expect((await (await call(app, "GET", "/v1/stacks/myapp/outdated", "alice")).json()).upToDate).toBe(true);
+
+  // audited as stack.upgrade with the version transition
+  const trail = await audit.list({ action: "stack.upgrade" });
+  const row = trail.entries.find((e: any) => e.target === "myapp")!;
+  expect(row).toBeTruthy();
+  expect(row.detail).toMatchObject({ template: "kit", from: "1", to: "2" });
+  await db.destroy();
+});
+
+test("upgrade: a non-template-derived stack cannot be upgraded → 404", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/stacks/plain/up", "alice", { spec: { name: "plain", resources: { db: { type: "database" } } } });
+  const res = await call(app, "POST", "/v1/stacks/plain/upgrade", "alice", {});
+  expect(res.status).toBe(404);
+  await db.destroy();
+});
+
 // ============================ I1: buckets + item 10 quotas ============================
 
 test("bucket create returns creds ONCE; detail exposes usage but NEVER creds; audited", async () => {
@@ -2992,5 +3130,126 @@ test("(M2) org member role change: owner/admin only, founding owner immutable, o
   expect((await call(app, "PATCH", "/v1/orgs/acme/members/alice@example.com", "bob", { role: "viewer" })).status).toBe(403);
   // changing a non-member → 404
   expect((await call(app, "PATCH", "/v1/orgs/acme/members/nobody@example.com", "alice", { role: "member" })).status).toBe(404);
+  await db.destroy();
+});
+
+// ============================ (E2) app previews ============================
+// A preview deploy (`?preview=<label>`) builds a PARALLEL `<name>-p-<label>` manifest set at
+// <name>--<label>, scale forced {0,1}, reusing the parent's secrets/bindings read-only, and NEVER
+// touches the parent's current_version or its manifests.
+
+test("(E2) deploy ?preview: parallel suffixed manifest set, --host, forced scale {0,1}, parent secret refs; parent untouched", async () => {
+  const { app, kube, meta, db } = await mk();
+  expect((await call(app, "POST", "/v1/apps/web", "alice", { image: "web:1", scale: { min: 1, max: 3 } })).status).toBe(200);
+  const before = (await meta.getSitePlain("web"))!.currentVersion;
+  const res = await call(app, "POST", "/v1/apps/web?preview=pr1", "alice", { image: "web:2" });
+  expect(res.status).toBe(200);
+  const j = await res.json();
+  expect(j.preview).toMatchObject({ label: "pr1", url: "https://web--pr1.drop.example.com", image: "web:2", withDb: false });
+  // parent's current_version + manifests are UNTOUCHED (no new apply for `web`, version unchanged)
+  expect((await meta.getSitePlain("web"))!.currentVersion).toBe(before);
+  expect(kube.applies.filter((a) => a.name === "web").length).toBe(1);
+  // the preview workload was applied under the suffixed name with the forced scale + host
+  const pv = kube.applies.find((a) => a.name === "web-p-pr1")!;
+  expect(pv).toBeTruthy();
+  const hso = pv.manifests.httpScaledObject as any;
+  expect(hso.spec.hosts).toEqual(["web--pr1.drop.example.com"]);
+  expect(hso.spec.replicas).toEqual({ min: 0, max: 1 });
+  expect((pv.manifests.deployment as any).spec.template.metadata.annotations["drop.dev/version"]).toBeTruthy();
+  // read-only secret reuse: envFrom references the PARENT's write-only `web-secret`, not `web-p-pr1-secret`
+  expect((pv.manifests.deployment as any).spec.template.spec.containers[0].envFrom).toEqual([{ secretRef: { name: "web-secret", optional: true } }]);
+  expect(pv.manifests.secret).toBeUndefined(); // no per-preview -env
+  // surfaced on the parent app's detail (previews present for type=app)
+  const det = await (await call(app, "GET", "/v1/sites/web", "alice")).json();
+  expect(det.previews).toHaveLength(1);
+  expect(det.previews[0]).toMatchObject({ label: "pr1", url: "https://web--pr1.drop.example.com", kind: "app", hasDb: false });
+  await db.destroy();
+});
+
+test("(E2) preview of an app that was never deployed → 404", async () => {
+  const { app, db } = await mk();
+  const res = await call(app, "POST", "/v1/apps/ghost?preview=pr1", "alice", { image: "g:1" });
+  expect(res.status).toBe(404);
+  await db.destroy();
+});
+
+test("(E2) deploy ?preview&with_db clones a SEPARATE empty CNPG cluster from the parent db spec; the preview uses the clone", async () => {
+  const { app, kube, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/appdb?org=acme", "alice", {})).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  const parentDb = kube.dbApplies.find((a) => a.name === "appdb")!;
+  const res = await call(app, "POST", "/v1/apps/web?org=acme&preview=pr1&with_db=true", "alice", { image: "web:1", uses: [{ database: "appdb" }] });
+  expect(res.status).toBe(200);
+  expect((await res.json()).preview).toMatchObject({ withDb: true, db: "web-p-pr1-db" });
+  // a FRESH, SEPARATE cluster (its own creds Secret ⇒ empty init) cloning the parent db's SPEC
+  const clone = kube.dbApplies.find((a) => a.name === "web-p-pr1-db")!;
+  expect(clone).toBeTruthy();
+  expect(clone.manifests.appSecret).toBeTruthy(); // creds set once → a fresh empty database (not a data copy)
+  expect((clone.manifests.cluster as any).spec.storage.size).toBe((parentDb.manifests.cluster as any).spec.storage.size); // cloned spec
+  // the preview app binds the CLONE's creds/CA — never the parent's appdb-app
+  const pv = kube.applies.find((a) => a.name === "web-p-pr1")!;
+  const ctr = (pv.manifests.deployment as any).spec.template.spec.containers[0];
+  expect(ctr.envFrom[0]).toEqual({ secretRef: { name: "web-p-pr1-db-app" } });
+  expect(ctr.env).toContainEqual({ name: "PGSSLROOTCERT", value: "/var/run/drop/db-ca/web-p-pr1-db/ca.crt" });
+  await db.destroy();
+});
+
+test("(E2) --with-db on an app with no bound database → 400", async () => {
+  const { app, db } = await mk();
+  expect((await call(app, "POST", "/v1/apps/web", "alice", { image: "web:1" })).status).toBe(200);
+  const res = await call(app, "POST", "/v1/apps/web?preview=pr1&with_db=true", "alice", { image: "web:1" });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error).toContain("--with-db");
+  await db.destroy();
+});
+
+test("(E2) an app preview counts against the org workload cap → 429 when full", async () => {
+  const { app, db } = await mk({ env: { DROP_MAX_WORKLOADS_PER_ORG: "1" } });
+  expect((await call(app, "POST", "/v1/apps/web", "alice", { image: "web:1" })).status).toBe(200); // fills the cap (1 site)
+  const res = await call(app, "POST", "/v1/apps/web?preview=pr1", "alice", { image: "web:1" });
+  expect(res.status).toBe(429);
+  expect((await res.json()).error).toContain("workload cap");
+  await db.destroy();
+});
+
+test("(E2) re-deploying the SAME preview label re-points it (no second workload counted) and doesn't re-rotate the db clone", async () => {
+  // cap 3 = 2 sites (db + app) + room for exactly ONE preview; a re-point of that label mustn't count again.
+  const { app, kube, db } = await mk({ env: { DROP_MAX_WORKLOADS_PER_ORG: "3" } });
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/appdb?org=acme", "alice", {})).status).toBe(200); // site 1
+  expect((await call(app, "POST", "/v1/apps/web?org=acme", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200); // site 2
+  // a first preview label is allowed (previews aren't sites); a second deploy of the SAME label is a re-point
+  expect((await call(app, "POST", "/v1/apps/web?org=acme&preview=pr1&with_db=true", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme&preview=pr1&with_db=true", "alice", { image: "web:2", uses: [{ database: "appdb" }] })).status).toBe(200);
+  // the db clone keeps its creds (appSecret only on the FIRST apply — a re-apply must not re-rotate)
+  const cloneApplies = kube.dbApplies.filter((a) => a.name === "web-p-pr1-db");
+  expect(cloneApplies).toHaveLength(2);
+  expect(cloneApplies[0]!.manifests.appSecret).toBeTruthy();
+  expect(cloneApplies[1]!.manifests.appSecret).toBeUndefined();
+  await db.destroy();
+});
+
+test("(E2) preview rm tears down the app preview's manifest set + its --with-db clone + the row", async () => {
+  const { app, kube, db } = await mk();
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/databases/appdb?org=acme", "alice", {})).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?org=acme&preview=pr1&with_db=true", "alice", { image: "web:1", uses: [{ database: "appdb" }] })).status).toBe(200);
+  const rm = await call(app, "DELETE", "/v1/sites/web/previews/pr1", "alice");
+  expect(rm.status).toBe(200);
+  expect(kube.deletes.some((x) => x.name === "web-p-pr1")).toBe(true); // parallel workload torn down
+  expect(kube.dbDeletes.some((x) => x.name === "web-p-pr1-db")).toBe(true); // the empty clone too
+  const det = await (await call(app, "GET", "/v1/sites/web", "alice")).json();
+  expect(det.previews).toHaveLength(0); // row gone
+  await db.destroy();
+});
+
+test("(E2) a non-owner cannot create or remove an app preview (deploy-gated)", async () => {
+  const { app, db } = await mk();
+  expect((await call(app, "POST", "/v1/apps/web", "alice", { image: "web:1" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/web?preview=pr1", "bob", { image: "web:1" })).status).toBe(403);
+  expect((await call(app, "POST", "/v1/apps/web?preview=pr1", "alice", { image: "web:1" })).status).toBe(200);
+  expect((await call(app, "DELETE", "/v1/sites/web/previews/pr1", "bob")).status).toBe(403);
   await db.destroy();
 });

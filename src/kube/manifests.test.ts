@@ -326,6 +326,43 @@ test("appManifests: uses binds a db — envFrom <db>-app + CA volume/mount + ver
   expect(ctr.volumeMounts).toEqual([{ name: "db-ca-tododb", mountPath: "/var/run/drop/db-ca/tododb", readOnly: true }]);
 });
 
+test("(E2) preview manifest set: suffixed names, --host, forced scale {0,1}, version annotation, PARENT secret refs, no own -env", () => {
+  // A preview of the app `web` at label `pr1`: workload name `web-p-pr1`, host `web--pr1.<base>`, scale
+  // forced {0,1}, and sharedSecretName='web' so envFrom points at the PARENT's `web-env`/`web-secret`.
+  const m = appManifests(
+    // The route forces scale {0,1} for a preview before calling the (pure) manifest layer.
+    { ...base, env: { NODE_ENV: "production" }, scale: { min: 0, max: 1 } },
+    { name: "web-p-pr1", namespace: "drop-acme", host: "web--pr1.drop.example.com", versionId: "img:sha", sharedSecretName: "web" },
+  );
+  const dm = m.deployment as any;
+  expect(dm.metadata.name).toBe("web-p-pr1"); // suffixed workload name, parallel to the parent `web`
+  expect(dm.spec.template.metadata.annotations["drop.dev/version"]).toBe("img:sha"); // rolls the preview pods
+  const ctr = dm.spec.template.spec.containers[0];
+  // Read-only secret reuse: the pod envFroms the PARENT's `web-env` + `web-secret` — NEVER a per-preview
+  // `web-p-pr1-env`/`web-p-pr1-secret` copy — so a preview shares the parent's config + write-only secrets.
+  expect(ctr.envFrom).toEqual([{ secretRef: { name: "web-env" } }, { secretRef: { name: "web-secret", optional: true } }]);
+  expect(m.secret).toBeUndefined(); // no per-preview `-env` Secret emitted (it reads the parent's)
+  // Host + forced scale on the preview's OWN HTTPScaledObject (what the interceptor keys on).
+  const h = m.httpScaledObject as any;
+  expect(h.metadata.name).toBe("web-p-pr1");
+  expect(h.spec.hosts).toEqual(["web--pr1.drop.example.com"]);
+  expect(h.spec.replicas).toEqual({ min: 0, max: 1 }); // FORCED cheap/ephemeral (caller passes {0,1})
+  expect((m.service as any).metadata.name).toBe("web-p-pr1");
+});
+
+test("(E2) preview with --with-db: the db use redirected to the clone still resolves the clone's <db>-app/-ca", () => {
+  // The API redirects the database use to the preview clone `web-p-pr1-db`; the binding keys on that name.
+  const m = appManifests(
+    { ...base, uses: [{ database: "web-p-pr1-db" }] },
+    { name: "web-p-pr1", namespace: "drop-acme", host: "web--pr1.drop.example.com", sharedSecretName: "web" },
+  );
+  const ctr = (m.deployment as any).spec.template.spec.containers[0];
+  // <db>-app (the CLONE's creds) comes first, then the PARENT's write-only secret (no parent `-env`: this
+  // app has none). The clone's CA is mounted + verify-full points at it.
+  expect(ctr.envFrom).toEqual([{ secretRef: { name: "web-p-pr1-db-app" } }, { secretRef: { name: "web-secret", optional: true } }]);
+  expect(ctr.env).toContainEqual({ name: "PGSSLROOTCERT", value: "/var/run/drop/db-ca/web-p-pr1-db/ca.crt" });
+});
+
 test("appManifests: via:pooler (I3) overrides PGHOST at the <db>-pooler-rw Service (container env wins over envFrom)", () => {
   const m = appManifests(
     { ...base, uses: [{ database: "tododb", via: "pooler" }] },

@@ -48,10 +48,17 @@ export class Client {
   previewRemove(name: string, label: string) {
     return this.req("DELETE", `/v1/sites/${name}/previews/${encodeURIComponent(label)}`);
   }
-  deploy(name: string, app: AppConfig, org?: string, noStart?: boolean) {
+  deploy(name: string, app: AppConfig, org?: string, noStart?: boolean, preview?: { label: string; withDb?: boolean; expireDays?: number }) {
     const q = new URLSearchParams();
     if (org) q.set("org", org);
     if (noStart) q.set("start", "false");
+    // (E2) A preview deploys a parallel `<name>-p-<label>` workload at <name>--<label>; --with-db clones
+    // an empty database; expire_days overrides the 7d default. The live app is untouched.
+    if (preview) {
+      q.set("preview", preview.label);
+      if (preview.withDb) q.set("with_db", "true");
+      if (preview.expireDays != null) q.set("expire_days", String(preview.expireDays));
+    }
     const qs = q.toString();
     return this.req("POST", `/v1/apps/${name}${qs ? `?${qs}` : ""}`, {
       contentType: "application/json",
@@ -309,6 +316,22 @@ export class Client {
     if (opts.cascade) q.set("cascade", "1");
     const qs = q.toString();
     return this.req("DELETE", `/v1/stacks/${name}${qs ? `?${qs}` : ""}`);
+  }
+  // template upstream diff (D2): outdated (three-way diff) + upgrade (merge → standard reconcile)
+  stackOutdated(name: string, org?: string) {
+    return this.req("GET", `/v1/stacks/${encodeURIComponent(name)}/outdated${org ? `?org=${encodeURIComponent(org)}` : ""}`);
+  }
+  stackUpgrade(
+    name: string,
+    payload: { to?: string; resolutions?: Record<string, "take-upstream" | "keep-local"> },
+    opts: { org?: string; dryRun?: boolean; prune?: boolean } = {},
+  ) {
+    const q = new URLSearchParams();
+    if (opts.org) q.set("org", opts.org);
+    if (opts.dryRun) q.set("dry_run", "1");
+    if (opts.prune) q.set("prune", "1");
+    const qs = q.toString();
+    return this.req("POST", `/v1/stacks/${encodeURIComponent(name)}/upgrade${qs ? `?${qs}` : ""}`, { contentType: "application/json", body: JSON.stringify(payload) });
   }
   // templates (D1): publish / list / get / instantiate
   templatePublish(payload: {
