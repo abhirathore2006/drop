@@ -12,6 +12,7 @@ import {
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 import type { CacheManifests } from "./valkey.ts";
+import type { AuthManifests } from "../auth-resource/manifests.ts";
 
 // In-memory KubeClient for tests (mirrors FakeBlob). Records every apply so tests
 // can assert what would have been sent to the cluster.
@@ -154,6 +155,33 @@ export class FakeKube implements KubeClient {
   }
   async readCachePassword(namespace: string, name: string): Promise<string | null> {
     return this.cachePasswords.get(this.key(namespace, name)) ?? null;
+  }
+
+  // (K1) managed auth (GoTrue engine) doubles. Records applies/deletes + remembers the HS256 JWT
+  // secret (from m.keysSecret) so readAuthJwtSecret can return it — the admin-token mint + the
+  // AUTH_JWT_SECRET binding read it back.
+  readonly authApplies: { namespace: string; name: string; manifests: AuthManifests }[] = [];
+  readonly authDeletes: { namespace: string; name: string }[] = [];
+  private auths = new Set<string>();
+  private authSecrets = new Map<string, string>();
+  async applyAuth(namespace: string, name: string, manifests: AuthManifests): Promise<void> {
+    this.authApplies.push({ namespace, name, manifests });
+    this.auths.add(this.key(namespace, name));
+    const s = (manifests.keysSecret as { stringData?: Record<string, string> } | undefined)?.stringData?.["jwt-secret"];
+    if (s) this.authSecrets.set(this.key(namespace, name), s); // set only at create/rotate (keysSecret present)
+  }
+  async deleteAuth(namespace: string, name: string): Promise<void> {
+    this.authDeletes.push({ namespace, name });
+    this.auths.delete(this.key(namespace, name));
+    this.authSecrets.delete(this.key(namespace, name));
+  }
+  async getAuthStatus(namespace: string, name: string): Promise<AppStatus | null> {
+    const k = this.key(namespace, name);
+    if (this.statusOverride.has(k)) return this.statusOverride.get(k) as AppStatus;
+    return this.auths.has(k) ? { replicas: 1, ready: 1, restarts: 0, reason: "Running" } : null;
+  }
+  async readAuthJwtSecret(namespace: string, name: string): Promise<string | null> {
+    return this.authSecrets.get(this.key(namespace, name)) ?? null;
   }
 
   // (I3) CNPG Pooler doubles. Keyed by namespace/dbName; records applies/deletes so tests can assert

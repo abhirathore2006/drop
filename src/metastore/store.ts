@@ -319,14 +319,14 @@ export class MetaStore {
   }
 
   /** Workload counts by type for an org (usage reporting). */
-  async orgWorkloadCounts(orgId: string): Promise<{ site: number; app: number; database: number; bucket: number; cache: number; total: number }> {
+  async orgWorkloadCounts(orgId: string): Promise<{ site: number; app: number; database: number; bucket: number; cache: number; auth: number; total: number }> {
     const rows = await this.db
       .selectFrom("sites")
       .select(["type", (eb) => eb.fn.countAll().as("n")])
       .where("org_id", "=", orgId)
       .groupBy("type")
       .execute();
-    const out = { site: 0, app: 0, database: 0, bucket: 0, cache: 0, total: 0 };
+    const out = { site: 0, app: 0, database: 0, bucket: 0, cache: 0, auth: 0, total: 0 };
     for (const r of rows) {
       const n = Number(r.n);
       out[(r.type as WorkloadType) ?? "site"] += n;

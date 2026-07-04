@@ -29,7 +29,7 @@ import { sanitizeCacheConfig, validateCacheMemory, cacheMemoryToBytes, type Cach
 import type { BucketStore } from "../buckets/types.ts";
 import { makeBucketStore } from "../buckets/factory.ts";
 import { QuotaStore, validateQuota, QUOTA_KEYS } from "../quotas/store.ts";
-import { sanitizeStackConfig, validateStackEdges, resolveResourceName, type StackSpec, type StackResource } from "../stack-config.ts";
+import { sanitizeStackConfig, validateStackEdges, resolveResourceName, type StackSpec, type StackResource, type StackResourceKind } from "../stack-config.ts";
 import { planStack, StackCycleError, type LivePresence, type PlanStep } from "../stacks/plan.ts";
 import { StackStore } from "../stacks/store.ts";
 import { TemplateStore, validateTemplateSlug } from "../templates/store.ts";
@@ -41,6 +41,11 @@ import { TcpEndpointStore, PortPoolExhaustedError, type TcpEndpoint } from "../e
 import { PreviewStore, validatePreviewLabel } from "../previews/store.ts";
 import { databaseManifests, poolerManifest, poolerName, type PoolerMode } from "../kube/cnpg.ts";
 import { cacheManifests, cacheHost } from "../kube/valkey.ts";
+import { sanitizeAuthConfig, type AuthConfig } from "../auth-config.ts";
+import { authManifests, authExternalUrl, type AuthManifestContext } from "../auth-resource/manifests.ts";
+import { GoTrueEngine } from "../auth-resource/gotrue.ts";
+import type { AuthEngine, AdminOp } from "../auth-resource/engine.ts";
+import { generateJwtSecret, mintAdminToken } from "../auth-resource/jwt.ts";
 import { PasswordSyncError, type KubeClient, type AppStatus, type DatabaseStatus } from "../kube/types.ts";
 import { LockStore, LockHeldError } from "../metastore/lock.ts";
 import type { SecretStore } from "../secrets/types.ts";
@@ -75,6 +80,11 @@ export interface Deps {
   previews?: PreviewStore; // (E1) preview registry (previews); defaults over `db`
   tickets?: TunnelTicketStore; // (A3) db:proxy single-use tunnel tickets; defaults over `db`. Share ONE instance with the tunnel upgrade handler (bin/api.ts) so issuance + redemption hit the same table.
   metrics?: MetricsStore; // (G2/G2b) edge traffic + uptime rollups; defaults over `db`
+  authEngine?: AuthEngine; // (K1) the managed-auth engine port; defaults to GoTrue pinned via cfg.authEngineImage
+  // (K1) The transport the user-admin proxy uses to reach the in-cluster auth engine's admin API. Tests
+  // inject a fake (routes through the FakeEngine's records); prod defaults to an in-cluster fetch. Absent
+  // + no default reachability → the proxy 501s (compute off / local API can't reach the pod network).
+  authAdmin?: (req: { baseUrl: string; method: string; path: string; token: string; body?: unknown }) => Promise<{ status: number; json: unknown }>;
   now?: () => Date;
 }
 
@@ -97,6 +107,21 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const previews = d.previews ?? new PreviewStore(d.db); // (E1) preview registry
   const tickets = d.tickets ?? new TunnelTicketStore(d.db, now, d.cfg.tunnelTicketTtlMs); // (A3) db:proxy tunnel tickets
   const metrics = d.metrics ?? new MetricsStore(d.db); // (G2/G2b) edge traffic + uptime rollups
+  const authEngine = d.authEngine ?? new GoTrueEngine(d.cfg.authEngineImage); // (K1) managed-auth engine (pinned image)
+  // (K1) In-cluster transport to an auth engine's admin API. Default: fetch the engine's ClusterIP
+  // Service DNS (`<name>.<ns>.svc.cluster.local:<port>`). Reachable only from an in-cluster API; a
+  // local API can't reach the pod network → the fetch rejects and the proxy returns a 502 (documented).
+  const authAdmin =
+    d.authAdmin ??
+    (async (req: { baseUrl: string; method: string; path: string; token: string; body?: unknown }) => {
+      const res = await fetch(req.baseUrl + req.path, {
+        method: req.method,
+        headers: { authorization: `Bearer ${req.token}`, ...(req.body !== undefined ? { "content-type": "application/json" } : {}) },
+        body: req.body !== undefined ? JSON.stringify(req.body) : undefined,
+      });
+      const json = await res.json().catch(() => ({}));
+      return { status: res.status, json };
+    });
 
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
   // (E1) The preview hostname, `<name>--<label>.<baseDomain>` — reserved via src/names.ts (site
@@ -354,6 +379,88 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       await d.meta.upsertSecretKey(site.name, key, fingerprint(url), actorEmail);
     }
   };
+  // ---- auth binding (K1) — inject AUTH_URL + AUTH_JWT_SECRET into an app's write-only secret. Mirrors
+  // the cache/bucket binding path. AUTH_URL is the engine's public base (auth--<name>.<base>); the
+  // AUTH_JWT_SECRET is READ BACK from `<name>-auth-keys` (server-side only) so a binding app can verify
+  // GoTrue's HS256 tokens locally. On rotation we ALSO inject AUTH_JWT_SECRET_PREVIOUS (the old secret)
+  // so tokens signed before the rotation still verify during the grace window (documented). There is NO
+  // AUTH_JWKS_URL / anon/service key — OSS GoTrue is HS256-only and has no anon keys (see docs/auth.html).
+  // Single binding → unprefixed keys; multiple → `<LABEL>_`-prefixed. Re-run safe at every deploy. ----
+  const authEnvKey = (label: string, multiple: boolean, base: string) => (multiple ? label.toUpperCase().replace(/[^A-Z0-9]/g, "_") + "_" : "") + base;
+  const writeAuthBindings = async (entries: { authName: string; envLabel: string }[], site: Site, actorEmail: string): Promise<void> => {
+    if (entries.length === 0 || !d.kube) return;
+    const multiple = entries.length > 1;
+    const scope = { owner: site.owner, app: site.name, namespace: site.namespace };
+    for (const e of entries) {
+      const secret = await d.kube.readAuthJwtSecret(site.namespace, e.authName);
+      if (secret == null) throw new Error(`auth "${e.authName}" is not ready yet (no keys secret) — create it before deploying an app that uses it`);
+      const pairs: [string, string][] = [
+        [authEnvKey(e.envLabel, multiple, "AUTH_URL"), authExternalUrl(e.authName, d.cfg.baseDomain)],
+        [authEnvKey(e.envLabel, multiple, "AUTH_JWT_SECRET"), secret], // HS256 shared secret (write-only) — apps verify tokens with it
+      ];
+      for (const [k, v] of pairs) {
+        await d.secrets.setSecret(scope, k, v);
+        await d.meta.upsertSecretKey(site.name, k, fingerprint(v), actorEmail);
+      }
+    }
+  };
+
+  // (K1) The shared auth provisioning primitive — used by POST /v1/auths/:name AND the stack reconcile
+  // loop. Applies the engine manifests (generating/rotating the JWT secret only when `jwtSecret` is
+  // set) and records the version row carrying the sanitized AuthConfig + bound `db` name.
+  const provisionAuth = async (opts: { name: string; namespace: string; db: string; cfg: AuthConfig; jwtSecret?: string; publishedBy: string }): Promise<void> => {
+    if (!d.kube) throw new Error("compute is not enabled on this instance");
+    const host = `auth--${opts.name}.${d.cfg.baseDomain}`;
+    const ctx: AuthManifestContext = { name: opts.name, namespace: opts.namespace, host, db: opts.db, ...(opts.jwtSecret ? { jwtSecret: opts.jwtSecret } : {}) };
+    const manifests = authManifests(opts.cfg, authEngine, ctx);
+    await d.kube.applyAuth(opts.namespace, opts.name, manifests);
+    const verId = newVersionId(now());
+    await d.meta.putVersion(opts.name, { id: verId, publishedBy: opts.publishedBy, createdAt: now().toISOString(), fileCount: 0, bytes: 0, config: { ...opts.cfg, db: opts.db } });
+    await d.meta.updateSite(opts.name, (s) => ({ ...s, currentVersion: verId }));
+  };
+
+  // (K1) The stored AuthConfig (+ bound `db`) on an auth resource's current version, or undefined.
+  const currentAuthConfig = async (site: Site): Promise<import("../metastore/types.ts").StoredAuthConfig | undefined> => {
+    if (!site.currentVersion) return undefined;
+    const cur = (await d.meta.listVersions(site.name)).find((v) => v.id === site.currentVersion);
+    return cur?.config as import("../metastore/types.ts").StoredAuthConfig | undefined;
+  };
+
+  // (K1) On key rotation, re-inject AUTH_JWT_SECRET (+ AUTH_JWT_SECRET_PREVIOUS for the grace window) +
+  // AUTH_URL into every app in the same org that binds this auth resource, then restart it so its pods
+  // pick up the new secret (envFrom Secrets are read at pod start). Best-effort per app — one failing
+  // consumer never fails the rotation. Grace: the previous secret keeps verifying pre-rotation tokens
+  // until the next rotate/redeploy overwrites it (documented, HS256 deviation).
+  const rebindAuthConsumers = async (authSite: Site, newSecret: string, previous: string | null, actorEmail: string): Promise<void> => {
+    if (!d.kube || !authSite.orgId) return;
+    const appNames = await d.meta.orgSiteNames(authSite.orgId, "app");
+    for (const appName of appNames) {
+      const appSite = await d.meta.getSitePlain(appName);
+      if (!appSite) continue;
+      const cfg = await currentAppConfig(appSite);
+      const authUses = (cfg?.uses ?? []).filter((u) => u.auth === authSite.name);
+      if (authUses.length === 0) continue;
+      const multiple = (cfg!.uses ?? []).filter((u) => u.auth).length > 1;
+      const scope = { owner: appSite.owner, app: appName, namespace: appSite.namespace };
+      const pairs: [string, string][] = [
+        [authEnvKey(authSite.name, multiple, "AUTH_URL"), authExternalUrl(authSite.name, d.cfg.baseDomain)],
+        [authEnvKey(authSite.name, multiple, "AUTH_JWT_SECRET"), newSecret],
+      ];
+      if (previous) pairs.push([authEnvKey(authSite.name, multiple, "AUTH_JWT_SECRET_PREVIOUS"), previous]);
+      try {
+        for (const [k, v] of pairs) {
+          await d.secrets.setSecret(scope, k, v);
+          await d.meta.upsertSecretKey(appName, k, fingerprint(v), actorEmail);
+        }
+        const keys = (await d.meta.listSecretKeys(appName)).map((k) => k.key);
+        await d.secrets.ensureBinding(scope, keys);
+        if (appSite.runtimeState !== "stopped") await d.kube.restartApp(appSite.namespace, appName, now().toISOString());
+      } catch (e) {
+        console.error(`auth rotate: rebinding ${appName} failed: ${(e as Error).message}`);
+      }
+    }
+  };
+
   const isPlatformAdmin = async (email: string) => (await d.users.getUser(email))?.role === "admin";
   // Append an audit event WITHOUT ever failing the action it records: a broken audit write must
   // not 500 a delete/transfer/etc. Awaited (not fire-and-forget) so the trail is ordered + the
@@ -837,6 +944,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         if (cSite.orgId !== site.orgId) {
           return c.json({ error: `cache "${u.cache}" belongs to a different organisation and cannot be bound` }, 400);
         }
+      } else if (u.auth) {
+        const aSite = await d.meta.getSitePlain(u.auth);
+        if (!aSite || aSite.type !== "auth") {
+          return c.json({ error: `app uses auth "${u.auth}", which does not exist` }, 400);
+        }
+        if (aSite.orgId !== site.orgId) {
+          return c.json({ error: `auth "${u.auth}" belongs to a different organisation and cannot be bound` }, 400);
+        }
       }
     }
 
@@ -874,6 +989,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         // deploy the env-key label is the cache name. Same idempotent, re-run-safe posture as buckets.
         await writeCacheBindings(
           (appCfg.uses ?? []).filter((u) => u.cache).map((u) => ({ cacheName: u.cache!, envLabel: u.cache! })),
+          theSite,
+          email,
+        );
+        // (K1) Auth bindings: read back each bound auth resource's JWT secret and write AUTH_URL +
+        // AUTH_JWT_SECRET to the app's write-only secret BEFORE the release Job / rollout. For a direct
+        // deploy the env-key label is the auth resource name. Same idempotent posture as buckets/caches.
+        await writeAuthBindings(
+          (appCfg.uses ?? []).filter((u) => u.auth).map((u) => ({ authName: u.auth!, envLabel: u.auth! })),
           theSite,
           email,
         );
@@ -1552,6 +1675,198 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return c.json({ caches: out });
   });
 
+  // ---- managed auth resource (GoTrue engine, K1) ----
+  // A per-app end-user auth pool: a GoTrue engine (Deployment 1/1) whose users live in a bound
+  // same-org Postgres, reachable at auth--<name>.<baseDomain> through the normal edge (with the
+  // carefully-scoped visibility exemption + rate limit — see src/edge/auth-exempt.ts). JWT is HS256:
+  // the shared signing secret is generated at create into the write-only `<name>-auth-keys` Secret and
+  // NEVER returned to a client (binding apps read it via the write-only path). Provider client SECRETS
+  // are set out-of-band with `drop secrets set <auth> GOTRUE_EXTERNAL_<PROVIDER>_SECRET=…`.
+  app.post("/v1/auths/:name", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const nameErr = validateName(name);
+    if (nameErr) return c.json({ error: nameErr }, 400);
+
+    let body: Record<string, unknown>;
+    try {
+      body = (await c.req.json()) as Record<string, unknown>;
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const authCfg = sanitizeAuthConfig(body);
+    if (!authCfg) return c.json({ error: "invalid auth config" }, 400);
+    if (authCfg.name && authCfg.name !== name) return c.json({ error: `auth name "${authCfg.name}" does not match target "${name}"` }, 400);
+
+    // Resolve the owning org first (without claiming) so the same-org DB check + workload cap apply.
+    let site = await d.meta.getSitePlain(name);
+    const isCreate = !site;
+    let org: { id: string; namespace: string };
+    if (!site) {
+      await ensureUser(email);
+      const orgRes = await resolveCreateOrg(c, email); // workload cap (override-aware)
+      if ("err" in orgRes) return orgRes.err;
+      org = { id: orgRes.org.id, namespace: orgRes.org.namespace };
+    } else {
+      org = { id: site.orgId ?? "", namespace: site.namespace };
+    }
+
+    // An auth resource REQUIRES a same-org database (v1: an EXISTING one, named via `db:`). The
+    // `--with-db` sugar is CLI-side composition (it creates a db first, then calls this with `db:`).
+    // On a re-apply, `db` is recovered from the stored version (immutable) unless re-supplied identically.
+    const dbName = (typeof body.db === "string" && body.db ? body.db : undefined) ?? (isCreate ? undefined : (await currentAuthConfig(site!))?.db);
+    if (!dbName) return c.json({ error: "an auth resource requires a database: pass { db: <existing-database-name> } (or use --with-db to create one)" }, 400);
+    const dbSite = await d.meta.getSitePlain(dbName);
+    if (!dbSite || dbSite.type !== "database") return c.json({ error: `database "${dbName}" does not exist` }, 400);
+    if (dbSite.orgId !== org.id) return c.json({ error: `database "${dbName}" belongs to a different organisation and cannot back this auth resource` }, 400);
+
+    if (isCreate) {
+      const claimed = await d.meta.claimSite(name, email, "auth", org);
+      site = claimed ?? (await d.meta.getSitePlain(name));
+    }
+    if (!site) return c.json({ error: "claim failed" }, 500);
+    if (site.type !== "auth") return c.json({ error: `name "${name}" is a ${site.type}, not an auth resource` }, 409);
+    const actor = await actorFor(c.get("identity"), site);
+    if (!can(actor, "db:create")) return c.json({ error: `auth resource is owned by ${site.owner}` }, 403); // create-tier (editor+)
+
+    const ns = site.namespace;
+    await applyTenantWithExposed(d.kube, ns);
+    // Generate the HS256 JWT secret ONLY at create; a re-apply leaves the existing keys Secret (never
+    // silently rotates — `rotate-keys` is the explicit path). A never-created re-apply regenerates.
+    const jwtSecret = isCreate ? generateJwtSecret() : (await d.kube.readAuthJwtSecret(ns, name)) == null ? generateJwtSecret() : undefined;
+    await provisionAuth({ name, namespace: ns, db: dbName, cfg: authCfg, jwtSecret, publishedBy: email });
+    await audit({ actor: email, action: isCreate ? "auth.create" : "auth.update", target: name, targetType: "auth", orgId: site.orgId, detail: { db: dbName, signup: authCfg.signup, providers: Object.keys(authCfg.providers ?? {}) } });
+    return c.json({ name, db: dbName, url: authExternalUrl(name, d.cfg.baseDomain), signup: authCfg.signup, jwtAlg: authEngine.jwtAlg, engine: authEngine.id });
+  });
+
+  // List the caller's auth resources (optionally scoped to one org). No key material — just name/owner/org.
+  app.get("/v1/auths", async (c) => {
+    const email = c.get("identity").email;
+    const orgSlug = c.req.query("org");
+    let orgFilterId: string | null = null;
+    if (orgSlug) {
+      const org = await d.orgs.getOrgBySlug(orgSlug);
+      if (!org) return c.json({ error: `no such org: ${orgSlug}` }, 404);
+      if (!(await d.orgs.roleOf(org.id, email)) && !(await isPlatformAdmin(email))) return c.json({ error: `not a member of org ${orgSlug}` }, 403);
+      orgFilterId = org.id;
+    }
+    const names = await d.meta.listUserSites(email);
+    const out: unknown[] = [];
+    for (const n of names) {
+      const s = await d.meta.getSitePlain(n);
+      if (!s || s.type !== "auth") continue;
+      if (orgFilterId && s.orgId !== orgFilterId) continue;
+      out.push({ name: s.name, type: s.type, owner: s.owner, org: await orgOf(s.orgId), url: authExternalUrl(s.name, d.cfg.baseDomain) });
+    }
+    return c.json({ auths: out });
+  });
+
+  // Rotate the HS256 JWT signing secret. `configure`-gated (owner/admin — like a DB password rotation),
+  // audited. The engine re-signs with the new secret; GoTrue itself verifies only the CURRENT secret, so
+  // the grace window is realized for BINDING APPS — a redeploy re-injects the new AUTH_JWT_SECRET, and
+  // the previous one is echoed to bound apps as AUTH_JWT_SECRET_PREVIOUS until the next rotate/redeploy.
+  app.post("/v1/auths/:name/rotate-keys", async (c) => {
+    if (!d.kube) return c.json({ error: "compute is not enabled on this instance" }, 501);
+    const email = c.get("identity").email;
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return c.json({ error: "no such auth resource" }, 404);
+    if (site.type !== "auth") return c.json({ error: `name "${name}" is a ${site.type}, not an auth resource` }, 409);
+    if (!can(await actorFor(c.get("identity"), site), "configure")) return c.json({ error: "owner only" }, 403);
+    const stored = await currentAuthConfig(site);
+    if (!stored) return c.json({ error: "auth resource has no stored config — re-create it" }, 409);
+    const previous = await d.kube.readAuthJwtSecret(site.namespace, name);
+    const jwtSecret = generateJwtSecret();
+    const { db, ...cfg } = stored;
+    await provisionAuth({ name, namespace: site.namespace, db, cfg, jwtSecret, publishedBy: email });
+    // Re-inject the new secret (+ the previous, for the grace window) into every app currently bound to
+    // this auth resource, so their local JWT verification keeps working across the rotation.
+    await rebindAuthConsumers(site, jwtSecret, previous, email);
+    await audit({ actor: email, action: "auth.rotate-keys", target: name, targetType: "auth", orgId: site.orgId, detail: { grace: previous != null } });
+    return c.json({ name, rotated: true, grace: previous != null });
+  });
+
+  // ---- user-admin proxy (K1): list / create-with-temp-password / disable / delete GoTrue users ----
+  // `configure`-gated (owner/admin) + audited. The server mints a short-TTL service-role admin JWT
+  // (signed with the resource's HS256 secret) and proxies to the engine's admin API IN-CLUSTER — the
+  // token never leaves the server, no user CRUD is exposed via MCP (agents don't touch end users, v1).
+  const c500 = (msg: string, status: number) => new Response(JSON.stringify({ error: msg }), { status, headers: { "content-type": "application/json" } });
+  const authAdminCall = async (
+    site: Site,
+    op: AdminOp,
+    arg: string | undefined,
+    reqBody: unknown | undefined,
+  ): Promise<{ status: number; json: unknown } | { err: Response }> => {
+    if (!d.kube) return { err: c500("compute is not enabled on this instance", 501) };
+    const secret = await d.kube.readAuthJwtSecret(site.namespace, site.name);
+    if (secret == null) return { err: c500(`auth "${site.name}" is not ready yet (no keys secret)`, 409) };
+    const token = mintAdminToken(secret);
+    const route = authEngine.adminPath(op, arg);
+    const baseUrl = `http://${site.name}.${site.namespace}.svc.cluster.local:${authEngine.containerPort}`;
+    try {
+      const r = await authAdmin({ baseUrl, method: route.method, path: route.path, token, body: reqBody });
+      return r;
+    } catch (e) {
+      return { err: c500(`could not reach the auth engine for ${site.name} (${(e as Error).message}) — is compute in-cluster?`, 502) };
+    }
+  };
+
+  const resolveAuthForAdmin = async (c: any) => {
+    const name = c.req.param("name");
+    const site = await d.meta.getSitePlain(name);
+    if (!site) return { err: c.json({ error: "no such auth resource" }, 404) };
+    if (site.type !== "auth") return { err: c.json({ error: `name "${name}" is a ${site.type}, not an auth resource` }, 409) };
+    if (!can(await actorFor(c.get("identity"), site), "configure")) return { err: c.json({ error: "owner only" }, 403) };
+    return { site };
+  };
+
+  app.get("/v1/auths/:name/users", async (c) => {
+    const r = await resolveAuthForAdmin(c);
+    if ("err" in r) return r.err;
+    const res = await authAdminCall(r.site, "listUsers", undefined, undefined);
+    if ("err" in res) return res.err;
+    return c.json(res.json as object, res.status as 200);
+  });
+
+  app.post("/v1/auths/:name/users", async (c) => {
+    const r = await resolveAuthForAdmin(c);
+    if ("err" in r) return r.err;
+    const body = (await c.req.json().catch(() => ({}))) as { email?: string; password?: string };
+    if (!body.email) return c.json({ error: "email is required" }, 400);
+    // No-SMTP onboarding: create the user pre-confirmed with a temp password (revealed once to the admin
+    // who created them — the console shows it via RevealOnce). Auto-generate one if the caller omitted it.
+    const password = body.password || generateDbPassword();
+    const res = await authAdminCall(r.site, "createUser", undefined, { email: body.email, password, email_confirm: true });
+    if ("err" in res) return res.err;
+    await audit({ actor: c.get("identity").email, action: "auth.user.create", target: r.site.name, targetType: "auth", orgId: r.site.orgId, detail: { email: body.email } });
+    // Echo the temp password back ONCE (RevealOnce) so the admin can hand it to the user.
+    return c.json({ ...(res.json as object), tempPassword: password }, res.status as 200);
+  });
+
+  app.delete("/v1/auths/:name/users/:id", async (c) => {
+    const r = await resolveAuthForAdmin(c);
+    if ("err" in r) return r.err;
+    const id = c.req.param("id");
+    const res = await authAdminCall(r.site, "deleteUser", id, undefined);
+    if ("err" in res) return res.err;
+    await audit({ actor: c.get("identity").email, action: "auth.user.delete", target: r.site.name, targetType: "auth", orgId: r.site.orgId, detail: { userId: id } });
+    return c.json(res.json as object, res.status as 200);
+  });
+
+  // Disable (ban) / enable a user — a PUT update on the admin API. `disable=true` bans (revokes access
+  // within the token TTL), `disable=false` re-enables. Audited as auth.user.disable/enable.
+  app.post("/v1/auths/:name/users/:id/disable", async (c) => {
+    const r = await resolveAuthForAdmin(c);
+    if ("err" in r) return r.err;
+    const id = c.req.param("id");
+    const disable = ((await c.req.json().catch(() => ({}))) as { disable?: boolean }).disable !== false;
+    const res = await authAdminCall(r.site, "updateUser", id, { ban_duration: disable ? "876000h" : "none" });
+    if ("err" in res) return res.err;
+    await audit({ actor: c.get("identity").email, action: disable ? "auth.user.disable" : "auth.user.enable", target: r.site.name, targetType: "auth", orgId: r.site.orgId, detail: { userId: id } });
+    return c.json(res.json as object, res.status as 200);
+  });
+
   // ---- rollback ----
   // Static sites flip the version pointer (bytes for every version already exist in blob storage).
   // Apps (H1) re-apply the target version's STORED config as a fresh manifest set — see below.
@@ -1709,6 +2024,33 @@ export function createApp(d: Deps): Hono<AuthEnv> {
         }
       }
       out.cache = ci;
+    } else if (site.type === "auth") {
+      // (K1) Auth detail: config surface (providers/signup/redirects/jwt_ttl) + key age + live status.
+      // NEVER the JWT secret or any key material. `keyMintedAt` is the current version's createdAt (the
+      // secret is (re)minted at create/rotate, both of which bump the version) — no cluster secret read.
+      const ns = site.namespace;
+      const stored = await currentAuthConfig(site);
+      const curVer = versions.find((v) => v.id === site.currentVersion);
+      const ai: Record<string, unknown> = {
+        url: authExternalUrl(name, d.cfg.baseDomain),
+        engine: authEngine.id,
+        jwtAlg: authEngine.jwtAlg,
+        db: stored?.db ?? null,
+        signup: stored?.signup ?? "open",
+        providers: Object.keys(stored?.providers ?? {}),
+        redirectUrls: stored?.redirect_urls ?? [],
+        jwtTtl: stored?.jwt_ttl ?? "1h",
+        keyMintedAt: curVer?.createdAt ?? null, // when the JWT secret was last (re)minted — NOT the key itself
+        status: null,
+      };
+      if (d.kube) {
+        try {
+          ai.status = await d.kube.getAuthStatus(ns, name); // {replicas, ready, ...} | null
+        } catch {
+          /* leave status null */
+        }
+      }
+      out.auth = ai;
     } else if (site.type === "bucket") {
       // (I1) Bucket detail: endpoint/bucket/prefix + a size sweep. NO credentials — those are revealed
       // once at create/rotate only. Best-effort: an S3 read failure degrades to zeros, never 500s.
@@ -1760,6 +2102,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       appStatus: ((out.app as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["appStatus"],
       dbStatus: ((out.database as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["dbStatus"],
       cacheStatus: ((out.cache as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["cacheStatus"],
+      authStatus: ((out.auth as Record<string, unknown> | undefined)?.status ?? null) as Parameters<typeof normalizeStatus>[0]["authStatus"],
     });
     return c.json(out);
   });
@@ -1999,6 +2342,14 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       // (I2) Tear down the Valkey Deployment/Service/Secret AND its PVC — a cache delete always wipes
       // data (there is no cache backup). No --force gate: a cache is ephemeral by contract.
       await d.kube.deleteCache(site.namespace, name);
+    } else if (site.type === "auth" && d.kube) {
+      // (K1) Tear down the GoTrue engine + its write-only JWT keys Secret. The USERS live in the bound
+      // database (untouched here — deleting the auth resource never drops the user rows). Also destroy
+      // the provider `<name>-secret` (app-secret material), same as an app.
+      await d.kube.deleteAuth(site.namespace, name);
+      await d.secrets
+        .destroy({ owner: site.owner, app: name, namespace: site.namespace })
+        .catch((e) => console.error(`delete ${name}: secrets.destroy failed (possible orphaned provider secret): ${(e as Error).message}`));
     } else if (site.type === "bucket") {
       // (I1) A non-empty bucket refuses deletion without ?force=1 (409), so its contents can't be
       // wiped by accident. With force (or when empty), destroy() prunes every object under the prefix.
@@ -2014,7 +2365,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     await d.blob.deletePrefix(`sites/${name}/files/`).catch(() => {}); // bytes; metadata cascades in DB
     await d.meta.deleteSite(name);
-    const deleteAction = site.type === "bucket" ? "bucket.delete" : site.type === "cache" ? "cache.delete" : "site.delete";
+    const deleteAction =
+      site.type === "bucket" ? "bucket.delete" : site.type === "cache" ? "cache.delete" : site.type === "auth" ? "auth.delete" : "site.delete";
     await audit({ actor: email, action: deleteAction, target: name, targetType: site.type, orgId: site.orgId, detail: { owner: site.owner } });
     return c.json({ deleted: name });
   });
@@ -2054,7 +2406,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const prefix = c.req.query("prefix") || undefined;
     const owner = c.req.query("owner")?.toLowerCase() || undefined;
     const typeQ = c.req.query("type");
-    const type = typeQ === "site" || typeQ === "app" || typeQ === "database" || typeQ === "bucket" || typeQ === "cache" ? typeQ : undefined;
+    const type = typeQ === "site" || typeQ === "app" || typeQ === "database" || typeQ === "bucket" || typeQ === "cache" || typeQ === "auth" ? typeQ : undefined;
     // Optional ?org=<slug> filter — scope the browse to one org (an unknown slug → empty page).
     const orgSlug = c.req.query("org");
     let orgId: string | undefined;
@@ -2302,7 +2654,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
 
   // Claim the site row for a resource if it doesn't exist yet (apps/sites/databases share the name
   // namespace). ensureUser must have run first (owner membership FKs to users).
-  const claimResource = async (siteName: string, type: "site" | "app" | "database" | "bucket" | "cache", org: Org, email: string): Promise<Site> => {
+  const claimResource = async (siteName: string, type: "site" | "app" | "database" | "bucket" | "cache" | "auth", org: Org, email: string): Promise<Site> => {
     let site = await d.meta.getSitePlain(siteName);
     if (!site) {
       const claimed = await d.meta.claimSite(siteName, email, type, { id: org.id, namespace: org.namespace });
@@ -2356,6 +2708,17 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await d.meta.updateSite(siteName, (s) => ({ ...s, currentVersion: verId }));
   };
 
+  // (K1) Create/update an auth resource. Composes the SAME building blocks as POST /v1/auths/:name via
+  // provisionAuth. The bound DB is the auth resource's `db:` KEY resolved to its site name (validated by
+  // validateStackEdges as a same-stack database). JWT secret generated only on first create.
+  const applyAuthResource = async (spec: StackSpec, mapping: Record<string, string>, res: StackResource, siteName: string, ns: string, isCreate: boolean): Promise<void> => {
+    const db = siteNameForKey(spec, mapping, res.db!); // validateStackEdges guarantees res.db exists + is a database
+    const cfg = sanitizeAuthConfig({ providers: res.providers, redirect_urls: res.redirect_urls, jwt_ttl: res.jwt_ttl, signup: res.signup, site_url: res.site_url })!;
+    await ensureTenant(ns);
+    const jwtSecret = isCreate ? generateJwtSecret() : (await d.kube!.readAuthJwtSecret(ns, siteName)) == null ? generateJwtSecret() : undefined;
+    await provisionAuth({ name: siteName, namespace: ns, db, cfg, jwtSecret, publishedBy: "stack" });
+  };
+
   // Create/update an app resource from a resolved image. Composes the SAME building blocks as
   // POST /v1/apps/:name (manifests + apply + secret binding). The release phase is intentionally NOT
   // run in the stack path v1 (migrations stay on `drop deploy`); noted as a deliberate deviation.
@@ -2369,13 +2732,18 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       .map((u) => ({ database: siteNameForKey(spec, mapping, u.database!), ...(u.via ? { via: u.via } : {}) }));
     // (I2) cache edges → mapped `{ cache: <site> }` uses so the app declares the dependency + REDIS_URL binds.
     const cacheUses = (res.uses ?? []).filter((u) => u.cache).map((u) => ({ cache: siteNameForKey(spec, mapping, u.cache!) }));
+    // (K1) auth edges → mapped `{ auth: <site> }` uses so the app declares the dependency + AUTH_* bind.
+    const authUses = (res.uses ?? []).filter((u) => u.auth).map((u) => ({ auth: siteNameForKey(spec, mapping, u.auth!) }));
     const bucketEntries = (res.uses ?? [])
       .filter((u) => u.bucket)
       .map((u) => ({ bucketName: siteNameForKey(spec, mapping, u.bucket!), envLabel: u.bucket! }));
     const cacheEntries = (res.uses ?? [])
       .filter((u) => u.cache)
       .map((u) => ({ cacheName: siteNameForKey(spec, mapping, u.cache!), envLabel: u.cache! }));
-    const allUses = [...uses, ...cacheUses];
+    const authEntries = (res.uses ?? [])
+      .filter((u) => u.auth)
+      .map((u) => ({ authName: siteNameForKey(spec, mapping, u.auth!), envLabel: u.auth! }));
+    const allUses = [...uses, ...cacheUses, ...authUses];
     const appCfg: AppConfig = {
       image,
       services: res.services ?? [{ internalPort: 8080, protocol: "http" }],
@@ -2391,6 +2759,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     await ensureTenant(ns);
     await writeBucketBindings(bucketEntries, site, "stack"); // provision + write S3_* secrets before rollout
     await writeCacheBindings(cacheEntries, site, "stack"); // (I2) read back each cache password + write REDIS_URL before rollout
+    await writeAuthBindings(authEntries, site, "stack"); // (K1) read back each auth JWT secret + write AUTH_URL/AUTH_JWT_SECRET before rollout
     const sandbox = !appCfg.trusted;
     const imagePullSecret = d.cfg.imageBackend === "registry" ? d.cfg.imageRegistryPullSecret : undefined;
     const verId = newVersionId(now()); // minted up front so it can stamp the pod-template annotation (H1)
@@ -2418,6 +2787,9 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       await d.kube.deleteDatabase(site.namespace, site.name);
     } else if (site.type === "cache" && d.kube) {
       await d.kube.deleteCache(site.namespace, site.name); // (I2) Deployment/Service/Secret + PVC
+    } else if (site.type === "auth" && d.kube) {
+      await d.kube.deleteAuth(site.namespace, site.name); // (K1) engine + JWT keys Secret (users stay in the bound DB)
+      await d.secrets.destroy({ owner: site.owner, app: site.name, namespace: site.namespace }).catch((e) => console.error(`stack delete ${site.name}: secrets.destroy failed: ${(e as Error).message}`));
     }
     await d.blob.deletePrefix(`sites/${site.name}/files/`).catch(() => {});
     await d.meta.deleteSite(site.name);
@@ -2454,7 +2826,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   };
 
   // The per-resource action a caller must hold to reconcile an EXISTING resource of this kind.
-  const actionForKind = (kind: "site" | "app" | "database" | "bucket" | "cache"): Action => (kind === "site" ? "publish" : kind === "app" ? "deploy" : "db:create"); // bucket/cache reconcile is create-tier (db:create)
+  const actionForKind = (kind: StackResourceKind): Action => (kind === "site" ? "publish" : kind === "app" ? "deploy" : "db:create"); // bucket/cache/auth reconcile is create-tier (db:create)
 
   // The last-deployed image ref for an app resource's site (its current version's stored AppConfig). Used
   // by template publish to capture a stack's DEPLOYED image (a mutable tag) so the template is instantiable
@@ -2607,6 +2979,8 @@ export function createApp(d: Deps): Hono<AuthEnv> {
               await applyDbResource(res, step.siteName, site.namespace, step.action === "create");
             } else if (res.type === "cache") {
               await applyCacheResource(res, step.siteName, site.namespace, step.action === "create"); // (I2)
+            } else if (res.type === "auth") {
+              await applyAuthResource(spec, mapping, res, step.siteName, site.namespace, step.action === "create"); // (K1)
             } else if (res.type === "app") {
               const image = resolved?.[step.key]?.image ?? res.image;
               if (image) await applyAppResource(spec, mapping, res, site, image); // else: row claimed, awaits CLI image (in `needs`)

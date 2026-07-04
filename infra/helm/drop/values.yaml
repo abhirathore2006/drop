@@ -28,6 +28,20 @@ config:
   oidcRequiredGroup: "" # require this group to be present in the groups claim
   oidcDisplayName: "" # sign-in button label; default derived from the issuer host
 
+  # (K1) Managed auth resource (per-app GoTrue engine). This is NOT the platform login above — it is
+  # the engine image that runs in a TENANT namespace when a user runs `drop auth create`.
+  # authEngineImage: the PINNED GoTrue image (concrete tag, never :latest/:v2). Leave empty to use the
+  #   build's default pin (src/auth-resource/gotrue.ts → docker.io/supabase/gotrue:v2.170.0). Bump
+  #   DELIBERATELY, tracking GoTrue CVE advisories (auth is a security-critical dependency).
+  #   AIR-GAP: mirror the pinned image into your internal registry and set this to the mirrored ref,
+  #   e.g. "REPLACE_ME.dkr.ecr.us-east-1.amazonaws.com/mirror/gotrue:v2.170.0". The tenant pods pull it
+  #   with IfNotPresent, so a node caches it after the first pull.
+  authEngineImage: "" # empty → the built-in pin (docker.io/supabase/gotrue:v2.170.0)
+  # authRateLimit: per-IP token budget for the sensitive auth POST paths at the edge (the visibility
+  #   exemption's abuse brake — token/signup/verify/recover). Default 10; "0" disables the brake.
+  authRateLimit: "" # empty → default 10 requests / 60s / IP
+  authRateWindowMs: "" # empty → default 60000
+
 googleClientId: "" # not secret → ConfigMap/env (legacy; oidcClientId falls back to it)
 oidcClientId: "" # (J2) not secret → ConfigMap/env; falls back to googleClientId when empty
 

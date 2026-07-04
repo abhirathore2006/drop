@@ -38,6 +38,7 @@ const app = createEdge({
   interceptorUrl: cfg.interceptorUrl,
   previews,
   metrics,
+  authRateLimit: { limit: cfg.authRateLimit, windowMs: cfg.authRateWindowMs }, // (K1) auth-host abuse brake
 });
 const server = serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-edge listening on :${cfg.httpPort} for *.${cfg.baseDomain}`);

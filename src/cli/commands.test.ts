@@ -50,6 +50,22 @@ test("expose is a group (ls + default set) with unexpose top-level + db expose s
   expect(db.commands.map((c) => c.name())).toContain("expose");
 });
 
+test("auth (K1) is a command group with create/ls/config/rotate-keys + a users subgroup", () => {
+  const p = buildProgram();
+  const top = p.commands.map((c) => c.name());
+  expect(top).toContain("auth");
+  const auth = p.commands.find((c) => c.name() === "auth")!;
+  const subs = auth.commands.map((c) => c.name());
+  for (const s of ["create", "ls", "config", "rotate-keys", "users"]) expect(subs).toContain(s);
+  // create carries --db / --with-db / --org / --signup
+  const create = auth.commands.find((c) => c.name() === "create")!;
+  for (const o of ["--db", "--with-db", "--org", "--signup"]) expect(create.options.some((x) => x.long === o)).toBe(true);
+  // users is a subgroup with ls/create/rm
+  const users = auth.commands.find((c) => c.name() === "users")!;
+  const userSubs = users.commands.map((c) => c.name());
+  for (const s of ["ls", "create", "rm"]) expect(userSubs).toContain(s);
+});
+
 test("`update` is a top-level command (self-updates the CLI)", () => {
   const p = buildProgram();
   expect(p.commands.map((c) => c.name())).toContain("update");

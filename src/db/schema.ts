@@ -19,9 +19,11 @@ export interface UsersTable {
 export type Visibility = "public" | "private" | "password";
 // The `sites` discriminator. `bucket` (I1) is tenant object storage — a prefix in the platform S3
 // bucket (local) or a per-tenant prefix + scoped IAM policy (prod). `cache` (I2) is a managed
-// single-replica Valkey (deliberately tiny, ephemeral by default). Both reuse the shared name
-// namespace, org ownership, roles, and audit like every other type. (auth lands later.)
-export type WorkloadType = "site" | "app" | "database" | "bucket" | "cache";
+// single-replica Valkey (deliberately tiny, ephemeral by default). `auth` (K1) is a managed
+// per-app auth resource — a GoTrue engine Deployment in the tenant namespace whose users live in
+// the bound Postgres, reachable at `auth--<name>.<baseDomain>`. Every type reuses the shared name
+// namespace, org ownership, roles, and audit.
+export type WorkloadType = "site" | "app" | "database" | "bucket" | "cache" | "auth";
 
 export interface SitesTable {
   name: string;

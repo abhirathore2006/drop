@@ -12,13 +12,15 @@ export interface NormalizedStatus {
 }
 
 export interface NormalizeStatusInput {
-  type: "site" | "app" | "database" | "bucket" | "cache";
+  type: "site" | "app" | "database" | "bucket" | "cache" | "auth";
   /** App on/off switch persisted in the metastore ("running" | "stopped"). */
   runtimeState?: "running" | "stopped" | null;
   /** Live app status from the Deployment + pods, or null/undefined when unavailable. */
   appStatus?: { replicas: number; ready: number; restarts: number; reason: string } | null;
   /** (I2) Live cache (Valkey) status from its Deployment + pods — same shape as appStatus. */
   cacheStatus?: { replicas: number; ready: number; restarts: number; reason: string } | null;
+  /** (K1) Live auth-engine (GoTrue) status from its Deployment + pods — same shape as appStatus. */
+  authStatus?: { replicas: number; ready: number; restarts: number; reason: string } | null;
   /** Live CNPG status, or null/undefined when unavailable. */
   dbStatus?: { phase: string; ready: number; instances: number; hibernated: boolean } | null;
 }
@@ -56,6 +58,14 @@ export function normalizeStatus(input: NormalizeStatusInput): NormalizedStatus {
   if (input.type === "cache") {
     // (I2) A cache is a single-replica always-on Valkey Deployment — no stop switch, no scale-to-zero.
     const st = input.cacheStatus;
+    if (!st) return { status: "progressing", reason: "status unavailable" };
+    return deploymentStatus(st);
+  }
+
+  if (input.type === "auth") {
+    // (K1) An auth resource is the GoTrue engine — a Deployment pinned to 1/1 (login can't cold-start),
+    // so it's deployment-backed like an app, minus the stop switch / scale-to-zero cases.
+    const st = input.authStatus;
     if (!st) return { status: "progressing", reason: "status unavailable" };
     return deploymentStatus(st);
   }

@@ -128,6 +128,7 @@ function Shell({ me }: { me: Me }) {
               <Route path="/database/:name">{(p) => <DetailRoute name={dec(p.name)} type="database" />}</Route>
               <Route path="/bucket/:name">{(p) => <DetailRoute name={dec(p.name)} type="bucket" />}</Route>
               <Route path="/cache/:name">{(p) => <DetailRoute name={dec(p.name)} type="cache" />}</Route>
+              <Route path="/auth/:name">{(p) => <DetailRoute name={dec(p.name)} type="auth" />}</Route>
               <Route path="/stack/:name">
                 {(p) => (
                   <>

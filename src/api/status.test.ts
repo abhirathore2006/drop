@@ -130,6 +130,19 @@ export const STATUS_TABLE: Case[] = [
     input: { type: "database", dbStatus: db({ phase: "", ready: 0 }) },
     want: { status: "progressing", reason: "provisioning" },
   },
+
+  // --- auth (K1): the GoTrue engine Deployment pinned 1/1 — deployment-backed like a cache ---
+  { name: "auth with no status yet is progressing", input: { type: "auth", authStatus: null }, want: { status: "progressing", reason: "status unavailable" } },
+  {
+    name: "auth engine ready is running",
+    input: { type: "auth", authStatus: app({ replicas: 1, ready: 1 }) },
+    want: { status: "running", reason: "1/1 ready" },
+  },
+  {
+    name: "auth engine crash-looping is error",
+    input: { type: "auth", authStatus: app({ ready: 0, reason: "CrashLoopBackOff" }) },
+    want: { status: "error", reason: "CrashLoopBackOff" },
+  },
 ];
 
 describe("normalizeStatus", () => {

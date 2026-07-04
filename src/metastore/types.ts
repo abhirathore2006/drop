@@ -2,6 +2,7 @@ import type { SiteConfig } from "../site-config.ts";
 import type { AppConfig } from "../app-config.ts";
 import type { DatabaseConfig } from "../db-config.ts";
 import type { CacheConfig } from "../cache-config.ts";
+import type { AuthConfig } from "../auth-config.ts";
 import type { RuntimeState, SiteRole, Visibility, WorkloadType } from "../db/schema.ts";
 
 export type { Visibility, WorkloadType, RuntimeState };
@@ -57,8 +58,12 @@ export interface VersionMeta {
   createdAt: string; // ISO
   fileCount: number;
   bytes: number;
-  config?: SiteConfig | AppConfig | DatabaseConfig | CacheConfig;
+  config?: SiteConfig | AppConfig | DatabaseConfig | CacheConfig | StoredAuthConfig;
 }
+
+/** (K1) What an auth resource stores on its version row: the sanitized AuthConfig plus the name of the
+ *  bound database its engine + users live in (so detail / rotate / binding can recover it). */
+export type StoredAuthConfig = AuthConfig & { db: string };
 
 export class SiteNotFoundError extends Error {
   constructor(name: string) {

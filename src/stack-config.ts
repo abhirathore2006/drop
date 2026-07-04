@@ -22,8 +22,9 @@ import {
 } from "./app-config.ts";
 import { sanitizeDatabaseConfig, type Hibernation } from "./db-config.ts";
 import { sanitizeCacheConfig } from "./cache-config.ts";
+import { sanitizeAuthConfig, type AuthProvider, type AuthProviderKind, type SignupMode } from "./auth-config.ts";
 
-export type StackResourceKind = "site" | "app" | "database" | "bucket" | "cache";
+export type StackResourceKind = "site" | "app" | "database" | "bucket" | "cache" | "auth";
 
 /** A2 opt-in TCP exposure, carried in the spec (parsed + stored now; enforced by A2 later). */
 export interface StackExpose {
@@ -72,6 +73,14 @@ export interface StackResource {
   // --- cache (I2) ---
   memory?: string;
   persistent?: boolean;
+
+  // --- auth (K1) --- (an auth resource binds to a database resource KEY via `db`)
+  db?: string; // resource KEY of the database this auth resource's engine + users live in
+  providers?: Partial<Record<AuthProviderKind, AuthProvider>>;
+  redirect_urls?: string[];
+  jwt_ttl?: string;
+  signup?: SignupMode;
+  site_url?: string;
 }
 
 export interface StackSpec {
@@ -151,6 +160,20 @@ function sanitizeCache(sub: Record<string, unknown>): StackResource | undefined 
   return res;
 }
 
+/** Sanitize an `auth`-typed stack resource (K1) by REUSING sanitizeAuthConfig. It additionally carries
+ *  a `db:` resource KEY naming the database its engine + users live in (validated as an edge below). */
+function sanitizeAuth(sub: Record<string, unknown>): StackResource | undefined {
+  const ac = sanitizeAuthConfig(sub);
+  if (!ac) return undefined;
+  const res: StackResource = { type: "auth", redirect_urls: ac.redirect_urls, jwt_ttl: ac.jwt_ttl, signup: ac.signup };
+  if (ac.name && validateName(ac.name) === null) res.name = ac.name;
+  if (ac.providers) res.providers = ac.providers;
+  if (ac.site_url) res.site_url = ac.site_url;
+  const db = str(sub.db, 63);
+  if (db) res.db = db;
+  return res;
+}
+
 /** Sanitize a `site`-typed stack resource. Site routing config (redirects/headers/…) lives in the
  *  published bundle's OWN drop.yaml `site:` section — the stack spec carries only wiring: the build
  *  context (`dir`), a static `env`, and `env_from` edges (publish-time substitution from an app). */
@@ -200,6 +223,7 @@ export function sanitizeStackConfig(input: unknown): StackSpec | undefined {
     else if (type === "database") res = sanitizeDb(sub);
     else if (type === "bucket") res = sanitizeBucket(sub);
     else if (type === "cache") res = sanitizeCache(sub);
+    else if (type === "auth") res = sanitizeAuth(sub);
     else if (type === "site") res = sanitizeSite(sub);
     else continue; // unknown/absent type → ignore the entry
     if (res) resources[key] = res;
@@ -229,8 +253,20 @@ export function validateStackEdges(spec: StackSpec): string | null {
           const t = spec.resources[u.cache];
           if (!t) return `app "${key}" uses cache "${u.cache}", which is not a resource in this stack`;
           if (t.type !== "cache") return `app "${key}" uses "${u.cache}", which is a ${t.type}, not a cache`;
+        } else if (u.auth) {
+          const t = spec.resources[u.auth];
+          if (!t) return `app "${key}" uses auth "${u.auth}", which is not a resource in this stack`;
+          if (t.type !== "auth") return `app "${key}" uses "${u.auth}", which is a ${t.type}, not an auth resource`;
         }
       }
+    } else if (res.type === "auth") {
+      // (K1) An auth resource requires a `db:` naming a database resource in the same stack — its engine
+      // + users live in that Postgres. A missing/mistyped `db` is a hard 400 (no default: auth without a
+      // database is meaningless).
+      if (!res.db) return `auth "${key}" must declare a "db" (a database resource in this stack for its users)`;
+      const t = spec.resources[res.db];
+      if (!t) return `auth "${key}" uses db "${res.db}", which is not a resource in this stack`;
+      if (t.type !== "database") return `auth "${key}" uses "${res.db}", which is a ${t.type}, not a database`;
     } else if (res.type === "site") {
       for (const e of res.env_from ?? []) {
         const t = spec.resources[e.resource];

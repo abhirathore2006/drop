@@ -2,6 +2,7 @@ import type { Readable } from "node:stream";
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import type { DatabaseManifests } from "./cnpg.ts";
 import type { CacheManifests } from "./valkey.ts";
+import type { AuthManifests } from "../auth-resource/manifests.ts";
 
 // The cluster boundary. The API depends on this port, never on a concrete k8s
 // client — so deploy logic is testable with FakeKube (no cluster), exactly as
@@ -90,6 +91,19 @@ export interface KubeClient {
    *  returned to a client; it is re-written into the app's write-only secret). null if the Secret/key
    *  is absent (e.g. compute not yet reconciled). */
   readCachePassword(namespace: string, name: string): Promise<string | null>;
+  /** (K1) Create-or-update a managed auth resource: the GoTrue engine Deployment + Service +
+   *  HTTPScaledObject + interceptor NetworkPolicy (+ the write-only JWT-keys Secret at create/rotate).
+   *  Idempotent. */
+  applyAuth(namespace: string, name: string, manifests: AuthManifests): Promise<void>;
+  /** (K1) Remove the auth resource's engine objects + its `<name>-auth-keys` Secret. Safe if absent.
+   *  (The provider `<name>-secret` is cleaned via the SecretStore, like an app's — not here.) */
+  deleteAuth(namespace: string, name: string): Promise<void>;
+  /** (K1) Live auth-engine status from its Deployment + pods (an AppStatus), or null if absent. */
+  getAuthStatus(namespace: string, name: string): Promise<AppStatus | null>;
+  /** (K1) Read back the auth resource's HS256 JWT secret from `<name>-auth-keys`, to mint a short-TTL
+   *  service-role admin token server-side (user-admin proxy) + inject AUTH_JWT_SECRET into binding
+   *  apps. The value is NEVER returned to a client. null if the Secret/key is absent. */
+  readAuthJwtSecret(namespace: string, name: string): Promise<string | null>;
   /** (I3) Create-or-update a CNPG Pooler (PgBouncer) for a managed database. Idempotent. */
   applyPooler(namespace: string, manifest: Record<string, unknown>): Promise<void>;
   /** (I3) Delete a database's Pooler (`<db>-pooler-rw`). Safe if absent. */

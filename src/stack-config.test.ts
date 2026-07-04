@@ -204,6 +204,32 @@ test("stack: cache resource + app→cache `uses` edge (I2); via:pooler carried o
   expect(validateStackEdges(wrongType)).toContain("not a cache");
 });
 
+test("stack: auth resource (K1) + auth→db edge + app→auth `uses` edge", () => {
+  const spec = sanitizeStackConfig({
+    name: "s",
+    resources: {
+      db: { type: "database" },
+      login: { type: "auth", db: "db", signup: "closed", redirect_urls: ["https://app.example.com/cb"] },
+      api: { type: "app", image: "x:1", uses: [{ auth: "login" }] },
+    },
+  })!;
+  expect(spec.resources.login).toEqual({ type: "auth", db: "db", signup: "closed", redirect_urls: ["https://app.example.com/cb"], jwt_ttl: "1h" });
+  expect(spec.resources.api!.uses).toEqual([{ auth: "login" }]);
+  expect(validateStackEdges(spec)).toBeNull();
+
+  // an auth resource without a `db` → rejected
+  const noDb: StackSpec = { name: "s", resources: { login: { type: "auth" } } };
+  expect(validateStackEdges(noDb)).toContain("must declare a \"db\"");
+
+  // auth `db` names a non-database → rejected
+  const wrongDb: StackSpec = { name: "s", resources: { c: { type: "cache", memory: "128Mi", persistent: false }, login: { type: "auth", db: "c" } } };
+  expect(validateStackEdges(wrongDb)).toContain("not a database");
+
+  // app uses a KEY that is a database, not an auth resource
+  const wrongType: StackSpec = { name: "s", resources: { db: { type: "database" }, api: { type: "app", image: "x:1", uses: [{ auth: "db" }] } } };
+  expect(validateStackEdges(wrongType)).toContain("not an auth resource");
+});
+
 test("parseStackConfig: reads the top-level stack: section of a drop.yaml body", () => {
   const spec = parseStackConfig(
     yaml(`

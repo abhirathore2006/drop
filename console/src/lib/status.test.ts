@@ -60,6 +60,17 @@ function sweep(): NormalizeStatusInput[] {
       inputs.push({ type: "cache", cacheStatus: { replicas, ready, restarts: 0, reason } });
     }
   }
+  // (K1) auth resources — the GoTrue engine Deployment pinned 1/1 (deployment-backed like a cache).
+  inputs.push({ type: "auth", authStatus: null });
+  for (const reason of appReasons) {
+    for (const [replicas, ready] of [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+    ] as const) {
+      inputs.push({ type: "auth", authStatus: { replicas, ready, restarts: 0, reason } });
+    }
+  }
   inputs.push({ type: "database", dbStatus: null });
   for (const hibernated of [true, false]) {
     for (const phase of dbPhases) {

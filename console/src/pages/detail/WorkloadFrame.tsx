@@ -18,6 +18,7 @@ import { AppPanels } from "./AppPanels.tsx";
 import { DbPanels } from "./DbPanels.tsx";
 import { BucketPanels } from "./BucketPanels.tsx";
 import { CachePanels } from "./CachePanels.tsx";
+import { AuthPanels } from "./AuthPanels.tsx";
 import { SitePanels } from "./SitePanels.tsx";
 import { MetricsPanel } from "./MetricsPanel.tsx";
 import { useWorkloadAction } from "./useWorkloadAction.ts";
@@ -53,6 +54,7 @@ export function WorkloadFrame({ d }: { d: Detail }) {
         {d.type === "database" && <DbPanels d={d} />}
         {d.type === "bucket" && <BucketPanels d={d} />}
         {d.type === "cache" && <CachePanels d={d} />}
+        {d.type === "auth" && <AuthPanels d={d} />}
         {(d.type === "site" || d.type === "app" || d.type === "database") && <MetricsPanel d={d} />}
         <AccessPanel d={d} />
         {showDanger && <DangerPanel d={d} />}

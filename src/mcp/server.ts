@@ -5,7 +5,7 @@ import { defaultSessionPath, loadSession, saveSession, type Session } from "../c
 import { Client } from "../cli/client.ts";
 import { packDir } from "../cli/pack.ts";
 import { devLoginToken, serverLogin } from "../cli/login.ts";
-import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate } from "../cli/resolve-name.ts";
+import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate, loadAuthCreate } from "../cli/resolve-name.ts";
 import { runStackUp } from "../cli/stack.ts";
 import { runDetect } from "../cli/detect.ts";
 
@@ -191,6 +191,36 @@ export function buildMcp(): McpServer {
   server.registerTool(
     "cache_status",
     { description: "Show a cache's host/port + memory/persistent + live status. Never returns the password.", inputSchema: { name: z.string() } },
+    async ({ name }) => run(() => getClient().then((c) => c.info(name))),
+  );
+
+  // managed auth resource (GoTrue, K1). create + status ONLY — NO end-user CRUD via MCP by design:
+  // creating/disabling/deleting an app's END USERS is a human-gated, audited console/CLI action, not an
+  // agent capability (Plan-v5 Workstream K: "deliberately no end-user CRUD via agents v1").
+  server.registerTool(
+    "auth_create",
+    {
+      description:
+        "Create a per-app managed auth resource (GoTrue engine). Requires a same-org database (pass `db` — an EXISTING database name — its users + engine schema live there). Reachable at auth--<name>.<baseDomain>; JWT is HS256 (the signing secret is never returned). Bind it to an app with `uses: [{ auth: <name> }]` to inject AUTH_URL + AUTH_JWT_SECRET.",
+      inputSchema: {
+        name: z.string().describe("auth resource name (DNS-safe; globally unique)"),
+        db: z.string().describe("an EXISTING same-org database name the engine + users live in"),
+        signup: z.enum(["open", "closed"]).optional().describe("open (anyone may sign up) or closed (admin-created users only); default open"),
+        directory: z.string().optional().describe("folder whose drop.yaml auth: section supplies providers/redirect_urls/jwt_ttl"),
+        org: z.string().optional().describe("organisation slug (default: your personal org)"),
+      },
+    },
+    async ({ name, db, signup, directory, org }) =>
+      run(async () => {
+        const cfg = (await loadAuthCreate(directory ? resolve(directory) : ".")) as Record<string, unknown>;
+        cfg.db = db;
+        if (signup) cfg.signup = signup;
+        return await (await getClient()).authCreate(name, cfg, org);
+      }),
+  );
+  server.registerTool(
+    "auth_status",
+    { description: "Show an auth resource's config surface (providers, signup, redirect URLs, key age) + live engine status. Never returns key material.", inputSchema: { name: z.string() } },
     async ({ name }) => run(() => getClient().then((c) => c.info(name))),
   );
 

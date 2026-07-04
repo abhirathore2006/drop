@@ -86,6 +86,17 @@ const EDGE_TCP_COMPONENT = "edge-tcp";
 // binding at it so the app can verify-full the server's TLS cert.
 const DB_CA_MOUNT_BASE = "/var/run/drop/db-ca";
 
+/** (B1 reuse) The read-only CA volume + mount + resolved `ca.crt` path for a bound database. Exported
+ *  so the managed-auth engine (K1) mounts the SAME `<db>-ca` Secret the same way for its verify-full
+ *  Postgres connection — one source of truth for the DB-CA mechanics, shared by appBinding below. */
+export function dbCaBinding(db: string): { volume: Record<string, unknown>; volumeMount: Record<string, unknown>; caCertPath: string } {
+  return {
+    volume: { name: `db-ca-${db}`, secret: { secretName: `${db}-ca`, items: [{ key: "ca.crt", path: "ca.crt" }] } },
+    volumeMount: { name: `db-ca-${db}`, mountPath: `${DB_CA_MOUNT_BASE}/${db}`, readOnly: true },
+    caCertPath: `${DB_CA_MOUNT_BASE}/${db}/ca.crt`,
+  };
+}
+
 // The cloud instance-metadata endpoint — same IP on AWS/GCP/Azure, so it's always
 // excluded from the egress allowlist regardless of cluster CIDRs.
 const IMDS_CIDR = "169.254.169.254/32";
@@ -251,8 +262,8 @@ function appBinding(app: AppConfig, name: string): AppBinding {
           ...(boundUses[0]!.via === "pooler" ? [{ name: "PGHOST", value: `${boundDbs[0]}-pooler-rw` }] : []),
         ]
       : [],
-    volumes: boundDbs.map((db) => ({ name: `db-ca-${db}`, secret: { secretName: `${db}-ca`, items: [{ key: "ca.crt", path: "ca.crt" }] } })),
-    volumeMounts: boundDbs.map((db) => ({ name: `db-ca-${db}`, mountPath: `${DB_CA_MOUNT_BASE}/${db}`, readOnly: true })),
+    volumes: boundDbs.map((db) => dbCaBinding(db).volume),
+    volumeMounts: boundDbs.map((db) => dbCaBinding(db).volumeMount),
   };
 }
 

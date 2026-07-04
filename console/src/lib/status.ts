@@ -25,6 +25,7 @@ export interface DeriveStatusInput {
   runtimeState?: "running" | "stopped" | null;
   appStatus?: AppStatus | null;
   cacheStatus?: AppStatus | null; // (I2) cache Deployment status
+  authStatus?: AppStatus | null; // (K1) auth-engine (GoTrue) Deployment status
   dbStatus?: DatabaseStatus | null;
 }
 
@@ -64,6 +65,12 @@ export function mirrorNormalizeStatus(input: Omit<DeriveStatusInput, "status">):
 
   if (input.type === "cache") {
     const st = input.cacheStatus;
+    if (!st) return { status: "progressing", reason: "status unavailable" };
+    return deploymentStatus(st);
+  }
+
+  if (input.type === "auth") {
+    const st = input.authStatus;
     if (!st) return { status: "progressing", reason: "status unavailable" };
     return deploymentStatus(st);
   }

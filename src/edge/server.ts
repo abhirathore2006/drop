@@ -11,6 +11,7 @@ import type { Collector } from "../metrics/collector.ts";
 import type { SiteConfig } from "../site-config.ts";
 import type { Visibility, WorkloadType } from "../metastore/types.ts";
 import { basicAuthOk, corsHeaders, headersForPath, matchRedirect, passwordHashOk } from "../site-config.ts";
+import { AuthRateLimiter, clientIpForRateLimit, isRateLimitedAuthPath, parseAuthHost } from "./auth-exempt.ts";
 
 export interface EdgeDeps {
   meta: MetaStore;
@@ -35,6 +36,9 @@ export interface EdgeDeps {
    *  resolved serving host (site or `site--label`); the entrypoint flushes it to `traffic_minutes`.
    *  Optional + gracefully absent (tests, or an instance with metrics off) — same posture as previews. */
   metrics?: Collector;
+  /** (K1) Per-IP rate limit for the sensitive auth POST paths on `type: auth` hosts (the visibility
+   *  exemption's abuse brake). Default 10 requests / 60s / IP; `limit: 0` disables the brake entirely. */
+  authRateLimit?: { limit: number; windowMs: number };
 }
 
 interface CacheEntry {
@@ -44,6 +48,11 @@ interface CacheEntry {
   visibility: Visibility;
   passwordHash: string | null;
   exp: number;
+  // (K1) For a resolved `auth--<name>` host that IS `type: auth`, the auth resource name (the part
+  // after the `auth--` prefix). Present only on genuine auth entries; the handler proxies to it and
+  // skips the platform gate. A non-auth `auth--` label (e.g. a preview of a site named "auth") never
+  // sets this and keeps its gates.
+  authName?: string;
 }
 
 interface Cached {
@@ -62,6 +71,8 @@ export function createEdge(d: EdgeDeps) {
   const maxObjectBytes = d.maxObjectBytes ?? 25 * 1024 * 1024;
   const disk = d.diskCacheDir ? new DiskCache(d.diskCacheDir, d.diskCacheBytes ?? 5 * 1024 * 1024 * 1024) : null;
   const interceptor = d.interceptorUrl ? new URL(d.interceptorUrl) : null;
+  // (K1) The auth-host abuse brake. `limit: 0` disables it; default 10/min/IP.
+  const authRl = (d.authRateLimit?.limit ?? 10) > 0 ? new AuthRateLimiter({ limit: d.authRateLimit?.limit ?? 10, windowMs: d.authRateLimit?.windowMs ?? 60_000, now }) : null;
 
   // Hop-by-hop headers (RFC 7230 §6.1) — never forwarded across a proxy hop.
   const HOP_BY_HOP = new Set(["host", "connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailer", "proxy-authorization", "proxy-authenticate"]);
@@ -70,9 +81,11 @@ export function createEdge(d: EdgeDeps) {
    *  routes by Host to the tenant's HTTPScaledObject and wakes the pod from zero.
    *  Uses node:http.request (NOT fetch — fetch forbids overriding the Host header,
    *  which KEDA routes on). Streams request + response bodies; generous cold-start timeout. */
-  function proxyToApp(c: Context, name: string): Promise<Response> {
+  function proxyToApp(c: Context, hostLabel: string): Promise<Response> {
     if (!interceptor) return Promise.resolve(new Response("app routing not configured", { status: 503 }));
-    const host = `${name}.${d.baseDomain}`; // the registered HTTPScaledObject host (NOT a raw pass-through)
+    // `hostLabel` is the FULL registered host label: `<app>` for an app, `auth--<name>` for an auth
+    // resource (K1). The engine's HTTPScaledObject registers exactly this host, so KEDA routes on it.
+    const host = `${hostLabel}.${d.baseDomain}`; // the registered HTTPScaledObject host (NOT a raw pass-through)
     const src = new URL(c.req.url);
     const headers: Record<string, string> = {};
     c.req.raw.headers.forEach((v, k) => {
@@ -128,6 +141,28 @@ export function createEdge(d: EdgeDeps) {
   async function current(name: string): Promise<CacheEntry> {
     const hit = cache.get(name);
     if (hit && now() < hit.exp) return hit;
+    // (K1) An `auth--<name>` host serves a managed auth resource IFF `<name>` resolves to a `type: auth`
+    // workload. Resolve that candidate first; only when it's genuinely `type: auth` do we mark the entry
+    // auth (the handler skips the platform gate, rate-limits, and proxies to the engine). When it ISN'T
+    // (e.g. a site literally named "auth" with a preview label), we fall through to ordinary/preview
+    // resolution so that host's gates hold — the carefully-scoped part of the exemption.
+    const authName = parseAuthHost(name);
+    if (authName) {
+      const ap = await d.meta.getPointer(authName);
+      if (ap?.type === "auth") {
+        const authEntry: CacheEntry = {
+          type: "auth",
+          version: ap.currentVersion ?? null,
+          config: ap.config,
+          visibility: ap.visibility ?? "public",
+          passwordHash: ap.passwordHash ?? null,
+          authName,
+          exp: now() + ttl,
+        };
+        cache.set(name, authEntry);
+        return authEntry;
+      }
+    }
     const preview = parsePreviewHost(name);
     const ptr = await d.meta.getPointer(preview ? preview.site : name);
     let type = ptr?.type ?? "site";
@@ -240,6 +275,27 @@ export function createEdge(d: EdgeDeps) {
 
     const { type, version, config: cfg, visibility, passwordHash } = await current(rawLabel);
     const config = cfg ?? {};
+    // (K1) type=auth: THE visibility exemption (src/edge/auth-exempt.ts). Login IS the auth, so the
+    // platform session/visibility gate is SKIPPED entirely — but the sensitive POST paths get a per-IP
+    // token-bucket rate limit before we proxy to the engine (like an app). 429 + Retry-After when the
+    // bucket is empty. `authName` is set only when the resolved workload is genuinely type:auth, so no
+    // other `--` host reaches this branch (previews keep their gates).
+    if (type === "auth") {
+      if (!version) return notFound("auth resource not provisioned");
+      const urlPath = "/" + posix.normalize("/" + c.req.path).replace(/^\/+/, "");
+      if (authRl && isRateLimitedAuthPath(c.req.method, urlPath)) {
+        const ip = clientIpForRateLimit({ xff: c.req.header("x-forwarded-for"), xRealIp: c.req.header("x-real-ip") });
+        const rl = authRl.take(ip);
+        if (!rl.ok) {
+          return new Response("rate limited", {
+            status: 429,
+            headers: { "retry-after": String(rl.retryAfterS), "content-type": "text/plain; charset=utf-8" },
+          });
+        }
+      }
+      // Proxy to the engine's registered host (`auth--<name>` == rawLabel here).
+      return proxyToApp(c, rawLabel);
+    }
     // type=app: reverse-proxy to the interceptor (KEDA wakes + routes by Host). Apps
     // don't use the static-site machinery below (S3 bytes, redirects, SPA fallback).
     if (type === "app") {

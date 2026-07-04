@@ -1,7 +1,7 @@
 import type { WorkloadType } from "../lib/api.ts";
 import { deriveStatus, phaseKind, pillClass, type DeriveStatusInput, type NormalizedStatus } from "../lib/status.ts";
 
-const TYPE_LABEL: Record<WorkloadType, string> = { site: "SITE", app: "APP", database: "DB", bucket: "BUCKET", cache: "CACHE" };
+const TYPE_LABEL: Record<WorkloadType, string> = { site: "SITE", app: "APP", database: "DB", bucket: "BUCKET", cache: "CACHE", auth: "AUTH" };
 
 export function TypeBadge({ t }: { t: WorkloadType }) {
   return <span className={`badge badge-${t}`}>{TYPE_LABEL[t]}</span>;

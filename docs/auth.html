@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auth (per-app users) · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="buckets.html">Buckets (object storage)</a>
+      <a href="cache.html">Cache (managed Valkey)</a>
+      <a href="auth.html" class="active">Auth (per-app users)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <a href="observability.html">Observability</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>Auth — per-app end-user pools</h1>
+<p class="lead">A <strong>managed auth resource</strong> gives one of your apps its own pool of <em>end users</em> — sign-up, sign-in, OAuth providers, and JWT-based sessions — running as a <a href="https://github.com/supabase/gotrue">GoTrue</a> engine in your tenant namespace with the users stored as rows in your own Postgres. It is a workload type, like a database or a cache: you <code>drop auth create</code> it, bind it to an app, and Drop owns its lifecycle and wiring — never the auth engine's internals (password hashing, session rotation, token issuance — the most dangerous code one can write, which Drop writes none of).</p>
+
+<div class="note"><span class="lbl">Drop's platform login is NEVER shared with your apps</span><p>The login you use for the Drop console/CLI authenticates <em>operators</em>. A managed auth resource authenticates <em>your app's end users</em> — an entirely separate pool with its own methods and its own JWTs. The two never mix, by design.</p></div>
+
+<h2 id="matrix">What works in v1 (and what's deferred)</h2>
+<p>Everything that needs to send an email is deferred to a named future task (<strong>“K-mail”</strong>: an org SMTP relay + the email-dependent flows). The <code>drop.yaml</code> schema already reserves the <code>smtp:</code>/<code>email:</code> keys, so K-mail is purely additive — a config written today lights up when it ships.</p>
+<table class="tbl">
+<thead><tr><th>Flow</th><th>v1</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Email + password sign-up / sign-in</td><td>✅ works</td><td>Verification is <strong>off</strong> — a new user is usable immediately (<code>GOTRUE_MAILER_AUTOCONFIRM=true</code>).</td></tr>
+<tr><td>Admin-created users (temp password)</td><td>✅ works</td><td>The no-SMTP onboarding path — create a user, hand them a one-time password.</td></tr>
+<tr><td>OAuth providers (Google / GitHub / OIDC)</td><td>✅ works</td><td>Per-app client id + secret; redirect back to your app.</td></tr>
+<tr><td>JWT sessions + refresh</td><td>✅ works</td><td>HS256 (see below); short-lived access tokens (1h default).</td></tr>
+<tr><td>Magic links</td><td>⏳ deferred (K-mail)</td><td>Needs outbound email.</td></tr>
+<tr><td>Password reset / forgot-password</td><td>⏳ deferred (K-mail)</td><td>Needs outbound email.</td></tr>
+<tr><td>Email verification / invite emails</td><td>⏳ deferred (K-mail)</td><td>Needs outbound email.</td></tr>
+</tbody>
+</table>
+
+<h2 id="engine">The engine (pinned)</h2>
+<p>The default engine is <strong>GoTrue</strong> (MIT), pinned to a concrete image tag — <code>docker.io/supabase/gotrue:v2.170.0</code> — never a moving <code>:v2</code> or <code>:latest</code>, so a tenant's login surface can't shift under a silent upstream push. Bump it deliberately, tracking GoTrue's CVE advisories; the Helm value <code>auth.engineImage</code> (env <code>DROP_AUTH_ENGINE_IMAGE</code>) overrides it and is where you point an air-gap mirror. GoTrue sits behind an <code>AuthEngine</code> port (image + env-mapping + admin-route abstraction), so a future swap to another engine is a new adapter, not a redesign.</p>
+
+<h2 id="create">Create an auth resource</h2>
+<p>An auth resource <strong>requires a same-org database</strong> — its engine schema and your users' rows live there. Bind an existing one with <code>--db</code>, or create one first with <code>--with-db</code> (CLI-side sugar: it runs <code>drop db create &lt;name&gt;-db</code>, then binds).</p>
+<pre><code>drop db create appdb
+drop auth create login --db appdb
+<span class="tok-c">#   ✓ auth ready — engine gotrue, JWT HS256, signup open</span>
+<span class="tok-c">#      login/API base: https://auth--login.&lt;baseDomain&gt;</span></code></pre>
+<pre><code>drop auth create login --with-db            <span class="tok-c"># create login-db first, then bind</span>
+drop auth create login --db appdb --signup closed   <span class="tok-c"># admin-created users only</span></code></pre>
+<p>You can also declare an <code>auth:</code> section in <code>drop.yaml</code>: <code>{ providers, redirect_urls, jwt_ttl, signup }</code>. The engine is reachable at <code>auth--&lt;name&gt;.&lt;baseDomain&gt;</code> — the <code>--</code> reserved-prefix convention (a real resource name can never contain <code>--</code>, so the host is unambiguous). GoTrue's REST API <em>is</em> the auth API — <code>/token</code>, <code>/signup</code>, <code>/user</code>, <code>/admin/users</code>, the OAuth <code>/authorize</code> flow — curl-able from day one.</p>
+
+<h2 id="jwt">JWT signing — HS256, and the JWKS consequence</h2>
+<div class="note warn"><span class="lbl">v1 ships HS256 (symmetric), not asymmetric keys — an honest deviation</span><p>The plan preferred asymmetric per-resource keys with a public JWKS URL. <strong>OSS GoTrue does not support that</strong>: it signs and verifies with a single shared <code>GOTRUE_JWT_SECRET</code> and serves <strong>no</strong> <code>/.well-known/jwks.json</code> (that is a Supabase-platform feature, not in the OSS image). Rather than fork the engine, v1 ships HS256 honestly. The consequence: a binding app verifies tokens with the <strong>shared secret</strong> (<code>AUTH_JWT_SECRET</code>, injected via the write-only path) — not a public key. When a future engine adds asymmetric signing, the <code>AuthEngine</code> port grows a JWKS surface without changing the resource model.</p></div>
+<p>The signing secret is a 256-bit value generated at create into a <strong>write-only</strong> <code>&lt;name&gt;-auth-keys</code> Secret. It is <strong>never</strong> returned to any client, never in a manifest, never in the console. Each resource has its own secret, so a token minted by resource A is cryptographically rejected by resource B (an isolation guarantee the test suite asserts).</p>
+
+<h3 id="rotate">Rotating keys (with a grace window)</h3>
+<pre><code>drop auth rotate-keys login</code></pre>
+<p>Rotation re-mints the secret and re-applies the engine. GoTrue itself verifies only the <em>current</em> secret, so the grace window is realized <strong>for your bound apps</strong>: Drop re-injects the new secret <em>and</em> the previous one — <code>AUTH_JWT_SECRET</code> plus <code>AUTH_JWT_SECRET_PREVIOUS</code> — and restarts each consumer, so tokens signed just before the rotation still verify until the next rotate/redeploy overwrites the previous value. Keep access-token TTLs short (1h default) so a disabled user loses access quickly.</p>
+
+<h2 id="bind">Bind an auth resource to an app</h2>
+<pre><code><span class="tok-k">app:</span>
+  <span class="tok-k">image:</span> my-org/web:1
+  <span class="tok-k">uses:</span>
+    - <span class="tok-k">auth:</span> login       <span class="tok-c"># an auth resource in the SAME org</span></code></pre>
+<p>On deploy, Drop resolves the resource (same-org — a cross-org bind is a <code>400</code>), reads back its signing secret, and writes into the app's <strong>write-only secret</strong>:</p>
+<table class="tbl">
+<thead><tr><th>Variable</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td><code>AUTH_URL</code></td><td><code>https://auth--&lt;name&gt;.&lt;baseDomain&gt;</code> — the engine's base URL your app calls / redirects to.</td></tr>
+<tr><td><code>AUTH_JWT_SECRET</code></td><td>The shared HS256 secret your app verifies incoming tokens with (write-only path — never in a manifest).</td></tr>
+<tr><td><code>AUTH_JWT_SECRET_PREVIOUS</code></td><td>Present only after a key rotation, for the grace window (see above).</td></tr>
+</tbody>
+</table>
+<div class="note"><span class="lbl">No anon / service-role API keys — a deviation from the Supabase split</span><p>Supabase clients expect a publishable “anon” key and a secret “service_role” key. <strong>OSS GoTrue has no such keys</strong> — its API is key-less and authorized purely by the JWT you present. So v1 injects <code>AUTH_URL</code> + <code>AUTH_JWT_SECRET</code> and stops there; there is no <code>AUTH_PUBLISHABLE_KEY</code>/<code>AUTH_SECRET_KEY</code> pair. Server-side, Drop mints a short-lived <em>service-role</em> JWT (signed with the resource secret) only to proxy the admin API — it never leaves the control plane.</p></div>
+<div class="note"><span class="lbl">Multiple auth resources</span><p>Bind more than one and each variable is prefixed with the resource key so they don't collide — e.g. <code>LOGIN_AUTH_URL</code>. A single binding is unprefixed. Inside a <a href="stacks.html">stack</a>, an <code>auth</code> resource declares its <code>db:</code> and apps reference it with <code>uses: [{ auth: &lt;key&gt; }]</code>.</p></div>
+
+<h2 id="providers">OAuth providers</h2>
+<p>Declare each provider's <strong>own</strong> client id under <code>auth.providers</code> (client ids are not secret — they live in the spec). The client <strong>secret</strong> is written out-of-band, never to the spec:</p>
+<pre><code><span class="tok-k">auth:</span>
+  <span class="tok-k">providers:</span>
+    <span class="tok-k">google:</span> { client_id: <span class="tok-s">"…apps.googleusercontent.com"</span> }
+    <span class="tok-k">oidc:</span>   { client_id: <span class="tok-s">"my-app"</span>, issuer: <span class="tok-s">"https://idp.example.com"</span> }
+  <span class="tok-k">redirect_urls:</span> [ <span class="tok-s">"https://myapp.&lt;baseDomain&gt;/auth/callback"</span> ]</code></pre>
+<pre><code>drop secrets set login GOTRUE_EXTERNAL_GOOGLE_SECRET=…    <span class="tok-c"># the provider secret → the engine's write-only Secret</span></code></pre>
+<table class="tbl">
+<thead><tr><th>Provider</th><th>Secret env key (via <code>drop secrets set</code>)</th></tr></thead>
+<tbody>
+<tr><td><code>google</code></td><td><code>GOTRUE_EXTERNAL_GOOGLE_SECRET</code></td></tr>
+<tr><td><code>github</code></td><td><code>GOTRUE_EXTERNAL_GITHUB_SECRET</code></td></tr>
+<tr><td><code>oidc</code> (generic)</td><td><code>GOTRUE_EXTERNAL_KEYCLOAK_SECRET</code></td></tr>
+</tbody>
+</table>
+<p>Redirect topology is <strong>per-app</strong> callbacks (<code>https://&lt;app&gt;.&lt;base&gt;/auth/callback</code>) — there is deliberately no centralized broker (a shared broker drifts back toward shared platform auth). The generic <code>oidc</code> kind maps to GoTrue's Keycloak provider, which accepts an arbitrary issuer.</p>
+
+<h2 id="users">Admin the users (the no-SMTP onboarding path)</h2>
+<p>Because verification emails are deferred, the primary onboarding path is admin-created users. This is <code>configure</code>-gated (owner/admin) and audited (<code>auth.user.create</code> / <code>auth.user.disable</code> / <code>auth.user.delete</code>). The control plane mints a short-TTL service-role token and proxies GoTrue's admin API server-side — the token never leaves the server.</p>
+<pre><code>drop auth users create login alice@example.com    <span class="tok-c"># prints a temp password ONCE</span>
+drop auth users ls login
+drop auth users rm login &lt;user-id&gt;</code></pre>
+<p>The console's <strong>Auth</strong> detail page shows providers, signup state, key age, and the same user admin (list / search / create-with-temp-password / disable / delete) with the created password shown once. <strong>MCP exposes <code>auth_create</code> and <code>auth_status</code> only</strong> — there is deliberately no end-user CRUD via agents in v1.</p>
+
+<h2 id="edge-adr">ADR: the edge visibility exemption</h2>
+<div class="note warn"><span class="lbl">The single most security-sensitive change in the visibility model — reviewed as an ADR</span></div>
+<p><strong>Context.</strong> Every other served workload passes the edge's platform visibility/session gate. An auth host cannot: the whole point of <code>auth--&lt;name&gt;</code> is that unauthenticated users reach <code>/token</code> and <code>/signup</code> to <em>obtain</em> a session — <strong>login IS the auth</strong>. A session gate in front of the login endpoint is a chicken-and-egg lockout.</p>
+<p><strong>Decision.</strong> The edge special-cases hosts of the form <code>auth--&lt;name&gt;</code> whose resolved workload is genuinely <code>type: auth</code>: it <strong>skips</strong> the platform visibility gate and proxies to the engine like an app. In exchange it applies a <strong>per-IP token-bucket rate limit</strong> to the sensitive POST paths (<code>/token</code>, <code>/signup</code>, <code>/verify</code>, <code>/recover</code>; default 10/min/IP, config-capped) before proxying, returning <code>429</code> with <code>Retry-After</code> when a client exceeds it — so the exemption can't be abused as an unthrottled credential-stuffing or account-enumeration endpoint.</p>
+<p><strong>Scope (the carefully-reviewed part).</strong> The exemption is granted <strong>only</strong> when the resolved workload is <code>type: auth</code>. A site literally named <code>auth</code> with a preview label also matches the <code>auth--</code> prefix, but is not an auth resource — it, and every other <code>--</code> preview host, <strong>keeps its gates</strong>. The check is on the resolved type, not the string prefix; both cases are covered by tests (an auth host is exempt; a preview <code>--</code> host of a private site still returns <code>403</code>).</p>
+<p><strong>Consequences.</strong> The rate limiter is in-process per edge replica (matching the metrics collector's posture): a multi-replica edge multiplies the effective limit by replica count — acceptable for a v1 abuse brake, not a billing meter. This exemption is the one hole in the default-closed visibility model and is called out here so it is never re-derived silently.</p>
+
+<h2 id="internals">How it runs, status &amp; deletion</h2>
+<p>The engine is a GoTrue <code>Deployment</code> pinned to <strong>1/1</strong> (auth can't cold-start on a login — a scaled-to-zero engine would drop the first sign-in), a <code>ClusterIP</code> <code>Service</code> on <code>9999</code>, and an <code>HTTPScaledObject</code> registering <code>auth--&lt;name&gt;</code> with the interceptor (<code>min:1</code> keeps it warm). It connects to the bound database over the reused <a href="configuration.html#compute-config">B1 binding mechanics</a> — the CNPG <code>&lt;db&gt;-app</code> creds Secret + the cluster CA mounted read-only + <code>sslmode=verify-full</code>. The detail page / <code>drop auth config</code> / MCP <code>auth_status</code> surface providers, signup, key age and live status — never key material. Deleting the resource tears down the engine and its keys Secret; <strong>the users stay in the bound database</strong> (deleting an auth resource never drops your user rows).</p>
+
+<div class="note"><span class="lbl">Security-critical dependency</span><p>Drop becomes a security-critical dependency for every app that uses this: key rotation, engine CVE tracking (the pin above + advisory watch), and short token TTLs so a disabled user loses access quickly. The engine image is pinned and mirror-able for exactly this reason.</p></div>
+
+<div class="next">
+  <a href="cache.html"><div class="d">← Back</div><div class="t">Cache (managed Valkey)</div></a>
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+</article></main>
+</div>
+</body>
+</html>

@@ -131,6 +131,22 @@ test("sanitizeAppConfig parses uses:[{cache}] (I2) + via:pooler (I3) on a db use
   expect(twice.uses).toEqual([{ database: "maindb", via: "pooler" }, { cache: "sessions" }, { database: "other" }]);
 });
 
+test("sanitizeAppConfig parses uses:[{auth}] (K1) alongside other kinds; dedupes; round-trips", () => {
+  const c = sanitizeAppConfig({
+    image: "x:1",
+    uses: [
+      { database: "maindb" },
+      { auth: "login" },
+      { auth: "login" }, // duplicate auth → collapsed
+      { auth: "Bad_Name" }, // fails validateName → dropped
+      { auth: 9 }, // non-string → dropped
+    ],
+  })!;
+  expect(c.uses).toEqual([{ database: "maindb" }, { auth: "login" }]);
+  const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(c)))!;
+  expect(twice.uses).toEqual([{ database: "maindb" }, { auth: "login" }]);
+});
+
 test("sanitizeAppConfig uses is round-trip safe (CLI sanitizes -> JSON -> API re-sanitizes)", () => {
   const once = sanitizeAppConfig({ image: "x:1", uses: [{ database: "tododb" }] })!;
   const twice = sanitizeAppConfig(JSON.parse(JSON.stringify(once)))!; // feed the sanitized object back in

@@ -28,7 +28,7 @@ async function tgz(files: Record<string, string>): Promise<Buffer> {
   return await buffer(p.pipe(createGzip()));
 }
 
-async function mk(opts: { admins?: string[]; env?: Record<string, string> } = {}) {
+async function mk(opts: { admins?: string[]; env?: Record<string, string>; authEngine?: any; authAdmin?: any } = {}) {
   const db = await makeTestDb();
   const users = new UserStore(db);
   if (opts.admins) await users.seedAdmins(opts.admins);
@@ -58,7 +58,7 @@ async function mk(opts: { admins?: string[]; env?: Record<string, string> } = {}
   const locks = new LockStore(db);
   const bucket = new FakeBucketStore();
   const quotas = new QuotaStore(db);
-  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens }), meta, blob, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens, db, users };
+  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens, authEngine: opts.authEngine, authAdmin: opts.authAdmin }), meta, blob, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens, db, users };
 }
 
 const pub = (app: any, tok: string, name: string, body: Buffer) =>
@@ -1404,7 +1404,7 @@ test("usage: workload counts + cap + cluster quota for an org", async () => {
   await call(app, "POST", "/v1/databases/pg1", "alice", {}); // database
   const slug = await personalSlug(app, "alice");
   const u = await (await call(app, "GET", `/v1/orgs/${slug}/usage`, "alice")).json();
-  expect(u.workloads).toEqual({ site: 1, app: 1, database: 1, bucket: 0, cache: 0, total: 3 });
+  expect(u.workloads).toEqual({ site: 1, app: 1, database: 1, bucket: 0, cache: 0, auth: 0, total: 3 });
   expect(u.cap).toBe(0); // unlimited by default
   expect(u.quota.hard["count/pods"]).toBe("20"); // FakeKube default quota
   await db.destroy();
@@ -2113,6 +2113,141 @@ test("storage budget: a PERSISTENT cache counts toward the budget (ephemeral doe
   const usage = await (await call(app, "GET", "/v1/orgs/team/usage", "alice")).json();
   expect(usage.workloads.cache).toBe(1); // only the ephemeral one claimed
   expect(usage.storage.caches).toEqual({ count: 0, bytes: 0 }); // ephemeral → 0 persistent PVCs
+  await db.destroy();
+});
+
+// ---- (K1) managed auth resource (GoTrue) ------------------------------------------------------
+test("auth create REQUIRES a same-org database: 400 without db, 400 cross-org, 200 with a same-org db", async () => {
+  const { app, kube, meta, audit, db } = await mk();
+  // no db → 400
+  const noDb = await call(app, "POST", "/v1/auths/shop", "alice", {});
+  expect(noDb.status).toBe(400);
+  expect((await noDb.json()).error).toMatch(/requires a database/);
+  // a db owned by BOB (a different org) → cross-org 400 (name is never claimed on this failure)
+  await call(app, "POST", "/v1/databases/bobdb", "bob", {});
+  const crossOrg = await call(app, "POST", "/v1/auths/shop", "alice", { db: "bobdb" });
+  expect(crossOrg.status).toBe(400);
+  expect((await crossOrg.json()).error).toMatch(/different organisation/);
+  expect(await meta.getSitePlain("shop")).toBeNull(); // not claimed on the rejected create
+
+  // a same-org db → 200, engine applied, keys Secret minted, audited
+  await call(app, "POST", "/v1/databases/appdb", "alice", {});
+  const ok = await call(app, "POST", "/v1/auths/shop", "alice", { db: "appdb", signup: "closed" });
+  expect(ok.status).toBe(200);
+  const created = await ok.json();
+  expect(created.db).toBe("appdb");
+  expect(created.jwtAlg).toBe("HS256");
+  expect(created.url).toBe("https://auth--shop.drop.example.com");
+  const applied = kube.authApplies.find((a) => a.name === "shop")!.manifests;
+  expect((applied.httpScaledObject as any).spec.replicas).toEqual({ min: 1, max: 1 }); // 1/1
+  expect((applied.keysSecret as any).stringData["jwt-secret"]).toBeTruthy();
+  const trail = await audit.list({ action: "auth.create" });
+  expect(trail.entries.map((e: any) => e.target)).toContain("shop");
+  await db.destroy();
+});
+
+test("auth detail carries the config surface + key age but NEVER key material", async () => {
+  const { app, kube, meta, db } = await mk();
+  await call(app, "POST", "/v1/databases/appdb", "alice", {});
+  await call(app, "POST", "/v1/auths/shop", "alice", { db: "appdb", providers: { google: { client_id: "g-1" } } });
+  const ns = (await meta.getSitePlain("shop"))!.namespace;
+  const secret = await kube.readAuthJwtSecret(ns, "shop");
+  expect(secret).toBeTruthy();
+
+  const detail = await (await call(app, "GET", "/v1/sites/shop", "alice")).json();
+  expect(detail.type).toBe("auth");
+  expect(detail.auth.db).toBe("appdb");
+  expect(detail.auth.providers).toEqual(["google"]);
+  expect(detail.auth.signup).toBe("open");
+  expect(detail.auth.jwtAlg).toBe("HS256");
+  expect(detail.auth.keyMintedAt).toBeTruthy(); // key AGE is surfaced…
+  expect(detail.status.status).toBe("running");
+  expect(JSON.stringify(detail)).not.toContain(secret); // …but the key MATERIAL never is
+  await db.destroy();
+});
+
+test("rotate-keys re-mints the JWT secret and is audited", async () => {
+  const { app, kube, meta, audit, db } = await mk();
+  await call(app, "POST", "/v1/databases/appdb", "alice", {});
+  await call(app, "POST", "/v1/auths/shop", "alice", { db: "appdb" });
+  const ns = (await meta.getSitePlain("shop"))!.namespace;
+  const before = await kube.readAuthJwtSecret(ns, "shop");
+  const res = await call(app, "POST", "/v1/auths/shop/rotate-keys", "alice");
+  expect(res.status).toBe(200);
+  const after = await kube.readAuthJwtSecret(ns, "shop");
+  expect(after).toBeTruthy();
+  expect(after).not.toBe(before); // re-minted
+  const trail = await audit.list({ action: "auth.rotate-keys" });
+  expect(trail.entries.map((e: any) => e.target)).toContain("shop");
+  await db.destroy();
+});
+
+test("uses:[{auth}] binding injects AUTH_URL + AUTH_JWT_SECRET into the app's write-only secret (never a manifest)", async () => {
+  const { app, kube, meta, secrets, db } = await mk();
+  await call(app, "POST", "/v1/databases/appdb", "alice", {});
+  await call(app, "POST", "/v1/auths/shop", "alice", { db: "appdb" });
+  const ns = (await meta.getSitePlain("shop"))!.namespace;
+  const secret = (await kube.readAuthJwtSecret(ns, "shop"))!;
+
+  const deploy = await call(app, "POST", "/v1/apps/web", "alice", { image: "x:1", uses: [{ auth: "shop" }] });
+  expect(deploy.status).toBe(200);
+  const bag = [...secrets.values.values()].find((m) => m.has("AUTH_JWT_SECRET"))!;
+  expect(bag).toBeTruthy();
+  expect(bag.get("AUTH_URL")).toBe("https://auth--shop.drop.example.com");
+  expect(bag.get("AUTH_JWT_SECRET")).toBe(secret); // the shared HS256 secret (write-only path)
+  // the secret never leaked into the app Deployment's manifest
+  const applied = kube.applies.find((a) => a.name === "web")!.manifests;
+  expect(JSON.stringify(applied)).not.toContain(secret);
+  await db.destroy();
+});
+
+test("uses:[{auth}] referencing a missing auth → 400; a cross-org auth → 400", async () => {
+  const { app, db } = await mk();
+  const missing = await call(app, "POST", "/v1/apps/a1", "alice", { image: "x:1", uses: [{ auth: "ghostauth" }] });
+  expect(missing.status).toBe(400);
+  expect((await missing.json()).error).toContain("ghostauth");
+
+  await call(app, "POST", "/v1/databases/adb", "alice", {});
+  await call(app, "POST", "/v1/auths/aliceauth", "alice", { db: "adb" });
+  const crossOrg = await call(app, "POST", "/v1/apps/bobapp", "bob", { image: "x:1", uses: [{ auth: "aliceauth" }] });
+  expect(crossOrg.status).toBe(400);
+  expect((await crossOrg.json()).error).toContain("different organisation");
+  await db.destroy();
+});
+
+test("user-admin proxy is configure-gated + audited (via a FakeEngine transport); MCP has no user CRUD", async () => {
+  const { FakeEngine } = await import("../auth-resource/engine.ts");
+  const calls: any[] = [];
+  const authAdmin = async (r: any) => {
+    calls.push(r);
+    if (r.method === "GET") return { status: 200, json: { users: [{ id: "u1", email: "u1@x.com" }] } };
+    if (r.method === "POST") return { status: 200, json: { id: "u2", email: r.body.email } };
+    if (r.method === "DELETE") return { status: 200, json: { deleted: true } };
+    return { status: 200, json: {} };
+  };
+  const { app, db } = await mk({ authEngine: new FakeEngine(), authAdmin });
+  await call(app, "POST", "/v1/databases/appdb", "alice", {});
+  await call(app, "POST", "/v1/auths/shop", "alice", { db: "appdb" });
+
+  // list — proxied, owner-gated
+  const list = await call(app, "GET", "/v1/auths/shop/users", "alice");
+  expect(list.status).toBe(200);
+  expect((await list.json()).users[0].id).toBe("u1");
+  expect(calls.some((c) => c.method === "GET" && c.token && c.path === "/admin/users")).toBe(true);
+  // the admin token was minted server-side + sent as a Bearer (never leaves the server otherwise)
+  expect(calls.find((c) => c.method === "GET").token).toBeTruthy();
+
+  // create-with-temp-password — RevealOnce temp password echoed once + audited
+  const create = await call(app, "POST", "/v1/auths/shop/users", "alice", { email: "new@x.com" });
+  expect(create.status).toBe(200);
+  const cj = await create.json();
+  expect(cj.tempPassword).toBeTruthy(); // generated + returned once
+  expect(calls.find((c) => c.method === "POST").body.email_confirm).toBe(true); // pre-confirmed (no SMTP)
+
+  // a NON-owner (bob) is forbidden — configure-gated
+  expect((await call(app, "GET", "/v1/auths/shop/users", "bob")).status).toBe(403);
+  expect((await call(app, "POST", "/v1/auths/shop/users", "bob", { email: "x@x.com" })).status).toBe(403);
+
   await db.destroy();
 });
 

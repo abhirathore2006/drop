@@ -10,7 +10,7 @@ import { Client } from "./client.ts";
 import { runDbProxy } from "./db-proxy.ts";
 import { packDir } from "./pack.ts";
 import { devLoginToken, serverLogin } from "./login.ts";
-import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate } from "./resolve-name.ts";
+import { resolveSiteName, loadAppDeploy, loadDatabaseCreate, loadCacheCreate, loadAuthCreate } from "./resolve-name.ts";
 import { buildAndPushImage } from "./build-push.ts";
 import { runStackUp } from "./stack.ts";
 import { runDetect, serializeDetectedStack, writeDetectedStack } from "./detect.ts";
@@ -661,6 +661,73 @@ export function buildProgram(): Command {
     .command("rm <name>")
     .description("Delete a cache (tears down the Valkey + its data — there is no cache backup)")
     .action(async (name: string) => show(await (await client()).remove(name)));
+
+  // ---- managed auth resource (GoTrue, K1) ----
+  const auth = program.command("auth").description("Manage per-app managed auth resources (GoTrue — create / ls / config / rotate-keys / users)");
+  auth
+    .command("create <name> [dir]")
+    .description("Create a per-app auth resource. Requires a same-org database (--db <existing> or --with-db to create one). Reads auth: from dir/drop.yaml if present.")
+    .option("--org <slug>", "create in this organisation (default: your personal org)")
+    .option("--db <name>", "bind to this EXISTING same-org database (its users + engine schema live there)")
+    .option("--with-db", "create a fresh database (<name>-db) first, then bind to it (CLI-side composition)")
+    .option("--signup <mode>", "open | closed (default: open)")
+    .action(async (name: string, dir: string | undefined, opts: { org?: string; db?: string; withDb?: boolean; signup?: string }) => {
+      const err = validateName(name);
+      if (err) throw new Error(err);
+      const cfg = (await loadAuthCreate(dir ?? ".")) as Record<string, unknown>;
+      if (opts.signup) cfg.signup = opts.signup;
+      const cl = await client();
+      let db = opts.db;
+      if (opts.withDb) {
+        // `--with-db` sugar: create the backing database first (CLI-side composition), then bind auth to it.
+        db = `${name}-db`;
+        const dbErr = validateName(db);
+        if (dbErr) throw new Error(`--with-db would create "${db}", which is invalid: ${dbErr}`);
+        console.log(`  ▸ creating database ${db} for auth ${name}…`);
+        await cl.dbCreate(db, {}, opts.org);
+      }
+      if (!db) throw new Error("an auth resource needs a database — pass --db <existing> or --with-db");
+      cfg.db = db;
+      console.log(`  ▸ creating auth resource ${name} (db: ${db})…`);
+      const res = (await cl.authCreate(name, cfg, opts.org)) as { url: string; signup: string; jwtAlg: string; engine: string };
+      console.log(`  ✓ auth ready — engine ${res.engine}, JWT ${res.jwtAlg}, signup ${res.signup}`);
+      console.log(`     login/API base: ${res.url}`);
+      console.log(`  ℹ set provider secrets with:  drop secrets set ${name} GOTRUE_EXTERNAL_GOOGLE_SECRET=…`);
+      console.log(`  ℹ bind an app with  uses: [{ auth: ${name} }]  to inject AUTH_URL + AUTH_JWT_SECRET`);
+    });
+  auth
+    .command("ls")
+    .description("List your auth resources")
+    .option("--org <slug>", "show only auth resources in this organisation")
+    .action(async (opts: { org?: string }) => show(await (await client()).authList(opts.org)));
+  auth
+    .command("config <name>")
+    .description("Show an auth resource's config surface (providers, signup, redirects, key age) — never key material")
+    .action(async (name: string) => {
+      const info = (await (await client()).authConfig(name)) as { auth?: unknown };
+      show(info.auth ?? { error: "not an auth resource or unavailable" });
+    });
+  auth
+    .command("rotate-keys <name>")
+    .description("Re-mint the auth resource's JWT signing secret (owner only; bound apps get the previous secret too for a grace window)")
+    .action(async (name: string) => show(await (await client()).authRotateKeys(name)));
+  const authUsers = auth.command("users").description("Admin the auth resource's end users (owner/admin; audited)");
+  authUsers
+    .command("ls <name>")
+    .description("List the auth resource's end users")
+    .action(async (name: string) => show(await (await client()).authUsersList(name)));
+  authUsers
+    .command("create <name> <email> [password]")
+    .description("Create an end user with a temp password (the no-SMTP onboarding path; password printed once)")
+    .action(async (name: string, email: string, password: string | undefined) => {
+      const res = (await (await client()).authUserCreate(name, email, password)) as { tempPassword?: string };
+      show(res);
+      if (res.tempPassword) console.log(`  ✓ temp password (shown once): ${res.tempPassword}`);
+    });
+  authUsers
+    .command("rm <name> <id>")
+    .description("Delete an end user by id")
+    .action(async (name: string, id: string) => show(await (await client()).authUserRemove(name, id)));
 
   // ---- buckets (tenant object storage, I1) ----
   const bucket = program.command("bucket").description("Manage object-storage buckets (create / ls / rotate / rm)");

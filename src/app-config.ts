@@ -21,6 +21,7 @@ export interface AppUse {
   database?: string; // a managed database in the SAME org; deploy wires envFrom <db>-app + CA + verify-full
   bucket?: string; // (I1) a tenant bucket in the SAME org; deploy injects S3_* creds via the write-only secret path
   cache?: string; // (I2) a managed cache (Valkey) in the SAME org; deploy injects REDIS_URL via the write-only secret path
+  auth?: string; // (K1) a managed auth resource in the SAME org; deploy injects AUTH_URL + AUTH_JWT_SECRET (write-only path)
   via?: "pooler"; // (I3) database bindings ONLY: route the injected PGHOST at the CNPG Pooler service (needs the DB's pooler enabled)
 }
 // Readiness + liveness probes on the web container. All fields are RESOLVED seconds (the sanitizer
@@ -234,6 +235,7 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
       const database = str(u?.database, 63);
       const bucket = str(u?.bucket, 63);
       const cache = str(u?.cache, 63);
+      const auth = str(u?.auth, 63);
       if (database) {
         if (validateName(database) !== null || seen.has(`d:${database}`)) continue;
         seen.add(`d:${database}`);
@@ -248,6 +250,11 @@ export function sanitizeAppConfig(input: unknown): AppConfig | undefined {
         if (validateName(cache) !== null || seen.has(`c:${cache}`)) continue;
         seen.add(`c:${cache}`);
         uses.push({ cache });
+      } else if (auth) {
+        // (K1) an app→auth binding: deploy injects AUTH_URL + AUTH_JWT_SECRET (write-only) for the resource.
+        if (validateName(auth) !== null || seen.has(`a:${auth}`)) continue;
+        seen.add(`a:${auth}`);
+        uses.push({ auth });
       }
     }
     if (uses.length) cfg.uses = uses;

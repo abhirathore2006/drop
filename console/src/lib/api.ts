@@ -2,7 +2,7 @@
 // Errors are thrown as ApiError so callers (and the query layer's 401 interceptor) can
 // branch on status.
 
-export type WorkloadType = "site" | "app" | "database" | "bucket" | "cache";
+export type WorkloadType = "site" | "app" | "database" | "bucket" | "cache" | "auth";
 
 /** The permission verbs (M2) — mirrors src/authz/permissions.ts ACTIONS. `capabilities` on a list item
  *  or detail response is the resolved subset the CURRENT actor holds on that resource; the console gates
@@ -51,7 +51,7 @@ export interface AdminOrg {
 
 export interface OrgUsage {
   org: { slug: string; name: string; kind: string };
-  workloads: { site: number; app: number; database: number; bucket: number; cache: number; total: number };
+  workloads: { site: number; app: number; database: number; bucket: number; cache: number; auth: number; total: number };
   cap: number; // 0 = unlimited
   quota: { hard: Record<string, string>; used: Record<string, string> } | null;
   storage?: {
@@ -143,6 +143,26 @@ export interface CacheInfo {
   memory: string;
   persistent: boolean;
   status: AppStatus | null;
+}
+/** (K1) A managed auth resource's config surface + live status. NEVER carries key material. */
+export interface AuthInfo {
+  url: string;
+  engine: string; // "gotrue"
+  jwtAlg: string; // "HS256"
+  db: string | null; // the bound database name
+  signup: string; // "open" | "closed"
+  providers: string[]; // enabled provider kinds
+  redirectUrls: string[];
+  jwtTtl: string;
+  keyMintedAt: string | null; // when the JWT secret was last (re)minted (drives "key age") — NOT the key
+  status: AppStatus | null;
+}
+/** (K1) An end user as returned by the user-admin proxy (GoTrue's admin shape, loosely typed). */
+export interface AuthUser {
+  id: string;
+  email?: string;
+  banned_until?: string | null;
+  created_at?: string;
 }
 /** (I3) A database's connection-pooler state. */
 export interface PoolerInfo {
@@ -251,6 +271,7 @@ export interface Detail {
   };
   bucket?: BucketInfo;
   cache?: CacheInfo; // (I2) present for type=cache
+  auth?: AuthInfo; // (K1) present for type=auth
 }
 
 // ---- Stacks (B2/C1) ----
@@ -322,7 +343,7 @@ export interface TemplateResource {
   image?: string;
   dir?: string;
   env?: Record<string, string>;
-  uses?: { database?: string; bucket?: string; cache?: string }[];
+  uses?: { database?: string; bucket?: string; cache?: string; auth?: string }[];
   env_from?: { resource: string; as: string; output: string }[];
   storage?: string;
 }
@@ -388,6 +409,12 @@ export const api = {
     req<{ name: string; pooler: PoolerInfo }>("POST", `/v1/databases/${name}/pooler`, { enable, ...(mode ? { mode } : {}) }),
   rotateBucket: (name: string) =>
     req<{ name: string; endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretAccessKey: string }>("POST", `/v1/buckets/${name}/rotate`, {}),
+  // (K1) managed auth resource — user-admin proxy + key rotation. Never returns key material.
+  authUsers: (name: string) => req<{ users?: AuthUser[]; aud?: string }>("GET", `/v1/auths/${name}/users`),
+  createAuthUser: (name: string, email: string) => req<{ id?: string; tempPassword?: string }>("POST", `/v1/auths/${name}/users`, { email }),
+  removeAuthUser: (name: string, id: string) => req("DELETE", `/v1/auths/${name}/users/${encodeURIComponent(id)}`),
+  disableAuthUser: (name: string, id: string, disable: boolean) => req("POST", `/v1/auths/${name}/users/${encodeURIComponent(id)}/disable`, { disable }),
+  rotateAuthKeys: (name: string) => req<{ name: string; rotated: boolean; grace: boolean }>("POST", `/v1/auths/${name}/rotate-keys`, {}),
   addCollaborator: (name: string, email: string) => req("POST", `/v1/sites/${name}/collaborators`, { email }),
   removeCollaborator: (name: string, email: string) => req("DELETE", `/v1/sites/${name}/collaborators/${encodeURIComponent(email)}`),
   transfer: (name: string, email: string) => req("POST", `/v1/sites/${name}/transfer`, { email }),
@@ -447,8 +474,8 @@ export function templatePreviewGraph(spec: TemplateSpec): StackGraph {
   for (const [key, res] of Object.entries(spec.resources)) {
     if (res.type === "app")
       for (const u of res.uses ?? []) {
-        const target = u.database ?? u.bucket ?? u.cache;
-        if (target && keys.has(target)) edges.push({ from: target, to: key, kind: "uses", label: u.database ? "PG*" : u.bucket ? "S3_*" : "REDIS_URL" });
+        const target = u.database ?? u.bucket ?? u.cache ?? u.auth;
+        if (target && keys.has(target)) edges.push({ from: target, to: key, kind: "uses", label: u.database ? "PG*" : u.bucket ? "S3_*" : u.cache ? "REDIS_URL" : "AUTH_*" });
       }
     if (res.type === "site") for (const e of res.env_from ?? []) if (keys.has(e.resource)) edges.push({ from: e.resource, to: key, kind: "env_from", label: "URL at publish" });
   }

@@ -39,6 +39,17 @@ data:
   {{- with .Values.config.oidcDisplayName }}
   DROP_OIDC_DISPLAY_NAME: {{ . | quote }}
   {{- end }}
+  # K1 — managed auth resource: the PINNED per-tenant GoTrue engine image (air-gap: mirror it and set
+  # config.authEngineImage) + the edge's per-IP auth rate-limit brake. All optional (built-in defaults).
+  {{- with .Values.config.authEngineImage }}
+  DROP_AUTH_ENGINE_IMAGE: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.authRateLimit }}
+  DROP_AUTH_RATE_LIMIT: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.config.authRateWindowMs }}
+  DROP_AUTH_RATE_WINDOW_MS: {{ . | quote }}
+  {{- end }}
   # A2b — L4/TCP expose: where the edge-tcp Service lives (the API patches its port list on expose) +
   # the dynamic port pool, the LB host used in port-mode connect strings, and the shared-port map the
   # API uses to derive the sni-mode connect port per protocol. Harmless when tcp.enabled is false.

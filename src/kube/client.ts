@@ -20,6 +20,7 @@ import {
 import type { AppManifests, TenantManifests } from "./manifests.ts";
 import { databaseBackupManifest, databasePasswordJob, DEFAULT_OPERAND_IMAGE, PWSET_SECRET, poolerName, type DatabaseManifests } from "./cnpg.ts";
 import type { CacheManifests } from "./valkey.ts";
+import type { AuthManifests } from "../auth-resource/manifests.ts";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -375,6 +376,43 @@ export class KubeApiClient implements KubeClient {
     if (r.status === 404) return null;
     if (r.status >= 300) throw new Error(`readCachePassword ${name} -> ${r.status}`);
     const b64 = ((JSON.parse(r.body).data ?? {}) as Record<string, string>).password;
+    return b64 ? Buffer.from(b64, "base64").toString("utf8") : null;
+  }
+
+  // --- (K1) managed auth resource (GoTrue engine) ----------------------------------------------
+  async applyAuth(namespace: string, name: string, m: AuthManifests): Promise<void> {
+    // The engine registers an HTTPScaledObject — fail fast on a cluster without the KEDA HTTP add-on
+    // rather than orphan the Deployment/Service/keys Secret (same posture as applyApp).
+    await this.assertCrd("http.keda.sh");
+    // Keys Secret FIRST (the Deployment's secretKeyRef resolves at pod start). Emitted only at
+    // create/rotate (m.keysSecret); on a plain re-apply it already exists and is left untouched.
+    if (m.keysSecret) await this.apply(this.secretPath(namespace, this.objName(m.keysSecret)), m.keysSecret as Record<string, unknown>);
+    await this.apply(this.deploymentPath(namespace, name), m.deployment as Record<string, unknown>);
+    await this.apply(this.servicePath(namespace, name), m.service as Record<string, unknown>);
+    await this.apply(this.netpolPath(namespace, this.objName(m.ingressPolicy)), m.ingressPolicy as Record<string, unknown>);
+    await this.apply(this.hsoPath(namespace, name), m.httpScaledObject as Record<string, unknown>);
+  }
+
+  async deleteAuth(namespace: string, name: string): Promise<void> {
+    await this.call("DELETE", this.hsoPath(namespace, name));
+    await this.call("DELETE", this.netpolPath(namespace, `${name}-allow-interceptor`));
+    await this.call("DELETE", this.servicePath(namespace, name));
+    await this.call("DELETE", this.deploymentPath(namespace, name));
+    await this.call("DELETE", this.secretPath(namespace, `${name}-auth-keys`)); // write-only JWT secret
+    // The provider `<name>-secret` is app-secret material — torn down via the SecretStore (like an app).
+  }
+
+  async getAuthStatus(namespace: string, name: string): Promise<AppStatus | null> {
+    // The engine is a plain Deployment labelled like an app (app.kubernetes.io/name=<name>) — reuse the
+    // app-status path verbatim.
+    return this.getAppStatus(namespace, name);
+  }
+
+  async readAuthJwtSecret(namespace: string, name: string): Promise<string | null> {
+    const r = await this.call("GET", this.secretPath(namespace, `${name}-auth-keys`));
+    if (r.status === 404) return null;
+    if (r.status >= 300) throw new Error(`readAuthJwtSecret ${name} -> ${r.status}`);
+    const b64 = ((JSON.parse(r.body).data ?? {}) as Record<string, string>)["jwt-secret"];
     return b64 ? Buffer.from(b64, "base64").toString("utf8") : null;
   }
 

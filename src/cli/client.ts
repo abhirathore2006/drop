@@ -145,6 +145,29 @@ export class Client {
   cacheList(org?: string) {
     return this.req("GET", `/v1/caches${this.orgQ(org)}`);
   }
+  // (K1) managed auth resource (GoTrue). create requires a same-org database (via `db`); the JWT secret
+  // is never returned. `--with-db` sugar composes db-create + auth-create CLI-side (see commands.ts).
+  authCreate(name: string, body: Record<string, unknown>, org?: string) {
+    return this.req("POST", `/v1/auths/${name}${this.orgQ(org)}`, { contentType: "application/json", body: JSON.stringify(body) });
+  }
+  authList(org?: string) {
+    return this.req("GET", `/v1/auths${this.orgQ(org)}`);
+  }
+  authConfig(name: string) {
+    return this.req("GET", `/v1/sites/${name}`); // detail carries the auth config surface (never key material)
+  }
+  authRotateKeys(name: string) {
+    return this.req("POST", `/v1/auths/${name}/rotate-keys`, { contentType: "application/json", body: "{}" });
+  }
+  authUsersList(name: string) {
+    return this.req("GET", `/v1/auths/${name}/users`);
+  }
+  authUserCreate(name: string, email: string, password?: string) {
+    return this.req("POST", `/v1/auths/${name}/users`, { contentType: "application/json", body: JSON.stringify({ email, ...(password ? { password } : {}) }) });
+  }
+  authUserRemove(name: string, id: string) {
+    return this.req("DELETE", `/v1/auths/${name}/users/${encodeURIComponent(id)}`);
+  }
   // tenant object storage (buckets, I1) — create/rotate return the access creds ONCE
   bucketCreate(name: string, org?: string) {
     return this.req("POST", `/v1/buckets/${name}${this.orgQ(org)}`, { contentType: "application/json", body: "{}" });

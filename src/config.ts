@@ -1,3 +1,5 @@
+import { GOTRUE_IMAGE } from "./auth-resource/gotrue.ts";
+
 export interface Config {
   httpPort: number;
   baseDomain: string;
@@ -83,6 +85,10 @@ export interface Config {
   edgeTcpService: string; // DROP_EDGE_TCP_SERVICE — the edge-tcp Service name whose port list the API patches on port expose (default drop-edge-tcp)
   // --- previews (E1) ---
   previewSweepIntervalMs: number; // DROP_PREVIEW_SWEEP_INTERVAL_MS — how often the API sweeps expired previews (default 5 min)
+  // --- managed auth resource (K1) ---
+  authEngineImage: string; // DROP_AUTH_ENGINE_IMAGE — the pinned GoTrue image (air-gap: mirror + override). Default from src/auth-resource/gotrue.ts
+  authRateLimit: number; // DROP_AUTH_RATE_LIMIT — per-IP token budget for the sensitive auth POST paths at the edge (default 10; 0 disables)
+  authRateWindowMs: number; // DROP_AUTH_RATE_WINDOW_MS — the refill window for the auth rate limit (default 60000)
   // --- db:proxy authenticated tunnel (A3) ---
   tunnelDirect: boolean; // DROP_TUNNEL_DIRECT — dial the DB Service DNS directly (in-cluster API posture); off → local API can't reach the DB, tunnel 501s
   tunnelTicketTtlMs: number; // DROP_TUNNEL_TICKET_TTL_MS — single-use tunnel-ticket lifetime (default 60s)
@@ -200,6 +206,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     previewSweepIntervalMs: Number(env.DROP_PREVIEW_SWEEP_INTERVAL_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,
     // db:proxy (A3): direct-dial is the in-cluster posture (the DB Service DNS is reachable from the pod);
     // locally the API is outside the cluster, so it defaults OFF and the tunnel returns 501 (documented).
+    authEngineImage: env.DROP_AUTH_ENGINE_IMAGE || GOTRUE_IMAGE,
+    authRateLimit: Number(env.DROP_AUTH_RATE_LIMIT ?? "10"),
+    authRateWindowMs: Number(env.DROP_AUTH_RATE_WINDOW_MS ?? "60000") || 60000,
     tunnelDirect: env.DROP_TUNNEL_DIRECT === "1",
     tunnelTicketTtlMs: Number(env.DROP_TUNNEL_TICKET_TTL_MS ?? "60000") || 60000,
     tunnelIdleTimeoutMs: Number(env.DROP_TUNNEL_IDLE_TIMEOUT_MS ?? String(5 * 60 * 1000)) || 5 * 60 * 1000,

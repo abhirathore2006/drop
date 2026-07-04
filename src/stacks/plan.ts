@@ -44,9 +44,12 @@ function dependencies(key: string, resources: Record<string, StackResource>): st
   const out: string[] = [];
   if (res.type === "app")
     for (const u of res.uses ?? []) {
-      const dep = u.database ?? u.bucket ?? u.cache; // an app depends on the databases, buckets AND caches it `uses`
+      const dep = u.database ?? u.bucket ?? u.cache ?? u.auth; // an app depends on the databases, buckets, caches AND auth resources it `uses`
       if (dep && resources[dep]) out.push(dep);
     }
+  // (K1) an auth resource depends on the database its engine + users live in (`db:`) — so the DB is
+  // created before the engine that connects to it.
+  if (res.type === "auth" && res.db && resources[res.db]) out.push(res.db);
   if (res.type === "site") for (const e of res.env_from ?? []) if (resources[e.resource]) out.push(e.resource);
   return out;
 }
