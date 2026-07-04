@@ -13,15 +13,34 @@ import { validateName } from "../names.ts";
 import { VERSION } from "../version.ts";
 
 async function client(): Promise<Client> {
+  // CI story (J1): a `DROP_TOKEN` env bearer (a `drop_st_…` service token) authenticates non-
+  // interactively — no `drop login`, no session.json on disk. When set it WINS over any saved session,
+  // so a CI job just exports DROP_API + DROP_TOKEN and runs `drop deploy`. The API URL resolves the usual
+  // way (DROP_API env / saved config / default); `--api` isn't consulted on this path — set DROP_API.
+  if (process.env.DROP_TOKEN) {
+    return new Client({ apiBase: await resolveApiBase({}), token: process.env.DROP_TOKEN });
+  }
   try {
     return new Client(await loadSession(defaultSessionPath()));
   } catch {
-    console.error("not logged in — run `drop login` (or `drop dev-login`) first");
+    console.error("not logged in — run `drop login` (or `drop dev-login`, or set DROP_TOKEN for CI) first");
     process.exit(1);
   }
 }
 
 const show = (v: unknown) => console.log(JSON.stringify(v, null, 2));
+
+/** Parse a human token-expiry duration (`90d`, `12w`, `6mo`, `1y`, or a bare day count) → whole days. */
+function parseExpiryDays(s: string): number {
+  const m = /^(\d+)\s*(d|w|mo|m|y)?$/i.exec(s.trim());
+  if (!m) throw new Error(`invalid --expires "${s}" — use e.g. 90d, 12w, 6mo, 1y`);
+  const n = parseInt(m[1]!, 10);
+  const unit = (m[2] ?? "d").toLowerCase();
+  const mult = unit === "w" ? 7 : unit === "mo" || unit === "m" ? 30 : unit === "y" ? 365 : 1;
+  const days = n * mult;
+  if (days <= 0 || days > 3650) throw new Error("--expires out of range (1–3650 days)");
+  return days;
+}
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -364,6 +383,39 @@ export function buildProgram(): Command {
     .description("Add/update a member (owner|admin|member|viewer; default member)")
     .action(async (slug: string, email: string, role?: string) => show(await (await client()).addOrgMember(slug, email, role)));
   org.command("rm <slug> <email>").description("Remove a member").action(async (slug: string, email: string) => show(await (await client()).removeOrgMember(slug, email)));
+
+  // ---- service accounts / scoped CI tokens (J1) ----
+  const token = program.command("token").description("Manage service-account / CI tokens (scoped, org-owned bearer credentials)");
+  token
+    .command("create")
+    .description("Mint a scoped CI token — the secret is printed ONCE, store it now (use as DROP_TOKEN in CI)")
+    .requiredOption("--org <slug>", "the organisation that owns the token")
+    .requiredOption("--scope <list>", "comma-separated scopes: <verb>[:<resource>|:*], e.g. deploy:myapp,publish:web")
+    .option("--name <name>", "a human label (shows as the audit actor: token:<name>@<org>)", "ci")
+    .option("--expires <dur>", "expiry, e.g. 90d / 12w / 6mo / 1y (default: never)")
+    .action(async (opts: { org: string; scope: string; name: string; expires?: string }) => {
+      const scopes = opts.scope.split(",").map((s) => s.trim()).filter(Boolean);
+      if (!scopes.length) throw new Error("--scope must list at least one scope, e.g. deploy:myapp");
+      const expiresDays = opts.expires ? parseExpiryDays(opts.expires) : undefined;
+      const res = (await (await client()).createToken(opts.org, opts.name, scopes, expiresDays)) as {
+        token: string; id: string; name: string; scopes: string[]; expiresAt: string | null;
+      };
+      console.log(`  ✓ token ${res.name} created (${res.id})`);
+      console.log(`     scopes:  ${res.scopes.join(", ")}`);
+      console.log(`     expires: ${res.expiresAt ?? "never"}`);
+      console.log(`  ✓ secret — shown once, store it now (export it as DROP_TOKEN in CI):`);
+      console.log(`     ${res.token}`);
+    });
+  token
+    .command("ls")
+    .description("List an org's tokens (name, scopes, last used, expiry, revoked state)")
+    .requiredOption("--org <slug>", "the organisation")
+    .action(async (opts: { org: string }) => show(await (await client()).listTokens(opts.org)));
+  token
+    .command("revoke <id>")
+    .description("Revoke a token by id (immediate — the token stops authenticating)")
+    .requiredOption("--org <slug>", "the organisation that owns the token")
+    .action(async (id: string, opts: { org: string }) => show(await (await client()).revokeToken(opts.org, id)));
 
   const secrets = program.command("secrets").description("Manage an app's write-only secrets (set/list-keys/delete; values are never shown)");
   secrets

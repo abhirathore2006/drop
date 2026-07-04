@@ -40,6 +40,23 @@ export interface OrgDetail {
   members: OrgMember[];
 }
 
+/** A service-account / CI token (J1) as listed in Settings › Tokens. Never carries the secret/hash. */
+export interface ServiceToken {
+  id: string;
+  name: string;
+  scopes: string[];
+  expiresAt: string | null;
+  createdBy: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
+/** The create response — includes the one-time `token` secret (RevealOnce). */
+export interface CreatedToken extends ServiceToken {
+  token: string;
+}
+
 export const apiExtra = {
   /** The signed-in user's orgs (personal + any team orgs). Powers the org switcher. */
   orgs: () => req<{ orgs: OrgSummary[] }>("GET", "/v1/orgs"),
@@ -47,4 +64,14 @@ export const apiExtra = {
   orgDetail: (slug: string) => req<OrgDetail>("GET", `/v1/orgs/${encodeURIComponent(slug)}`),
   /** The CLI/API version this instance serves — the user-menu version chip. */
   version: () => req<{ version: string }>("GET", "/version"),
+  // ---- service accounts / scoped CI tokens (J1) — Settings › Tokens ----
+  tokens: (slug: string) => req<{ tokens: ServiceToken[] }>("GET", `/v1/orgs/${encodeURIComponent(slug)}/tokens`),
+  createToken: (slug: string, name: string, scopes: string[], expiresDays?: number) =>
+    req<CreatedToken>("POST", `/v1/orgs/${encodeURIComponent(slug)}/tokens`, { name, scopes, ...(expiresDays ? { expires_days: expiresDays } : {}) }),
+  revokeToken: (slug: string, id: string) => req<{ revoked: string; name: string }>("DELETE", `/v1/orgs/${encodeURIComponent(slug)}/tokens/${encodeURIComponent(id)}`),
 };
+
+/** The permission verbs a token scope may use (mirrors src/authz/permissions.ts ACTIONS). Kept here
+ *  so the scope builder's verb <select> stays a static list — the server is the source of truth and
+ *  rejects anything unknown with a clear 400. */
+export const TOKEN_VERBS = ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose", "share", "transfer", "delete"] as const;

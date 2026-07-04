@@ -1,12 +1,73 @@
 import type { OrgRole, SiteRole } from "../db/schema.ts";
 
-export type Action = "read" | "logs" | "publish" | "deploy" | "db:create" | "rollback" | "configure" | "expose" | "share" | "transfer" | "delete";
+// The permission verbs. Kept as a runtime array (not just a type) so the scope grammar (J1) can
+// validate a token's scopes against the SAME source of truth `can()` enforces. `Action` derives
+// from it, so the two can never drift.
+export const ACTIONS = ["read", "logs", "publish", "deploy", "db:create", "rollback", "configure", "expose", "share", "transfer", "delete"] as const;
+export type Action = (typeof ACTIONS)[number];
 
 export interface Actor {
   email: string;
   platformRole: "admin" | "member";
   siteRole: SiteRole | null; // null = not a per-resource member of this site
   orgRole: OrgRole | null; // role in the RESOURCE's owning org (null = not an org member)
+  token?: TokenGrant; // present iff this is a SERVICE-TOKEN actor (J1) — grants come from scopes, not roles
+}
+
+/** A service-token actor's grant context (J1). A token NEVER has roles: its authority is the union of
+ *  its `scopes`, fenced to its own `orgId` and to the single resource `can()` is being asked about. */
+export interface TokenGrant {
+  scopes: string[];
+  orgId: string; // the org the token belongs to
+  resourceName: string; // the resource `can()` is being asked about (matched against `verb:name`)
+  resourceOrgId: string | null; // that resource's owning org (must equal `orgId`, else cross-org deny)
+}
+
+/** One parsed scope: a verb plus a resource selector. A bare `verb` (or `verb:*`) → resource `"*"`
+ *  = every resource. `verb:name` → that one resource. `null` when the string names no known verb. */
+export interface ParsedScope {
+  verb: Action;
+  resource: string; // "*" = all resources
+}
+
+// Match the LONGEST verb first so `db:create` (a verb that itself contains a colon) is never mis-split
+// into verb `db` + resource `create`. Resource names are DNS-safe (validateName) — never colon-bearing —
+// so `<verb>:<resource>` is unambiguous once the verb is anchored to the known set.
+const VERBS_LONGEST_FIRST = [...ACTIONS].sort((a, b) => b.length - a.length);
+
+/** Parse a scope string into `{verb, resource}`, or null if it names no known verb (J1 grammar:
+ *  `verb` | `verb:resourceName` | `verb:*`). */
+export function parseScope(s: string): ParsedScope | null {
+  for (const v of VERBS_LONGEST_FIRST) {
+    if (s === v) return { verb: v, resource: "*" }; // bare verb → all resources
+    if (s.startsWith(v + ":")) {
+      const resource = s.slice(v.length + 1);
+      return resource ? { verb: v, resource } : null; // `verb:` (empty resource) is invalid
+    }
+  }
+  return null;
+}
+
+/** Validate a token's scope list. Returns an error string, or null if every scope is well-formed.
+ *  Rejects a non-array / empty list and any scope whose verb isn't one of the real permission verbs. */
+export function validateScopes(scopes: unknown): string | null {
+  if (!Array.isArray(scopes) || scopes.length === 0) return "at least one scope is required (e.g. deploy:myapp or publish:*)";
+  for (const s of scopes) {
+    if (typeof s !== "string") return "each scope must be a string";
+    if (!parseScope(s)) return `invalid scope "${s}": expected <verb>[:<resource>|:*], verb one of ${ACTIONS.join(", ")}`;
+  }
+  return null;
+}
+
+/** Pure grant check for a scope list (J1). True iff some scope grants `verb` on `resource` — either a
+ *  wildcard (`verb` / `verb:*`) or an exact `verb:resource` match. The core of the token-actor path. */
+export function scopeAllows(scopes: string[], verb: Action, resource: string): boolean {
+  for (const s of scopes) {
+    const p = parseScope(s);
+    if (!p || p.verb !== verb) continue;
+    if (p.resource === "*" || p.resource === resource) return true;
+  }
+  return false;
 }
 
 // read = see the workload in the dashboard / its versions & settings.
@@ -36,6 +97,17 @@ const ORG_MAP: Record<OrgRole, Action[]> = {
 /** The single authority check. Platform admins are all-powerful; otherwise the UNION of the actor's
  *  org-wide role and any per-resource grant (so the broader of the two wins, never the narrower). */
 export function can(actor: Actor, action: Action): boolean {
+  // Service-token actor (J1): authority comes ENTIRELY from scopes — never roles. A token is fenced to
+  // (a) its OWN org — the resource's org must match, else deny (cross-org / org-less resource); and
+  // (b) what its scopes grant for THIS resource. It is deliberately NEVER a platform admin.
+  // Admin / user-management / org-management surfaces (isPlatformAdmin, canManageOrg, canCreateInOrg)
+  // are unreachable to a token by construction: its principal is `token:…@org` — no user row and no org
+  // membership — so those checks always fail for it. This branch adds no new surface; it only grants
+  // resource verbs. Explicit deny of everything outside its org + scopes.
+  if (actor.token) {
+    if (actor.token.resourceOrgId == null || actor.token.resourceOrgId !== actor.token.orgId) return false;
+    return scopeAllows(actor.token.scopes, action, actor.token.resourceName);
+  }
   if (actor.platformRole === "admin") return true;
   const viaOrg = actor.orgRole ? ORG_MAP[actor.orgRole].includes(action) : false;
   const viaSite = actor.siteRole ? SITE_MAP[actor.siteRole].includes(action) : false;

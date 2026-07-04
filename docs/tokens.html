@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CI tokens (service accounts) · Drop docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="drop-served.js"></script>
+<script defer src="assets/site.js"></script>
+</head>
+<body>
+<div class="topbar">
+  <a class="brand" href="index.html"><span class="dot"></span> Drop</a>
+  <button class="hamburger" aria-label="Menu">☰</button>
+</div>
+<div class="scrim"></div>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="brand" href="index.html"><span class="dot"></span> Drop <span class="v">docs</span></a>
+    <p class="tagline">Ship internal sites. Nothing ever leaves.</p>
+    <nav class="nav">
+      <a href="index.html">Overview</a>
+      <div class="group">Guides</div>
+      <a href="getting-started.html">Getting started</a>
+      <a href="configuration.html">Configuration (drop.yaml)</a>
+      <a href="processes.html">Processes, health &amp; releases</a>
+      <a href="stacks.html">Stacks</a>
+      <a href="buckets.html">Buckets (object storage)</a>
+      <a href="cli-mcp.html">CLI, MCP &amp; Dashboard</a>
+      <a href="roles-visibility.html">Roles &amp; Visibility</a>
+      <a href="tcp-access.html">TCP access (L4)</a>
+      <a href="tokens.html" class="active">CI tokens (service accounts)</a>
+      <div class="group">Reference</div>
+      <a href="architecture.html">Architecture</a>
+      <a href="deployment.html">Deployment</a>
+      <a href="aws-deployment.html">AWS deployment</a>
+      <a href="terraform.html">Terraform (IaC)</a>
+    </nav>
+  </aside>
+  <main class="content"><article>
+<p class="crumbs">Guides</p>
+<h1>CI tokens (service accounts)</h1>
+<p class="lead">CI shouldn't borrow a person's login. A session token is unscoped, tied to a human, dies when they leave, and shows up in the audit trail as <em>them</em> — so an automated deploy is indistinguishable from a hand-run one. A <strong>service token</strong> is the alternative: an <strong>org-owned</strong>, <strong>scoped</strong> bearer credential built for automation. It carries exactly the permissions you grant it, survives staff changes, and audits as <code>token:&lt;name&gt;@&lt;org&gt;</code> so automation is legible.</p>
+
+<div class="note"><span class="lbl">The shape of a token</span><p>A secret looks like <code>drop_st_<span class="muted">&lt;48 hex&gt;</span></code>. Drop stores only its <strong>SHA-256 hash</strong> — the plaintext is shown <strong>once</strong>, at create, and never again (same posture as a database password). If you lose it, mint a new one and revoke the old.</p></div>
+
+<h2 id="scopes">Scopes: what a token may do</h2>
+<p>A token's authority is the union of its <strong>scopes</strong>. Each scope reuses one of the ordinary <a href="roles-visibility.html">permission verbs</a>, optionally qualified to a single resource:</p>
+<table class="tbl">
+<thead><tr><th>Form</th><th>Means</th><th>Example</th></tr></thead>
+<tbody>
+<tr><td><code>verb</code></td><td>That verb on <strong>every</strong> resource in the org</td><td><code>publish</code> — publish any site</td></tr>
+<tr><td><code>verb:*</code></td><td>Identical to a bare verb — the explicit "all resources" form</td><td><code>deploy:*</code></td></tr>
+<tr><td><code>verb:name</code></td><td>That verb on <strong>one</strong> named resource only</td><td><code>deploy:myapp</code></td></tr>
+</tbody>
+</table>
+<p>The verbs are the same ones roles grant — <code>read</code>, <code>logs</code>, <code>publish</code>, <code>deploy</code>, <code>db:create</code>, <code>rollback</code>, <code>configure</code>, <code>expose</code>, <code>share</code>, <code>transfer</code>, <code>delete</code>. An unknown verb is rejected at create with a clear error, so a typo can't silently mint a powerless (or, worse, over-broad) token. Grant the <strong>narrowest</strong> set that does the job: a deploy pipeline usually needs only <code>deploy:myapp</code> (plus <code>publish:myapp-web</code> if it also ships a static front end).</p>
+
+<div class="note warn"><span class="lbl">A token can never touch admin or org management</span><p>Tokens are for <strong>resource</strong> actions only. The scope grammar has no verb for suspending users, changing platform roles, editing quotas, or adding/removing org members — and the authorization layer refuses a token principal on every admin and org-management route regardless of what you write. A token is also fenced to <strong>its own org</strong>: it can act only on resources that org owns, never across orgs.</p></div>
+
+<h2 id="create">Creating a token</h2>
+<p>Only an org <strong>owner or admin</strong> can mint or revoke tokens. From the CLI:</p>
+<pre><code><span class="tok-c"># a deploy token for one app, expiring in 90 days</span>
+$ drop token create --org acme --name ci-deploy --scope deploy:myapp,publish:myapp-web --expires 90d
+  ✓ token ci-deploy created (st_9f3c…)
+     scopes:  deploy:myapp, publish:myapp-web
+     expires: 2026-10-02T12:00:00.000Z
+  ✓ secret — shown once, store it now (export it as DROP_TOKEN in CI):
+     drop_st_1a2b3c…</code></pre>
+<p><code>--expires</code> accepts <code>90d</code>, <code>12w</code>, <code>6mo</code>, or <code>1y</code>; omit it for a token that never expires. List and revoke are org-scoped too:</p>
+<pre><code>$ drop token ls --org acme
+$ drop token revoke --org acme st_9f3c…</code></pre>
+<p>The console mirrors this under <strong>Settings › Tokens</strong> (visible to owners/admins): a scope builder (verb + optional resource, add/remove rows), a one-time reveal of the secret, last-used and expiry columns, and a guarded revoke.</p>
+
+<h2 id="ci">Using a token in CI</h2>
+<p>Non-interactive tooling reads the token from the <code>DROP_TOKEN</code> environment variable — no <code>drop login</code>, no session file on disk. When <code>DROP_TOKEN</code> is set it takes precedence over any saved session; point the CLI at your instance with <code>DROP_API</code>. Store the secret in your CI provider's encrypted secrets, never in the repo.</p>
+<pre><code><span class="tok-c"># .github/workflows/deploy.yml — publish on every push to main</span>
+name: deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      DROP_API: https://api.drop.example.com
+      DROP_TOKEN: ${{ secrets.DROP_TOKEN }}   <span class="tok-c"># a drop_st_… service token</span>
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Drop CLI
+        run: curl -fsSL "$DROP_API/install.sh" | sh
+      - name: Build
+        run: npm ci &amp;&amp; npm run build
+      - name: Publish
+        run: drop publish ./dist myapp-web --org acme</code></pre>
+<div class="note"><span class="lbl">Preview deploys</span><p>A <code>drop publish --preview</code> flag (per-branch/per-PR preview URLs driven by the same token) is on the roadmap — this recipe will grow a PR-preview job when previews land. See the previews guide (coming soon) for the pattern.</p></div>
+
+<h2 id="revoke">Revocation &amp; expiry</h2>
+<p>Every request re-checks the token against the database — a single indexed hash lookup — so control is <strong>immediate</strong>:</p>
+<ul>
+<li><strong>Revoke</strong> is a <strong>soft</strong> mark: the row stays (it keeps its audit value — you can still see what the token did) but the next request it makes returns <code>401</code>. There is no grace period.</li>
+<li><strong>Expiry</strong> works the same way — once <code>expires_at</code> passes, the token stops authenticating.</li>
+<li><strong>Org deletion cascades</strong>: delete an org and its tokens go with it.</li>
+</ul>
+<p>Because a token isn't a user, suspending people doesn't touch it and it doesn't touch them — rotate it on its own schedule (mint the new one, switch CI, revoke the old).</p>
+
+<div class="note"><span class="lbl">Everything a token does is audited as the token</span><p>A token-authenticated request records its actor as <code>token:&lt;name&gt;@&lt;org&gt;</code> in the append-only audit trail, so an automated <code>deploy</code> or <code>delete</code> is attributable to the credential — not to whoever happened to create it. Filter the trail by that actor to see exactly what a given pipeline has done.</p></div>
+
+<div class="next">
+  <a href="roles-visibility.html"><div class="d">← Back</div><div class="t">Roles &amp; Visibility</div></a>
+  <a href="cli-mcp.html"><div class="d">Next →</div><div class="t">CLI, MCP &amp; Dashboard</div></a>
+</div>
+<footer class="docfoot">Drop — self-hosted static-site publishing.</footer>
+  </article></main>
+</div>
+</body>
+</html>

@@ -83,6 +83,19 @@ export class Client {
   removeOrgMember(slug: string, email: string) {
     return this.req("DELETE", `/v1/orgs/${slug}/members/${encodeURIComponent(email)}`);
   }
+  // service accounts / scoped CI tokens (J1) — create returns the secret ONCE
+  createToken(slug: string, name: string, scopes: string[], expiresDays?: number) {
+    return this.req("POST", `/v1/orgs/${slug}/tokens`, {
+      contentType: "application/json",
+      body: JSON.stringify({ name, scopes, ...(expiresDays ? { expires_days: expiresDays } : {}) }),
+    });
+  }
+  listTokens(slug: string) {
+    return this.req("GET", `/v1/orgs/${slug}/tokens`);
+  }
+  revokeToken(slug: string, id: string) {
+    return this.req("DELETE", `/v1/orgs/${slug}/tokens/${encodeURIComponent(id)}`);
+  }
   dbPassword(name: string, password?: string, setSecret?: { app: string; key: string }, show?: boolean) {
     return this.req("POST", `/v1/databases/${name}/password`, {
       contentType: "application/json",

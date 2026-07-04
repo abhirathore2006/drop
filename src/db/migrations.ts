@@ -286,6 +286,35 @@ const m0009_tcp_endpoints: Migration = {
   },
 };
 
+// Service accounts / scoped CI tokens (J1): an org-owned bearer credential for automation. Only the
+// sha256 token_hash is stored (unique — the per-request lookup key); the secret is shown once at create.
+// `scopes` is a jsonb array of `verb[:resource|:*]` strings. Revocation is a SOFT mark (revoked_at) so
+// the row keeps its audit value; org delete cascades. last_used_at is bumped throttled (~1/min) on use.
+const m0010_service_tokens: Migration = {
+  async up(db: Kysely<any>) {
+    await db.schema
+      .createTable("service_tokens")
+      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn("org_id", "text", (c) => c.notNull().references("organisations.id").onDelete("cascade"))
+      .addColumn("name", "text", (c) => c.notNull())
+      .addColumn("scopes", "jsonb", (c) => c.notNull())
+      .addColumn("token_hash", "text", (c) => c.notNull())
+      .addColumn("expires_at", "timestamptz") // null = never expires
+      .addColumn("created_by", "text", (c) => c.notNull())
+      .addColumn("created_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addColumn("last_used_at", "timestamptz")
+      .addColumn("revoked_at", "timestamptz") // soft revocation — the row stays for audit
+      .execute();
+    // The hash is the per-request lookup key → unique + indexed.
+    await db.schema.createIndex("service_tokens_hash_uniq").on("service_tokens").column("token_hash").unique().execute();
+    // Org-scoped listing (Settings › Tokens, `drop token ls`).
+    await db.schema.createIndex("service_tokens_org_idx").on("service_tokens").column("org_id").execute();
+  },
+  async down() {
+    /* forward-only */
+  },
+};
+
 /** All Drop migrations, in order. New schema changes append here. */
 export class InlineMigrations implements MigrationProvider {
   async getMigrations(): Promise<Record<string, Migration>> {
@@ -299,6 +328,7 @@ export class InlineMigrations implements MigrationProvider {
       "0007_stacks": m0007_stacks,
       "0008_org_quotas": m0008_org_quotas,
       "0009_tcp_endpoints": m0009_tcp_endpoints,
+      "0010_service_tokens": m0010_service_tokens,
     };
   }
 }

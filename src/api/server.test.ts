@@ -15,8 +15,10 @@ import { StackStore } from "../stacks/store.ts";
 import { UserStore } from "../users/store.ts";
 import { OrgStore } from "../orgs/store.ts";
 import { AuditStore } from "../audit/store.ts";
+import { ServiceTokenStore } from "../tokens/store.ts";
 import { makeTestDb } from "../db/testdb.ts";
-import { FakeVerifier } from "../auth/oidc.ts";
+import { FakeVerifier, ChainVerifier } from "../auth/oidc.ts";
+import { TokenVerifier } from "../auth/token-verifier.ts";
 import { loadConfig } from "../config.ts";
 
 async function tgz(files: Record<string, string>): Promise<Buffer> {
@@ -42,17 +44,21 @@ async function mk(opts: { admins?: string[]; env?: Record<string, string> } = {}
     DROP_S3_ENDPOINT: "http://localhost:4566",
     ...opts.env,
   });
-  const verifier = new FakeVerifier({
+  const fake = new FakeVerifier({
     alice: { sub: "alice@example.com", email: "alice@example.com" },
     bob: { sub: "bob@example.com", email: "bob@example.com" },
   });
   const orgs = new OrgStore(db);
+  // J1: accept `drop_st_…` service tokens alongside the fake human tokens (TokenVerifier first; it
+  // returns null for the non-`drop_st_` alice/bob tokens, so they still resolve via the fake).
+  const tokens = new ServiceTokenStore(db);
+  const verifier = new ChainVerifier([new TokenVerifier(tokens, orgs), fake]);
   const images = new FakeImageStore();
   const audit = new AuditStore(db);
   const locks = new LockStore(db);
   const bucket = new FakeBucketStore();
   const quotas = new QuotaStore(db);
-  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, bucket, quotas }), meta, blob, kube, secrets, images, orgs, audit, locks, bucket, quotas, db, users };
+  return { app: createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens }), meta, blob, kube, secrets, images, orgs, audit, locks, bucket, quotas, tokens, db, users };
 }
 
 const pub = (app: any, tok: string, name: string, body: Buffer) =>
@@ -1995,5 +2001,93 @@ test("expose with compute off: records the registry row + returns a provisioning
   const body = await res.json();
   expect(body.tcp.connect).toBe("pg.drop.example.com:5432");
   expect(body.note).toMatch(/compute off/);
+  await db.destroy();
+});
+
+// ---- service accounts / scoped CI tokens (J1) --------------------------------------------------
+
+// alice owns team org "acme" with app "myapp"; returns the created token secret + its org.
+async function acmeWithToken(scopes: string[]) {
+  const ctx = await mk();
+  const { app } = ctx;
+  expect((await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" })).status).toBe(200);
+  expect((await call(app, "POST", "/v1/apps/myapp?org=acme", "alice", { image: "x:1" })).status).toBe(200);
+  const cr = await call(app, "POST", "/v1/orgs/acme/tokens", "alice", { name: "ci", scopes });
+  expect(cr.status).toBe(200);
+  const token = (await cr.json()).token as string;
+  return { ...ctx, token };
+}
+
+test("token create returns the secret ONCE + is audited; list carries no hash/secret", async () => {
+  const { app, audit, db } = await acmeWithToken(["deploy:myapp"]);
+  const cr = await call(app, "POST", "/v1/orgs/acme/tokens", "alice", { name: "ci2", scopes: ["publish:*"] });
+  const body = await cr.json();
+  expect(body.token).toMatch(/^drop_st_/); // secret returned once
+  expect(body.token_hash).toBeUndefined();
+  // audited as token.create
+  const a = await audit.list({ action: "token.create" });
+  expect(a.entries.length).toBeGreaterThanOrEqual(1);
+  expect(a.entries[0]!.actor).toBe("alice@example.com");
+  expect(a.entries[0]!.targetType).toBe("token");
+  // list never leaks the hash or the secret
+  const list = await (await call(app, "GET", "/v1/orgs/acme/tokens", "alice")).json();
+  expect(list.tokens.length).toBe(2);
+  for (const t of list.tokens) {
+    expect(t.token).toBeUndefined();
+    expect(t.token_hash).toBeUndefined();
+    expect(Array.isArray(t.scopes)).toBe(true);
+  }
+  await db.destroy();
+});
+
+test("token create: bad scope → 400; only org owner/admin may mint (stranger → 403)", async () => {
+  const { app, db } = await mk();
+  await call(app, "POST", "/v1/orgs", "alice", { slug: "acme", name: "Acme" });
+  expect((await call(app, "POST", "/v1/orgs/acme/tokens", "alice", { name: "x", scopes: ["frobnicate"] })).status).toBe(400);
+  expect((await call(app, "POST", "/v1/orgs/acme/tokens", "alice", { name: "x", scopes: [] })).status).toBe(400);
+  // bob is not a member of acme → 403
+  expect((await call(app, "POST", "/v1/orgs/acme/tokens", "bob", { name: "x", scopes: ["read"] })).status).toBe(403);
+  await db.destroy();
+});
+
+test("token-authed deploy: allowed by scope, forbidden outside scope + outside org", async () => {
+  const { app, token, db } = await acmeWithToken(["deploy:myapp"]);
+  // in-scope deploy of the existing app → 200
+  expect((await call(app, "POST", "/v1/apps/myapp", token, { image: "x:2" })).status).toBe(200);
+  // another app in the SAME org but not in scope → 403
+  expect((await call(app, "POST", "/v1/apps/other?org=acme", "alice", { image: "x:1" })).status).toBe(200); // alice creates it
+  expect((await call(app, "POST", "/v1/apps/other", token, { image: "x:2" })).status).toBe(403); // scope is deploy:myapp only
+  // an app in a DIFFERENT org (alice's personal) → cross-org deny 403
+  expect((await call(app, "POST", "/v1/apps/solo", "alice", { image: "x:1" })).status).toBe(200); // personal org
+  expect((await call(app, "POST", "/v1/apps/solo", token, { image: "x:2" })).status).toBe(403);
+  await db.destroy();
+});
+
+test("token is NEVER admin/org-management-capable, and cannot mint tokens", async () => {
+  const { app, token, db } = await acmeWithToken(["deploy:myapp"]);
+  expect((await call(app, "GET", "/v1/admin/users", token)).status).toBe(403); // admin surface
+  expect((await call(app, "POST", "/v1/orgs/acme/members", token, { email: "eve@x.com", role: "member" })).status).toBe(403); // org management
+  expect((await call(app, "POST", "/v1/orgs/acme/tokens", token, { name: "evil", scopes: ["deploy:*"] })).status).toBe(403); // can't mint tokens
+  await db.destroy();
+});
+
+test("token cannot claim a NEW resource, and minting no phantom user for the token principal", async () => {
+  const { app, token, users, db } = await acmeWithToken(["deploy:*"]);
+  // deploying a not-yet-created name → 403 (tokens act on existing resources only)
+  expect((await call(app, "POST", "/v1/apps/brandnew?org=acme", token, { image: "x:1" })).status).toBe(403);
+  // and no `token:ci@acme` user row was ever created (it must not appear in admin user lists)
+  expect(await users.getUser("token:ci@acme")).toBeNull();
+  await db.destroy();
+});
+
+test("revoke: a revoked token stops authenticating (subsequent request → 401)", async () => {
+  const { app, token, db } = await acmeWithToken(["deploy:myapp"]);
+  expect((await call(app, "POST", "/v1/apps/myapp", token, { image: "x:2" })).status).toBe(200);
+  const list = await (await call(app, "GET", "/v1/orgs/acme/tokens", "alice")).json();
+  const id = list.tokens[0]!.id as string;
+  const rev = await call(app, "DELETE", `/v1/orgs/acme/tokens/${id}`, "alice");
+  expect(rev.status).toBe(200);
+  // subsequent use of the revoked secret → 401 at the auth boundary
+  expect((await call(app, "POST", "/v1/apps/myapp", token, { image: "x:3" })).status).toBe(401);
   await db.destroy();
 });

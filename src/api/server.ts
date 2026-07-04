@@ -11,12 +11,13 @@ import { VERSION } from "../version.ts";
 import type { Config } from "../config.ts";
 import type { BlobStore } from "../blob/types.ts";
 import type { Db } from "../db/db.ts";
-import type { Verifier } from "../auth/types.ts";
+import type { Identity, Verifier } from "../auth/types.ts";
 import { authMiddleware, type AuthEnv } from "../auth/middleware.ts";
 import { MetaStore } from "../metastore/store.ts";
 import type { Site, Visibility } from "../metastore/types.ts";
 import { UserStore } from "../users/store.ts";
 import { can, canCreateInOrg, canManageOrg, type Action, type Actor } from "../authz/permissions.ts";
+import { ServiceTokenStore, validateScopes } from "../tokens/store.ts";
 import { OrgStore, validateOrgSlug, type Org } from "../orgs/store.ts";
 import { validateName } from "../names.ts";
 import { extractTarGz } from "../archive.ts";
@@ -59,6 +60,7 @@ export interface Deps {
   locks?: LockStore; // lease-based advisory locks (serialize deploy/release per app); defaults over `db`
   stacks?: StackStore; // stack metadata + resource mapping (B2); defaults over `db`
   tcp?: TcpEndpointStore; // (A2b) TCP exposure registry (tcp_endpoints); defaults over `db`
+  tokens?: ServiceTokenStore; // (J1) service accounts / scoped CI tokens; defaults over `db`
   now?: () => Date;
 }
 
@@ -76,6 +78,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   const buckets = d.bucket ?? makeBucketStore(d.cfg); // (I1) tenant object storage (floci-prefix locally)
   const quotas = d.quotas ?? new QuotaStore(d.db); // (item 10) per-org quota overrides
   const tcp = d.tcp ?? new TcpEndpointStore(d.db); // (A2b) TCP exposure registry
+  const tokens = d.tokens ?? new ServiceTokenStore(d.db); // (J1) service accounts / scoped CI tokens
 
   const siteUrl = (name: string) => `https://${name}.${d.cfg.baseDomain}`;
   const app = new Hono<AuthEnv>();
@@ -163,13 +166,31 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   );
 
   // First touch provisions the user AND their personal org (idempotent), so resources always have an
-  // org to belong to and single-user flows keep working with no explicit org.
+  // org to belong to and single-user flows keep working with no explicit org. A SERVICE-TOKEN principal
+  // (J1) is NOT a person: never mint a user row / personal org for it (that would surface `token:…@org`
+  // in admin user lists). The `token:` prefix is a safe discriminator — a real login email can't start
+  // with it (a colon is invalid before the @; dev-auth's `sub:email` keeps the colon part in `sub`).
   const ensureUser = async (email: string) => {
+    if (email.startsWith("token:")) return;
     await d.users.upsertOnLogin(email, null);
     await d.orgs.ensurePersonalOrg(email);
   };
 
-  async function actorFor(email: string, site: Site | null): Promise<Actor> {
+  // Build the authorization Actor for the CALLING identity against a resource. Takes the whole Identity
+  // (not just the email) so a SERVICE-TOKEN actor (J1) is resolved to a scope-based Actor bound to THIS
+  // resource — grants come from its scopes, never from roles (all role fields stay null/member).
+  async function actorFor(identity: Identity, site: Site | null): Promise<Actor> {
+    const email = identity.email;
+    if (identity.token) {
+      // Token actor: fence it to its own org + this resource; can() checks scopeAllows(verb, name).
+      return {
+        email,
+        platformRole: "member",
+        siteRole: null,
+        orgRole: null,
+        token: { scopes: identity.token.scopes, orgId: identity.token.orgId, resourceName: site?.name ?? "", resourceOrgId: site?.orgId ?? null },
+      };
+    }
     const u = await d.users.getUser(email);
     const siteRole = site ? (site.members.find((m) => m.email === email)?.role ?? null) : null;
     const orgRole = await d.orgs.roleOf(site?.orgId ?? null, email); // org-wide role on the resource's org
@@ -179,6 +200,10 @@ export function createApp(d: Deps): Hono<AuthEnv> {
   // Resolve the target org for a CREATE (explicit ?org=<slug> or the caller's personal org) +
   // authorize it. Uses ONLY the query param — never reads the body (publish streams a tarball).
   const resolveCreateOrg = async (c: any, email: string): Promise<{ org: Org } | { err: Response }> => {
+    // Service tokens (J1) act ONLY on EXISTING resources within scope — they never claim new names.
+    // Explicit, early deny (before any org resolution) so a token deploy of a not-yet-created name is a
+    // clean 403 rather than falling through role checks with a misleading "not a member" message.
+    if (c.get("identity").token) return { err: c.json({ error: "service tokens cannot create new resources; they act on existing ones only" }, 403) };
     const orgSlug = c.req.query("org");
     let org: Org;
     if (!orgSlug) {
@@ -451,6 +476,59 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     return c.json({ removed: target });
   });
 
+  // ---- service accounts / scoped CI tokens (J1) ----
+  // Org-owned bearer credentials for automation (CI), managed by the org's owner/admin (canManageOrg).
+  // The secret is returned ONCE at create (same posture as db password); only its hash is stored. Scopes
+  // reuse the permission verbs, optionally resource-qualified (verb:name | verb:*). A token can act ONLY
+  // within its org and NEVER on admin / org-management surfaces — enforced in can()'s token path and by
+  // the natural failure of isPlatformAdmin/canManageOrg for a `token:…@org` principal.
+  app.post("/v1/orgs/:slug/tokens", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    if (!canManageOrg(r.role, r.platformRole)) return c.json({ error: "owner/admin only" }, 403);
+    const body = (await c.req.json().catch(() => ({}))) as { name?: unknown; scopes?: unknown; expires_days?: unknown };
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name || name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9 _-]*$/.test(name)) {
+      return c.json({ error: "name required (1–64 chars: letters, digits, space, _ or -)" }, 400);
+    }
+    const scopeErr = validateScopes(body.scopes);
+    if (scopeErr) return c.json({ error: scopeErr }, 400);
+    const scopes = body.scopes as string[];
+    // Optional expiry, in whole days (1–3650). Absent → never expires.
+    let expiresAt: Date | null = null;
+    if (body.expires_days != null && body.expires_days !== "") {
+      const days = Number(body.expires_days);
+      if (!Number.isInteger(days) || days <= 0 || days > 3650) return c.json({ error: "expires_days must be a whole number of days between 1 and 3650" }, 400);
+      expiresAt = new Date(now().getTime() + days * 86_400_000);
+    }
+    const { token, row } = await tokens.create(r.org.id, name, scopes, expiresAt, email);
+    await audit({ actor: email, action: "token.create", target: name, targetType: "token", orgId: r.org.id, detail: { id: row.id, scopes, expiresAt: row.expiresAt } });
+    // The secret is returned ONCE — never stored, never returned again (RevealOnce posture).
+    return c.json({ token, id: row.id, name: row.name, scopes: row.scopes, expiresAt: row.expiresAt, createdBy: row.createdBy, createdAt: row.createdAt });
+  });
+
+  app.get("/v1/orgs/:slug/tokens", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    if (!canManageOrg(r.role, r.platformRole)) return c.json({ error: "owner/admin only" }, 403);
+    return c.json({ tokens: await tokens.list(r.org.id) }); // never any hashes/secrets
+  });
+
+  app.delete("/v1/orgs/:slug/tokens/:id", async (c) => {
+    const email = c.get("identity").email;
+    const r = await resolveOrg(c, email);
+    if ("err" in r) return r.err;
+    if (!canManageOrg(r.role, r.platformRole)) return c.json({ error: "owner/admin only" }, 403);
+    const id = c.req.param("id");
+    const existing = await tokens.get(id);
+    if (!existing || existing.orgId !== r.org.id) return c.json({ error: "no such token" }, 404); // scoped to THIS org
+    const revoked = await tokens.revoke(id); // soft mark; subsequent verify → null → 401
+    await audit({ actor: email, action: "token.revoke", target: existing.name, targetType: "token", orgId: r.org.id, detail: { id, alreadyRevoked: !revoked } });
+    return c.json({ revoked: id, name: existing.name });
+  });
+
   // ---- publish ----
   app.post("/v1/sites/:name/versions", async (c) => {
     const email = c.get("identity").email;
@@ -469,7 +547,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
     if (site.type !== "site") return c.json({ error: `name "${name}" is an ${site.type}, not a site` }, 409);
-    const actor = await actorFor(email, site);
+    const actor = await actorFor(c.get("identity"), site);
     if (!can(actor, "publish")) return c.json({ error: `site is owned by ${site.owner}` }, 403);
 
     if (!c.req.raw.body) return c.json({ error: "empty body" }, 400);
@@ -577,7 +655,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
     if (site.type !== "app") return c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409);
-    const actor = await actorFor(email, site);
+    const actor = await actorFor(c.get("identity"), site);
     if (!can(actor, "deploy")) return c.json({ error: `app is owned by ${site.owner}` }, 403);
 
     // Resolve declared bindings (app.uses): each must be an existing resource in the SAME org.
@@ -699,7 +777,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
     if (site.type !== "app") return c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409);
-    const actor = await actorFor(email, site);
+    const actor = await actorFor(c.get("identity"), site);
     if (!can(actor, "deploy")) return c.json({ error: `app is owned by ${site.owner}` }, 403);
 
     if (!c.req.raw.body) return c.json({ error: "empty body" }, 400);
@@ -744,7 +822,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return { err: c.json({ error: "no such app" }, 404) };
     if (site.type !== "app") return { err: c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409) };
-    if (!can(await actorFor(email, site), "configure")) return { err: c.json({ error: "owner only" }, 403) };
+    if (!can(await actorFor(c.get("identity"), site), "configure")) return { err: c.json({ error: "owner only" }, 403) };
     return { site, email };
   };
 
@@ -797,7 +875,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such app" }, 404);
     if (site.type !== "app") return c.json({ error: `name "${name}" is a ${site.type}, not an app` }, 409);
-    if (!can(await actorFor(email, site), "deploy")) return c.json({ error: "not permitted" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "deploy")) return c.json({ error: "not permitted" }, 403);
     const ns = site.namespace;
     if (action === "restart") {
       // A restart while stopped would silently no-op (the pods are pinned to 0) — be explicit.
@@ -870,7 +948,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
     if (site.type !== "database") return c.json({ error: `name "${name}" is a ${site.type}, not a database` }, 409);
-    const actor = await actorFor(email, site);
+    const actor = await actorFor(c.get("identity"), site);
     if (!can(actor, "db:create")) return c.json({ error: `database is owned by ${site.owner}` }, 403);
 
     // Local (Floci/MinIO): static S3 creds + an explicit endpointURL. Prod: real S3 via
@@ -936,7 +1014,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
     if (site.type !== "database") return c.json({ error: `name "${name}" is a ${site.type}, not a database` }, 409);
-    if (!can(await actorFor(email, site), "configure")) return c.json({ error: "owner only" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "configure")) return c.json({ error: "owner only" }, 403);
 
     const body = (await c.req.json().catch(() => ({}))) as {
       password?: unknown;
@@ -956,7 +1034,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       const appSite = await d.meta.getSitePlain(appName);
       if (!appSite) return c.json({ error: `no such app: ${appName}` }, 404);
       if (appSite.type !== "app") return c.json({ error: `name "${appName}" is a ${appSite.type}, not an app` }, 409);
-      if (!can(await actorFor(email, appSite), "configure")) return c.json({ error: `not permitted to set secrets on ${appName}` }, 403);
+      if (!can(await actorFor(c.get("identity"), appSite), "configure")) return c.json({ error: `not permitted to set secrets on ${appName}` }, 403);
       secretTarget = { site: appSite, key };
     }
     const show = body.show === true;
@@ -1018,7 +1096,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return { err: c.json({ error: "no such database" }, 404) };
     if (site.type !== "database") return { err: c.json({ error: `name "${name}" is a ${site.type}, not a database` }, 409) };
-    if (!can(await actorFor(email, site), action)) return { err: c.json({ error: "not permitted" }, 403) };
+    if (!can(await actorFor(c.get("identity"), site), action)) return { err: c.json({ error: "not permitted" }, 403) };
     return { site, email };
   };
 
@@ -1100,7 +1178,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     }
     if (!site) return c.json({ error: "claim failed" }, 500);
     if (site.type !== "bucket") return c.json({ error: `name "${name}" is a ${site.type}, not a bucket` }, 409);
-    const actor = await actorFor(email, site);
+    const actor = await actorFor(c.get("identity"), site);
     if (!can(actor, "db:create")) return c.json({ error: `bucket is owned by ${site.owner}` }, 403); // create-tier (editor+), like db:create
 
     const creds = await buckets.provision({ name, namespace: site.namespace, org: site.orgId ?? "" });
@@ -1115,7 +1193,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such bucket" }, 404);
     if (site.type !== "bucket") return c.json({ error: `name "${name}" is a ${site.type}, not a bucket` }, 409);
-    if (!can(await actorFor(email, site), "configure")) return c.json({ error: "owner only" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "configure")) return c.json({ error: "owner only" }, 403);
     const creds = await buckets.rotate({ name, namespace: site.namespace, org: site.orgId ?? "" });
     await audit({ actor: email, action: "bucket.rotate", target: name, targetType: "bucket", orgId: site.orgId, detail: {} });
     return c.json(bucketCredsResponse(name, creds));
@@ -1153,7 +1231,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "rollback")) return c.json({ error: "not permitted" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "rollback")) return c.json({ error: "not permitted" }, 403);
     if (site.type === "database") return c.json({ error: "rollback is for static sites/apps; restore-from-backup a database instead" }, 409);
 
     const body = (await c.req.json().catch(() => ({}))) as { to?: string };
@@ -1212,7 +1290,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "read")) return c.json({ error: "not permitted" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "read")) return c.json({ error: "not permitted" }, 403);
     const versions = await d.meta.listVersions(name);
     const out: Record<string, unknown> = {
       name: site.name,
@@ -1315,7 +1393,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
     // logs (not read): a viewer is metadata-only — pod logs can leak env-injected secrets.
-    if (!can(await actorFor(email, site), "logs")) return c.json({ error: "not permitted" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "logs")) return c.json({ error: "not permitted" }, 403);
     const tail = Math.min(Number(c.req.query("tail") ?? "100") || 100, 1000);
     // ?release=1 resolves the LATEST release Job's pod instead of the app pods (drop logs --release).
     const wantRelease = c.req.query("release") === "1" || c.req.query("release") === "true";
@@ -1349,7 +1427,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "read")) return c.json({ error: "not permitted" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "read")) return c.json({ error: "not permitted" }, 403);
     if (site.type !== "app") return c.json({ error: `${name} is a ${site.type}, not an app` }, 409);
     let processes: Awaited<ReturnType<KubeClient["listAppProcesses"]>> = [];
     if (d.kube) {
@@ -1370,7 +1448,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "configure")) return c.json({ error: "owner only" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "configure")) return c.json({ error: "owner only" }, 403);
     // Visibility is an EDGE gate that only the static-site path enforces — the app-dispatch path
     // proxies straight to the interceptor. Reject it on apps/databases so a private/password setting
     // can't be persisted and then silently served openly (fail-open). (Per-app gating is future work.)
@@ -1399,7 +1477,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "expose")) return c.json({ error: "not permitted" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "expose")) return c.json({ error: "not permitted" }, 403);
     if (site.type !== "app" && site.type !== "database") {
       return c.json({ error: `TCP exposure applies to apps and databases only, not a ${site.type}` }, 409);
     }
@@ -1449,7 +1527,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "expose")) return c.json({ error: "not permitted" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "expose")) return c.json({ error: "not permitted" }, 403);
     const existing = await tcp.get(name);
     if (!existing) return c.json({ name, tcp: null }); // not exposed — idempotent
     await tcp.unexpose(name);
@@ -1494,7 +1572,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "delete")) return c.json({ error: "owner only" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "delete")) return c.json({ error: "owner only" }, 403);
     // Tear down the running workload BEFORE dropping metadata — otherwise the k8s objects
     // orphan in the tenant namespace. Apps: Deployment/Service/Secret/NetworkPolicy/HSO.
     // Databases: the CNPG Cluster (cascades to pods) + ObjectStore/ScheduledBackup/policy.
@@ -1698,7 +1776,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "share")) return c.json({ error: "owner only" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "share")) return c.json({ error: "owner only" }, 403);
     const body = (await c.req.json().catch(() => ({}))) as { email?: string; role?: string };
     if (!body.email) return c.json({ error: "email required" }, 400);
     const target = body.email.toLowerCase(); // canonical principal — must match the lowercased identity
@@ -1715,7 +1793,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const target = c.req.param("email").toLowerCase(); // canonical principal
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "share")) return c.json({ error: "owner only" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "share")) return c.json({ error: "owner only" }, 403);
     await d.meta.removeMember(name, target);
     await audit({ actor: email, action: "site.collaborator.remove", target: name, targetType: site.type, orgId: site.orgId, detail: { member: target } });
     return c.json({ removed: target });
@@ -1727,7 +1805,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
     const name = c.req.param("name");
     const site = await d.meta.getSitePlain(name);
     if (!site) return c.json({ error: "no such site" }, 404);
-    if (!can(await actorFor(email, site), "transfer")) return c.json({ error: "owner only" }, 403);
+    if (!can(await actorFor(c.get("identity"), site), "transfer")) return c.json({ error: "owner only" }, 403);
     // Databases are STATEFUL and the tenant namespace is owner-derived. A metadata-only
     // owner flip would orphan the running CNPG Cluster + PVCs in the old owner's namespace
     // (unrecoverable — unlike an app you can't just "redeploy" without losing data). Block
@@ -1994,7 +2072,7 @@ export function createApp(d: Deps): Hono<AuthEnv> {
       const sn = siteNameForKey(spec, mapping, key);
       if (!live[sn]) continue;
       const s = (await d.meta.getSitePlain(sn))!;
-      if (!can(await actorFor(email, s), actionForKind(res.type))) return c.json({ error: `not permitted to reconcile "${sn}" (${res.type})` }, 403);
+      if (!can(await actorFor(c.get("identity"), s), actionForKind(res.type))) return c.json({ error: `not permitted to reconcile "${sn}" (${res.type})` }, 403);
     }
 
     // Plan (pure). A dependency cycle has no apply order → 400.

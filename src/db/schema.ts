@@ -167,6 +167,24 @@ export interface TcpEndpointsTable {
   created_at: Generated<Ts>;
 }
 
+/** Service accounts / scoped CI tokens (J1). A long-lived bearer credential owned by an ORG (not a
+ *  person): only its sha256 `token_hash` is stored (the secret is shown once at create). `scopes` is a
+ *  jsonb array of `verb[:resource|:*]` strings validated against the permission verbs. Revocation is a
+ *  SOFT mark (`revoked_at`) — the row stays for audit value; a revoked/expired token fails verify → 401.
+ *  `last_used_at` is bumped throttled (~1/min) on use. Cascades on the owning org's delete. */
+export interface ServiceTokensTable {
+  id: string;
+  org_id: string;
+  name: string;
+  scopes: ColumnType<string[], string, string>; // jsonb: JSON.stringify on write, parse at the store boundary
+  token_hash: string; // sha256 hex of the full secret — the lookup key (never the secret itself)
+  expires_at: Ts | null; // null = never expires
+  created_by: string; // the human who minted it (audit)
+  created_at: Ts; // set from the store's injectable clock (the column also has a now() default)
+  last_used_at: Ts | null; // throttled last-use timestamp (~1/min)
+  revoked_at: Ts | null; // soft revocation mark (null = live)
+}
+
 export interface Database {
   users: UsersTable;
   audit_log: AuditLogTable;
@@ -182,4 +200,5 @@ export interface Database {
   stack_resources: StackResourcesTable;
   org_quotas: OrgQuotasTable;
   tcp_endpoints: TcpEndpointsTable;
+  service_tokens: ServiceTokensTable;
 }

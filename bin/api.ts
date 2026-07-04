@@ -9,8 +9,10 @@ import { StackStore } from "../src/stacks/store.ts";
 import { UserStore } from "../src/users/store.ts";
 import { OrgStore } from "../src/orgs/store.ts";
 import { AuditStore } from "../src/audit/store.ts";
+import { ServiceTokenStore } from "../src/tokens/store.ts";
 import { DevHeaderVerifier, ChainVerifier } from "../src/auth/oidc.ts";
 import { SessionVerifier } from "../src/auth/session-token.ts";
+import { TokenVerifier } from "../src/auth/token-verifier.ts";
 import { createApp } from "../src/api/server.ts";
 import { KubeApiClient } from "../src/kube/client.ts";
 import { makeSecretStore } from "../src/secrets/factory.ts";
@@ -91,7 +93,11 @@ const locks = new LockStore(db);
 const stacks = new StackStore(db);
 const bucket = makeBucketStore(cfg); // (I1) tenant object storage (floci-prefix locally)
 const quotas = new QuotaStore(db); // (item 10) per-org quota overrides
-const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas });
+const tokens = new ServiceTokenStore(db); // (J1) service accounts / scoped CI tokens
+// Accept `Authorization: Bearer drop_st_…` alongside human logins. TokenVerifier goes FIRST in the
+// chain; it returns null for any non-service token so session/Google verification still runs after it.
+verifier = new ChainVerifier([new TokenVerifier(tokens, orgs), verifier]);
+const app = createApp({ cfg, meta, blob, db, users, verifier, kube, secrets, images, orgs, audit, locks, stacks, bucket, quotas, tokens });
 serve({ fetch: app.fetch, port: cfg.httpPort }, () => {
   console.log(`drop-api listening on :${cfg.httpPort}`);
 });
