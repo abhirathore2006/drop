@@ -47,13 +47,13 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 25 | M4 Data-heavy views | done | 33df150 | uPlot lazy chunk; SVG list sparklines; SSE stream; Table keyset+virtualize |
 | 26 | H3 App→app edges | done | e8112dc | plain env <KEY>_URL; scale-to-zero → public host wake; mutual refs = cycle |
 | 27 | E2 App previews | done | 70397be | parallel suffixed set; shared parent secrets; --with-db empty clone; L2 seam |
-| 28 | L2 DB branching for previews | todo | | |
+| 28 | L2 DB branching for previews | done | dddd402 | bootstrap.recovery (FM9 machinery); parent manage-tier gate; migration 0021 provenance |
 | 29 | I4 SQL console · I5 volumes | done | e76f22d,d85f034 | I4 in-cluster only (501 local); I5 Recreate+forced 1/1, no snapshots v1 |
 | 29b | M3 Streaming surfaces | done | 421b9d2,bc5b168 | xterm lazy chunk; per-response CSP style nonce; verified live in Chrome |
 | 30 | D2 Template upstream diff | done | fe43017 | pure three-way diff; conflict take-upstream/keep-local; canvas diff badges |
 | 31 | E3 Environments | done | af19ef2 | single-dash env naming; per-env var overlay; promote bakes image; default-env compat |
 | 32 | L3 `drop dev` | done | c1e4ebf | dev-context (key names only); localhost tunnel rewrite; --check/--no-tunnel |
-| 33 | F2 AI intent layer | todo | | |
+| 33 | F2 AI intent layer | done | e9d498a | off by default; provider-agnostic; sanitized → C2 editor, never executes |
 | 34 | L4 Runtime config / flags | done | a0df77d | app_configs 0018; lazy config-read token; @drop/config etag SDK |
 | 35 | G3 Alerting / notifications | done | ea22630 | events 0017; dedup incidents; org webhooks (Slack adapter); /v1/me badge |
 | 36 | L5 OpenAPI + typed client | todo | | |
