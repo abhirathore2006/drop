@@ -44,7 +44,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 22 | C2 Canvas editing | done | a2a864a | pure ops+rebase model; legal-edge lockstep caught auth kind mid-flight |
 | 23 | J3 `drop exec` | done | fa46e79 | v4.channel exec; tunnel_tickets kind column; console terminal → M3 |
 | 24 | K2 App RBAC + SDK | done | d16c906 | HS256 verifyRequest (no JWKS); rbac-seed printed not auto-run; packages/auth workspace |
-| 25 | M4 Data-heavy views | todo | | |
+| 25 | M4 Data-heavy views | done | 33df150 | uPlot lazy chunk; SVG list sparklines; SSE stream; Table keyset+virtualize |
 | 26 | H3 App→app edges | done | e8112dc | plain env <KEY>_URL; scale-to-zero → public host wake; mutual refs = cycle |
 | 27 | E2 App previews | done | 70397be | parallel suffixed set; shared parent secrets; --with-db empty clone; L2 seam |
 | 28 | L2 DB branching for previews | todo | | |
@@ -52,7 +52,7 @@ Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`
 | 29b | M3 Streaming surfaces | done | 421b9d2,bc5b168 | xterm lazy chunk; per-response CSP style nonce; verified live in Chrome |
 | 30 | D2 Template upstream diff | done | fe43017 | pure three-way diff; conflict take-upstream/keep-local; canvas diff badges |
 | 31 | E3 Environments | todo | | |
-| 32 | L3 `drop dev` | todo | | |
+| 32 | L3 `drop dev` | done | c1e4ebf | dev-context (key names only); localhost tunnel rewrite; --check/--no-tunnel |
 | 33 | F2 AI intent layer | todo | | |
 | 34 | L4 Runtime config / flags | done | a0df77d | app_configs 0018; lazy config-read token; @drop/config etag SDK |
 | 35 | G3 Alerting / notifications | done | ea22630 | events 0017; dedup incidents; org webhooks (Slack adapter); /v1/me badge |
