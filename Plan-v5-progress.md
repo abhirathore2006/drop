@@ -68,3 +68,20 @@ Branch not pushed — user opens the PR.
 | 37 | B3 GitOps mode | done | 5720145 | pull-only poller; sha256 change-detect; token on row; dry-run-only review |
 | 38 | G4 Searchable log retention | done | 3b0e29c | tail→S3 NDJSON 0020; 7d org-override; grep-grade search; DBs excluded |
 | 39 | M5 Console quality bar | done | 5ec0335 | a11y (aria-sort/tabs/labels); WCAG AA token test; 109KB gz initial; Playwright e2e |
+
+## Live-deploy findings (post-completion, from deploying one of each type)
+
+**6 of 7 workload types deploy + run + serve end-to-end** on local k3s: site (serves),
+app (nginx, wakes from zero → 200), database (CNPG Running), bucket (S3 prefix), cache
+(Valkey Running), stack (site+app+db reconciled, web+api Running). Verified through the edge.
+
+**K1 managed-auth (GoTrue) — two real bugs the live deploy surfaced** (FakeEngine unit tests
+could not catch these; needs a targeted fix):
+1. The GoTrue Deployment sets `GOTRUE_DB_DATABASE_URL` but never creates the `auth` schema
+   → first migration fails `schema "auth" does not exist`. Fix: pre-create the schema
+   (init container running `CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION app`, or the
+   equivalent GoTrue namespace config) in `src/auth-resource/manifests.ts`.
+2. Even with the schema, `supabase/gotrue:v2.170.0` migrations fail against CNPG's
+   **Postgres 18** at `20240729123726_add_mfa_phone_config` (`type auth.factor_type does
+   not exist`) — an engine-image/PG-version incompatibility. Fix: pin a GoTrue/supabase-auth
+   image known-compatible with PG18, or pin the auth resource's DB to an older PG major.
