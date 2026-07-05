@@ -3,6 +3,14 @@
 Tracks implementation of `Plan-v5.md` on branch `feat/enhancement-v5`.
 Status: `todo` · `in-progress` · `done` (committed, tests green) · `deferred`.
 
+**✅ COMPLETE — all 44 slices done (59 commits).** Full `bun test` 1483 pass / 0 fail,
+root+console+packages typechecks clean, `node build.mjs` green, `check:bundle` 109 KB gz
+initial (≤250 budget), `check:openapi` gate green. Final live validation: Playwright
+e2e **7/7 pass** against k3s (login/theme/palette, drag-drop publish→edge-serve,
+deploy→logs→rollback, token reveal-once/revoke, template instantiate); new backend
+surfaces (openapi/events/webhook/token/gitops-link/log-search/config) smoke-verified live.
+Branch not pushed — user opens the PR.
+
 ## Orchestration conventions
 
 - Implementation agents work in this tree; they do **not** commit — the orchestrator
