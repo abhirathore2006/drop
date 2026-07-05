@@ -12,3 +12,8 @@ infra/nginx/.verify.conf
 infra/ca/*
 !infra/ca/.gitkeep
 !infra/ca/README.md
+
+# Playwright e2e output (M5)
+test-results/
+console/test-results/
+console/playwright-report/
